@@ -1,0 +1,17 @@
+[package]
+name = "solidcraft-cam"
+description = "SolidCraft CAM engine: toolpaths, their moves, units and tolerances (no documents, no UI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+solidcore-record = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

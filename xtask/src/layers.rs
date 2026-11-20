@@ -59,6 +59,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("render", Class::Layer(1)),
     // multibody dynamics (rigid bodies, joints, forces, time integration; geom only)
     ("dynamics", Class::Layer(1)),
+    // the CAM engine: toolpaths and their moves, later strategies, simulation, G-code read/write (geom only)
+    ("cam", Class::Layer(1)),
     ("doc", Class::Layer(2)),
     ("io", Class::Layer(3)),
     ("engine", Class::Layer(4)),

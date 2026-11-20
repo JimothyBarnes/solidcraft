@@ -4305,6 +4305,16 @@ name = "solidcraft-3dx-client"
 version = "0.40.0"
 
 [[package]]
+name = "solidcraft-cam"
+version = "0.40.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "solidcore-record",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "solidcraft-cli"
 version = "0.40.0"
 dependencies = [
