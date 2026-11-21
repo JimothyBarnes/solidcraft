@@ -115,6 +115,26 @@ pub struct CamSetupDeleteParams {
     pub id: String,
 }
 
+/// Measure a setup on the model: its stock box, work coordinate system and safe heights.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupMeasureParams {
+    pub id: String,
+}
+
+/// A setup placed on the model, measured on the bodies' exact boxes (never a display mesh).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupMeasured {
+    pub id: String,
+    /// The bodies measured: the setup's model bodies, or every visible body when it lists none.
+    pub bodies: Vec<String>,
+    /// Their box in model coordinates: `{min: [x, y, z], max: [x, y, z]}`, mm.
+    pub model_box: Value,
+    /// `{origin, x_axis, y_axis, z_axis}` in model coordinates, then `model` and `stock` boxes and
+    /// `clearance_z`, `retract_z` in the WCS, mm.
+    pub placement: Value,
+}
+
 /// What a setup command left.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CamSetupWritten {
@@ -134,7 +154,9 @@ pub struct CamOpManualParams {
     /// One of the design's tool numbers.
     pub tool: u32,
     /// `{start: [x, y, z], moves: [{kind: rapid | linear | arc | dwell | tool_change | spindle |
-    /// spindle_stop | coolant, …}]}`, points as `[x, y, z]` in mm, feeds in mm/min.
+    /// spindle_stop | coolant | drill, …}]}`, points as `[x, y, z]` in mm, feeds in mm/min. A
+    /// `drill` is one hole: `{to, r, retract, cycle: {type: drill, dwell} | {type: peck | chip_break,
+    /// peck}, feed}`.
     pub toolpath: Value,
 }
 
@@ -187,4 +209,85 @@ pub struct CamPosted {
     /// The largest position difference read-back accepted, mm.
     pub tolerance_mm: f64,
     pub notes: Vec<String>,
+}
+
+/// Write the design's tools to a tool library file.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamLibraryExportParams {
+    /// A `.json` file.
+    pub path: String,
+    /// The library's name; default the design's.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Replace an existing file. Default false: an existing file is refused.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// What an export wrote.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamLibraryExported {
+    pub path: String,
+    pub tools: usize,
+    pub bytes: usize,
+}
+
+/// Read a tool library file and compare it with the design's tools.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamLibraryReadParams {
+    /// A tool library `.json` file.
+    pub path: String,
+}
+
+/// How a library tool compares with the design's tool of the same number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CamLibraryToolStatus {
+    /// The design has no tool of that number.
+    New,
+    /// The design's copy is the same.
+    Same,
+    /// The design's copy differs: importing with `replace` updates it.
+    Differs,
+}
+
+/// One tool of a library.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamLibraryTool {
+    pub number: u32,
+    pub name: String,
+    pub kind: Value,
+    /// mm.
+    pub diameter: f64,
+    pub status: CamLibraryToolStatus,
+}
+
+/// A library's tools.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamLibraryTools {
+    pub name: String,
+    pub tools: Vec<CamLibraryTool>,
+}
+
+/// Copy tools from a library file into the design.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamLibraryImportParams {
+    pub path: String,
+    /// The tool numbers to copy; default all.
+    #[serde(default)]
+    pub numbers: Option<Vec<u32>>,
+    /// Update design tools that differ from the library's. Default false: a difference is refused.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// What an import did, by tool number.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamLibraryImported {
+    pub added: Vec<u32>,
+    pub updated: Vec<u32>,
+    pub same: Vec<u32>,
 }

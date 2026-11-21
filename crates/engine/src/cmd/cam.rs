@@ -6,8 +6,8 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, BoxAnchor, BoxOffsets, BoxSide, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind,
-    Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
+    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation,
+    OperationKind, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
 
@@ -15,7 +15,8 @@ use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
     CamData, CamDataParams, CamOpDeleteParams, CamOpManualParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams,
-    CamSetupEditParams, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
+    CamSetupEditParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams,
+    CamToolWritten,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -42,6 +43,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup.delete", "Delete Setup", crate::checked!("cam.setup.delete", setup_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamSetupDeleteParams>::new()).output(output_schema_for::<CamSetupWritten>)
         .params("id → removes the setup and its operations; refused while a later setup takes its stock from it"),
+    CommandSpec::new("cam.setup.measure", "Measure Setup", crate::checked!("cam.setup.measure", setup_measure)).icon("inspect").noundo().read_only().doc_only()
+        .contract(&TypedContract::<CamSetupMeasureParams>::new()).output(output_schema_for::<CamSetupMeasured>)
+        .params("id: the setup → bodies measured, model_box in model coordinates, placement: WCS origin and axes in model coordinates, model and stock boxes and clearance_z, retract_z in the WCS (mm), from the bodies' exact boxes"),
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
@@ -85,7 +89,7 @@ pub(crate) fn load(s: &Session, cmd: &str) -> Result<ManufactureData> {
 }
 
 /// Checks and writes the Manufacture data as one edit.
-fn store(s: &mut Session, cmd: &str, data: &ManufactureData) -> Result<()> {
+pub(super) fn store(s: &mut Session, cmd: &str, data: &ManufactureData) -> Result<()> {
     let json = data.to_json().map_err(|e| bad(cmd, e.to_string()))?;
     storage::put(s, &owner(), DATA, Some(json.as_bytes()))
 }
@@ -266,6 +270,53 @@ fn setup_delete(s: &mut Session, p: &Value) -> Result<Value> {
     }
     store(s, CMD, &d)?;
     reply(CMD, CamSetupWritten { id: p.id, setups: d.setups.len() })
+}
+
+/// The exact box, in model coordinates, of the bodies a setup machines: its model bodies by name,
+/// or every visible body when it lists none. Returns the box and the bodies' names.
+pub(super) fn model_box(s: &Session, cmd: &str, setup: &Setup) -> Result<(Bounds, Vec<String>)> {
+    let st = s.world_state()?;
+    let bodies: Vec<&solidcraft_doc::ModelBody> = if setup.model_bodies.is_empty() {
+        st.bodies.iter().filter(|b| s.body_visible(&b.name)).collect()
+    } else {
+        let mut named = Vec::with_capacity(setup.model_bodies.len());
+        for name in &setup.model_bodies {
+            let body = st
+                .bodies
+                .iter()
+                .find(|b| &b.name == name)
+                .ok_or_else(|| bad(cmd, format!("the setup's model body '{name}' is not in the design")))?;
+            named.push(body);
+        }
+        named
+    };
+    let mut boxes = bodies.iter().map(|b| b.body.exact_bounds().map_err(|e| bad(cmd, format!("measuring body '{}': {e}", b.name))));
+    let first = boxes
+        .next()
+        .ok_or_else(|| bad(cmd, format!("setup '{}' has no bodies to machine: show one, or list them in its model_bodies", setup.id)))??;
+    let mut b = first;
+    for next in boxes {
+        b = b.union(&next?);
+    }
+    Ok((Bounds { min: b.min, max: b.max }, bodies.iter().map(|b| b.name.clone()).collect()))
+}
+
+fn setup_measure(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.measure";
+    let p: CamSetupMeasureParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let setup = d.setups.iter().find(|x| x.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.id)))?;
+    let (model, bodies) = model_box(s, CMD, setup)?;
+    let placement = setup.place(model).map_err(|e| bad(CMD, e.to_string()))?;
+    reply(
+        CMD,
+        CamSetupMeasured {
+            id: p.id,
+            bodies,
+            model_box: serde_json::to_value(model).map_err(|e| bad(CMD, e.to_string()))?,
+            placement: serde_json::to_value(placement).map_err(|e| bad(CMD, e.to_string()))?,
+        },
+    )
 }
 
 fn op_manual(s: &mut Session, p: &Value) -> Result<Value> {

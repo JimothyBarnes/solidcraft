@@ -4,6 +4,9 @@
 //! compared with what was meant before it is returned, so a post can never hand out text that
 //! does something else.
 //!
+//! Holes go out as canned cycles where the post's [`Cycles`] says the control has them and every
+//! control we know reads them alike, and as plain moves otherwise (decision 0008).
+//!
 //! The output is never "safe to run": every program starts by saying it is unverified and must
 //! be proven on the machine first (air cut, single block).
 
@@ -12,6 +15,7 @@ use std::f64::consts::TAU;
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
+use crate::cycle::{self, CycleMotion, DrillCycle, G98Rule};
 use crate::gcode_reader::{ReadBack, ReadSettings, read};
 use crate::toolpath::{ArcDirection, ArcGeom, Coolant, Move, Plane, SpindleDirection, Toolpath};
 use crate::units::LengthUnit;
@@ -91,6 +95,27 @@ pub struct Arcs {
     pub linearize_tolerance: f64,
 }
 
+/// Which drilling cycles the control takes as canned cycles, and how it runs them (decision
+/// 0008). A hole whose cycle is off here, or that a canned cycle can't say exactly, is written as
+/// plain moves with `motion`'s distances.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cycles {
+    /// G81: a hole with no dwell.
+    pub drill: bool,
+    /// G82: a hole with a dwell at the bottom (needs the post's `dwell`).
+    pub dwell: bool,
+    /// G83: pecks with a full retract.
+    pub peck: bool,
+    /// G73: pecks with a chip-breaking back-off.
+    pub chip_break: bool,
+    /// What the control's G98 returns to.
+    pub g98: G98Rule,
+    /// The control's own cycle distances, used to draw and simulate holes and to write them as
+    /// plain moves.
+    pub motion: CycleMotion,
+}
+
 /// The fixed lines of a program. Each may use `{placeholders}`; see [`Post::from_json`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,6 +148,9 @@ pub struct Post {
     /// control that reads a P without a fraction as milliseconds still reads seconds); otherwise a
     /// dwell is refused.
     pub dwell: bool,
+    /// Drilling cycles. A post file without them writes every hole as plain moves.
+    #[serde(default)]
+    pub cycles: Cycles,
     /// Words put before the first move after a tool change (e.g. `G43 H{tool}`).
     pub tool_length_offset: Option<String>,
     pub sequences: Sequences,
@@ -149,7 +177,8 @@ impl Default for ProgramContext {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Posted {
     pub text: String,
-    /// The moves the text was written to make, after arcs were split or turned into lines.
+    /// The moves the text was written to make, after arcs were split or turned into lines and
+    /// holes the post can't write as canned cycles into plain moves.
     pub written: Toolpath,
     /// The program read back with our reader; it matched `written` within [`Posted::tolerance`].
     pub read_back: ReadBack,
@@ -213,6 +242,12 @@ impl Post {
         {
             return bad("program_number_digits must be 1 to 8".into());
         }
+        if let Err(e) = self.cycles.motion.check() {
+            return bad(format!("cycles.motion: {e}"));
+        }
+        if self.cycles.dwell && !self.dwell {
+            return bad("cycles.dwell needs dwell: G82's P is written as a dwell's is".into());
+        }
         let s = &self.sequences;
         let sample =
             Fill { program_number: Some("1".into()), program_name: "TEST".into(), units_code: "G21", work_offset: "G54".into(), tool: Some(1) };
@@ -255,7 +290,7 @@ impl Post {
         w.program(toolpath)?;
         let text = w.lines.join("\n") + "\n";
         let written = Toolpath { start: toolpath.start, moves: std::mem::take(&mut w.written) };
-        let read_back = read(&text, &ReadSettings { start: toolpath.start, block_delete: false })?;
+        let read_back = read(&text, &ReadSettings { start: toolpath.start, block_delete: false, g98: self.cycles.g98 })?;
         let tolerance = 0.5 * ctx.units.to_mm(10f64.powi(-i32::from(w.length_decimals)));
         compare(&written, &read_back.toolpath, tolerance, &w)?;
         Ok(Posted { text, written, read_back, tolerance, notes: std::mem::take(&mut w.notes) })
@@ -317,6 +352,18 @@ fn format_decimal(value: f64, decimals: u8, strip: bool) -> String {
     s
 }
 
+/// A canned cycle being written: the words its holes share. A hole with the same words is one more
+/// `X… Y…` line of it.
+#[derive(Clone, Debug, PartialEq)]
+struct CycleKey {
+    /// The return mode and the cycle code (`G99 G81`).
+    head: [String; 2],
+    /// Z, R, Q or P, and F.
+    tail: Vec<String>,
+    /// For G98, the height every hole returns to.
+    height: Option<String>,
+}
+
 /// The program as it is being written.
 struct Writer<'a> {
     post: &'a Post,
@@ -340,6 +387,8 @@ struct Writer<'a> {
     /// wherever it was) nor after a tool change. Until it is, the next move must be a rapid,
     /// and it writes all three axes.
     position_known: bool,
+    /// The canned cycle in force, if any.
+    cycle: Option<CycleKey>,
     written: Vec<Move>,
     notes: Vec<String>,
 }
@@ -373,6 +422,7 @@ impl<'a> Writer<'a> {
             spindle_on: false,
             pending_offset: None,
             position_known: false,
+            cycle: None,
             written: Vec::new(),
             notes: Vec::new(),
         })
@@ -429,6 +479,7 @@ impl<'a> Writer<'a> {
         for (index, m) in toolpath.moves.iter().enumerate() {
             self.one(index, m)?;
         }
+        self.end_cycle();
         self.sequence(&self.post.sequences.program_end.clone(), None)?;
         Ok(())
     }
@@ -477,6 +528,9 @@ impl<'a> Writer<'a> {
     fn one(&mut self, index: usize, m: &Move) -> Result<()> {
         let bad = |reason: String| Error::BadMove { index, reason };
         let first_after_change = !self.position_known;
+        if !matches!(m, Move::Drill { .. }) {
+            self.end_cycle();
+        }
         match *m {
             Move::Rapid { to } => {
                 let mut words: Vec<String> = Vec::new();
@@ -501,11 +555,12 @@ impl<'a> Writer<'a> {
                 self.at = to;
                 self.position_known = true;
             }
-            _ if first_after_change && matches!(m, Move::Linear { .. } | Move::Arc { .. }) => {
+            _ if first_after_change && matches!(m, Move::Linear { .. } | Move::Arc { .. } | Move::Drill { .. }) => {
                 return Err(bad("the first move of a program or after a tool change must be a rapid".into()));
             }
             Move::Linear { to, feed } => self.linear(index, to, feed),
             Move::Arc { to, center, plane, direction, feed } => self.arc(index, to, center, plane, direction, feed)?,
+            Move::Drill { to, r, retract, cycle, feed } => self.drill(index, to, r, retract, cycle, feed)?,
             Move::Dwell { seconds } => {
                 if !self.post.dwell {
                     return Err(bad(format!("the {} post has no verified dwell format yet", self.post.id)));
@@ -551,6 +606,96 @@ impl<'a> Writer<'a> {
                 self.written.push(*m);
             }
         }
+        Ok(())
+    }
+
+    /// Ends the canned cycle in force, if any.
+    fn end_cycle(&mut self) {
+        if self.cycle.take().is_some() {
+            self.emit("G80".into());
+            self.motion = None;
+        }
+    }
+
+    /// The canned cycle words for a hole from `from`, or why it can't be one. G98 is used only when
+    /// the hole returns to the height it started at: every control we know reads that alike.
+    fn cycle_key(&self, from: Vec3, to: Vec3, r: f64, retract: f64, cycle: DrillCycle, feed: f64) -> std::result::Result<CycleKey, String> {
+        let c = &self.post.cycles;
+        let (code, on) = match cycle {
+            DrillCycle::Drill { dwell } if dwell > 0.0 => ("G82", c.dwell),
+            DrillCycle::Drill { .. } => ("G81", c.drill),
+            DrillCycle::Peck { .. } => ("G83", c.peck),
+            DrillCycle::ChipBreak { .. } => ("G73", c.chip_break),
+        };
+        if !on {
+            return Err(format!("the {} post does not write {code}", self.post.id));
+        }
+        let (z_text, z_back) = self.length(to.z);
+        let (r_text, r_back) = self.length(r);
+        let (retract_text, _) = self.length(retract);
+        if !(r_back > z_back) {
+            return Err("its R plane and bottom round to the same height".into());
+        }
+        let (mode, height) = if retract_text == r_text {
+            ("G99", None)
+        } else if self.length(from.z).0 == retract_text {
+            ("G98", Some(retract_text))
+        } else {
+            return Err("it returns to a height that is neither its R plane nor where it started".into());
+        };
+        let mut tail = vec![format!("Z{z_text}"), format!("R{r_text}")];
+        match cycle {
+            DrillCycle::Peck { peck } | DrillCycle::ChipBreak { peck } => {
+                let (q_text, q_back) = self.length(peck);
+                if !(q_back > 0.0) {
+                    return Err("its peck rounds to 0".into());
+                }
+                tail.push(format!("Q{q_text}"));
+            }
+            // Never stripped, as a dwell's P (see `Post::dwell`).
+            DrillCycle::Drill { dwell } if dwell > 0.0 => tail.push(format!("P{}", format_decimal(dwell, self.post.numbers.dwell, false))),
+            DrillCycle::Drill { .. } => {}
+        }
+        let feed_text = format_decimal(self.ctx.units.from_mm(feed), self.feed_decimals, self.post.numbers.strip_trailing_zeros);
+        tail.push(format!("F{feed_text}"));
+        Ok(CycleKey { head: [mode.to_string(), code.to_string()], tail, height })
+    }
+
+    /// One hole: one line of a canned cycle (starting it when its words differ from the one in
+    /// force), or plain moves.
+    fn drill(&mut self, index: usize, to: Vec3, r: f64, retract: f64, cycle: DrillCycle, feed: f64) -> Result<()> {
+        let from = self.at;
+        let key = match self.cycle_key(from, to, r, retract, cycle, feed) {
+            Ok(key) => key,
+            Err(why) => {
+                self.end_cycle();
+                self.notes.push(format!("move {index}: hole written as plain moves because {why}"));
+                let mut moves = Vec::new();
+                cycle::expand(from, to, r, retract, cycle, feed, &self.post.cycles.motion, &mut moves);
+                for m in &moves {
+                    self.one(index, m)?;
+                }
+                return Ok(());
+            }
+        };
+        // X and Y on every line, so a hole right above the last still drills.
+        let (x_text, x_back) = self.length(to.x);
+        let (y_text, y_back) = self.length(to.y);
+        let xy = [format!("X{x_text}"), format!("Y{y_text}")];
+        if self.cycle.as_ref() == Some(&key) {
+            self.emit(xy.join(" "));
+        } else {
+            self.end_cycle();
+            let line: Vec<String> = key.head.iter().cloned().chain(xy).chain(key.tail.iter().cloned()).collect();
+            self.emit(line.join(" "));
+            self.feed = key.tail.last().and_then(|f| f.strip_prefix('F')).map(str::to_string);
+            self.motion = None;
+            self.cycle = Some(key);
+        }
+        // The control's Z after a hole is its retract height, not the Z word.
+        self.out = [Some((x_text, x_back)), Some((y_text, y_back)), None];
+        self.written.push(Move::Drill { to, r, retract, cycle, feed });
+        self.at = Vec3 { x: to.x, y: to.y, z: retract };
         Ok(())
     }
 
@@ -730,6 +875,15 @@ fn compare(written: &Toolpath, read: &Toolpath, tol: f64, w: &Writer<'_>) -> Res
                     && lengths.is_some_and(|(x, y)| (x.length() - y.length()).abs() <= 8.0 * tol)
             }
             (Move::Dwell { seconds: s }, Move::Dwell { seconds: t }) => (s - t).abs() <= dwell_tol,
+            (Move::Drill { to: p, r: r1, retract: t1, cycle: c1, feed: f }, Move::Drill { to: q, r: r2, retract: t2, cycle: c2, feed: g }) => {
+                let same_cycle = match (c1, c2) {
+                    (DrillCycle::Drill { dwell: a }, DrillCycle::Drill { dwell: b }) => (a - b).abs() <= dwell_tol,
+                    (DrillCycle::Peck { peck: a }, DrillCycle::Peck { peck: b })
+                    | (DrillCycle::ChipBreak { peck: a }, DrillCycle::ChipBreak { peck: b }) => (a - b).abs() <= tol,
+                    _ => false,
+                };
+                near(p, q, tol) && (r1 - r2).abs() <= tol && (t1 - t2).abs() <= tol && (f - g).abs() <= feed_tol && same_cycle
+            }
             (Move::Spindle { rpm: r, direction: d }, Move::Spindle { rpm: s, direction: e }) => d == e && (r - s).abs() <= speed_tol,
             (x, y) => x == y,
         };

@@ -25,6 +25,7 @@ mod board_layers;
 mod bom;
 pub(crate) mod browser;
 mod cam;
+mod cam_library;
 mod cell_grid;
 pub(crate) mod clearance;
 mod clipboard;
@@ -502,6 +503,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(plugin::COMMANDS.iter());
     v.extend(plugin_storage::COMMANDS.iter());
     v.extend(cam::COMMANDS.iter());
+    v.extend(cam_library::COMMANDS.iter());
     v.extend(construct::COMMANDS.iter());
     v.extend(sheet::COMMANDS.iter());
     v.extend(plastic::COMMANDS.iter());

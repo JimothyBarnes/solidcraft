@@ -104,6 +104,83 @@ fn a_setup_posts_on_every_built_in_post_and_reads_back() {
 }
 
 #[test]
+fn a_hand_made_hole_posts_as_a_canned_cycle_where_the_post_has_one() {
+    let mut s = Session::default();
+    run(&mut s, "cam.tool.create", json!({"tool": tool(1)}));
+    run(&mut s, "cam.setup.create", json!({}));
+    let holes = json!({"start": p(0.0, 0.0, 50.0), "moves": [
+        {"kind": "tool_change", "tool": 1},
+        {"kind": "rapid", "to": p(5.0, 5.0, 10.0)},
+        {"kind": "drill", "to": p(5.0, 5.0, -8.0), "r": 2.0, "retract": 10.0, "cycle": {"type": "chip_break", "peck": 3.0}, "feed": 120.0},
+        {"kind": "drill", "to": p(15.0, 5.0, -8.0), "r": 2.0, "retract": 10.0, "cycle": {"type": "chip_break", "peck": 3.0}, "feed": 120.0},
+        {"kind": "rapid", "to": p(15.0, 5.0, 50.0)}
+    ]});
+    run(&mut s, "cam.op.manual", json!({"setup": "setup-1", "tool": 1, "toolpath": holes}));
+    let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = haas["text"].as_str().unwrap();
+    assert!(text.contains("\nG98 G73 X5. Y5. Z-8. R2. Q3. F120.\nX15. Y5.\nG80\nG0 Z50.\n"), "{text}");
+    assert_eq!(haas["moves"], 5);
+    // RS274/NGC has no G73: the same holes as plain moves, said so in the notes.
+    let rs = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274"}));
+    assert!(!rs["text"].as_str().unwrap().contains("G73"));
+    assert!(rs["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("plain moves")), "{rs}");
+    // A hole that would start below its R plane is refused when it is added, not when it is posted.
+    let low = json!({"start": p(0.0, 0.0, 1.0), "moves": [
+        {"kind": "drill", "to": p(0.0, 0.0, -5.0), "r": 2.0, "retract": 2.0, "cycle": {"type": "drill", "dwell": 0.0}, "feed": 100.0}
+    ]});
+    assert!(refused(&mut s, "cam.op.manual", json!({"setup": "setup-1", "tool": 1, "toolpath": low})).contains("R plane"));
+}
+
+/// `[x, y, z]` from JSON, each within 1e-9 mm of `want`.
+fn near(v: &Value, want: [f64; 3]) -> bool {
+    v.as_array().is_some_and(|a| a.len() == 3 && a.iter().zip(want).all(|(x, w)| x.as_f64().is_some_and(|x| (x - w).abs() <= 1e-9)))
+}
+
+#[test]
+fn a_setup_measures_its_stock_and_wcs_on_the_models_exact_box() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 60, "width": 40, "height": 20, "corner": [0, 0, 0], "body_name": "Block"}));
+    run(&mut s, "cam.setup.create", json!({}));
+    let undo = s.undo.len();
+    let m = run(&mut s, "cam.setup.measure", json!({"id": "setup-1"}));
+    assert_eq!(m["bodies"], json!(["Block"]));
+    assert!(near(&m["model_box"]["min"], [0.0, 0.0, 0.0]) && near(&m["model_box"]["max"], [60.0, 40.0, 20.0]), "{m}");
+    // The vise defaults: stock 1 mm over on the sides and the top, so (-1, -1, 0) to (61, 41, 21),
+    // and the origin at its top centre (30, 20, 21). Heights: stock top (0) + 25 and + 5.
+    let placed = &m["placement"];
+    assert!(near(&placed["origin"], [30.0, 20.0, 21.0]), "{placed}");
+    assert!(near(&placed["stock"]["min"], [-31.0, -21.0, -21.0]) && near(&placed["stock"]["max"], [31.0, 21.0, 0.0]), "{placed}");
+    assert!(near(&placed["model"]["max"], [30.0, 20.0, -1.0]), "{placed}");
+    assert_eq!((placed["clearance_z"].as_f64(), placed["retract_z"].as_f64()), (Some(25.0), Some(5.0)));
+    assert_eq!(s.undo.len(), undo, "measuring changes nothing");
+    // A second body widens the box; a setup that lists one body measures only that one.
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 30, "corner": [100, 0, 0], "operation": "new", "body_name": "Post"}));
+    let both = run(&mut s, "cam.setup.measure", json!({"id": "setup-1"}));
+    assert!(near(&both["model_box"]["max"], [110.0, 40.0, 30.0]), "{both}");
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "model_bodies": ["Post"]}));
+    let post = run(&mut s, "cam.setup.measure", json!({"id": "setup-1"}));
+    assert_eq!(post["bodies"], json!(["Post"]));
+    assert!(near(&post["model_box"]["min"], [100.0, 0.0, 0.0]), "{post}");
+    // A body the design no longer has, a missing setup and a turned WCS are refused by name.
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "model_bodies": ["Gone"]}));
+    assert!(refused(&mut s, "cam.setup.measure", json!({"id": "setup-1"})).contains("'Gone' is not in the design"));
+    assert!(refused(&mut s, "cam.setup.measure", json!({"id": "setup-9"})).contains("no setup 'setup-9'"));
+    run(
+        &mut s,
+        "cam.setup.edit",
+        json!({"id": "setup-1", "model_bodies": [], "wcs": {"origin": {"kind": "stock_box", "anchor": {"x": "center", "y": "center", "z": "max"}}, "orientation": {"kind": "explicit", "z": [0, 1, 0], "x": [1, 0, 0]}}}),
+    );
+    assert!(refused(&mut s, "cam.setup.measure", json!({"id": "setup-1"})).contains("not supported yet"));
+}
+
+#[test]
+fn a_setup_with_nothing_to_machine_says_so() {
+    let mut s = Session::default();
+    run(&mut s, "cam.setup.create", json!({}));
+    assert!(refused(&mut s, "cam.setup.measure", json!({"id": "setup-1"})).contains("no bodies to machine"));
+}
+
+#[test]
 fn every_change_is_one_undo_step() {
     let mut s = Session::default();
     run(&mut s, "cam.setup.create", json!({"name": "Op 1"}));

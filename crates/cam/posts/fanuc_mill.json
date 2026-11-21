@@ -2,7 +2,7 @@
   "format": 1,
   "id": "fanuc_mill",
   "name": "Fanuc-style mill (generic)",
-  "description": "Generic ISO/Fanuc-style 3-axis mill output: only codes RS274/NGC also defines, plus % tape marks, an O program number and line numbers. Tool changes retract Z to machine home with G91 G28 Z0. Dwell is off until its units are confirmed from a public Fanuc-style source. Not checked on a real Fanuc control: prove out every program on the machine.",
+  "description": "Generic ISO/Fanuc-style 3-axis mill output: only codes RS274/NGC also defines, plus % tape marks, an O program number and line numbers. Tool changes retract Z to machine home with G91 G28 Z0. Dwell is off until its units are confirmed from a public Fanuc-style source. Not checked on a real Fanuc control: prove out every program on the machine. Holes use G81 and G83 as NIST defines them, and every hole returns to its R plane or to where it started, so G98 means the same either way. G82 and G73 are off until a public Fanuc-style source confirms them: those holes are written as plain moves.",
   "machine_kind": "mill",
   "numbers": { "length_mm": 3, "length_inch": 4, "feed_mm": 1, "feed_inch": 2, "speed": 0, "dwell": 3, "strip_trailing_zeros": true },
   "line_numbers": { "start": 10, "step": 10 },
@@ -11,6 +11,7 @@
   "arcs": { "planes": ["xy", "zx", "yz"], "helical": true, "max_sweep_degrees": 180, "min_radius": 0.01, "linearize_tolerance": 0.001 },
   "program_number_digits": 4,
   "dwell": false,
+  "cycles": { "drill": true, "dwell": false, "peck": true, "chip_break": false, "g98": "block_start", "motion": { "peck_clearance": 0.5, "chip_break_back_off": 0.5, "peck_retract": "clear_z", "above_r": 0.0 } },
   "tool_length_offset": "G43 H{tool}",
   "sequences": {
     "program_start": ["%", "O{program_number} ({program_name})"],
