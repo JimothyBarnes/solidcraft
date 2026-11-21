@@ -102,7 +102,7 @@ fn a_hand_made_toolpath_reads_back_within_a_micron_from_both_posts() {
     ];
     tp.moves.splice(6..6, extra);
     tp.validate().unwrap();
-    for id in ["rs274", "fanuc_mill"] {
+    for id in ["rs274", "fanuc_mill", "haas_mill"] {
         let posted = Post::builtin(id).unwrap().write(&tp, &ctx()).unwrap();
         assert_eq!(posted.written.moves.len(), posted.read_back.toolpath.moves.len(), "{id}");
         let diff = max_difference(&posted.written, &posted.read_back.toolpath);
@@ -227,7 +227,7 @@ fn unsafe_or_unwritable_toolpaths_are_refused() {
     assert!(post.write(&opens_with_a_cut, &ctx()).unwrap_err().to_string().contains("first move of a program"));
     let dwell = Toolpath { start: p(0.0, 0.0, 0.0), moves: vec![Move::Dwell { seconds: 1.0 }] };
     assert!(post.write(&dwell, &ctx()).unwrap_err().to_string().contains("dwell"));
-    assert!(Post::builtin("rs274").unwrap().write(&dwell, &ctx()).unwrap().text.contains("G4 P1."));
+    assert!(Post::builtin("rs274").unwrap().write(&dwell, &ctx()).unwrap().text.contains("G4 P1.000\n"));
     assert!(post.write(&bracket(), &ProgramContext { program_number: 12345, ..ctx() }).is_err());
     assert!(post.write(&bracket(), &ProgramContext { work_offset: 7, ..ctx() }).is_err());
 }
@@ -257,4 +257,62 @@ fn bad_post_files_are_refused_when_read() {
     unknown.as_object_mut().unwrap().insert("script".into(), json!("rm -rf"));
     assert!(Post::from_json(&unknown.to_string()).is_err());
     assert!(Post::from_json("not json").is_err());
+}
+
+#[test]
+fn the_haas_post_writes_this_program_exactly() {
+    // Derived by hand from haas_mill.json and research/gcode-haas.md: five-digit O number, no line
+    // numbers, G28 G91 Z0. before the tool change and at the end, G90 back after each.
+    let expected = "\
+%
+O00001 (BRACKET OP1)
+(UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)
+(PROVE OUT FIRST: AIR CUT, SINGLE BLOCK)
+G17 G40 G49 G80 G90 G94 G21
+G54
+G28 G91 Z0.
+G90
+T1 M6
+S1200 M3
+M8
+G43 H1 G0 X10. Y0. Z5.
+G1 Z-1. F200.
+G17
+G3 X0. Y10. I-10. J0. F400.
+G0 Z5.
+M5
+M9
+G28 G91 Z0.
+G90
+M30
+%
+";
+    let posted = Post::builtin("haas_mill").unwrap().write(&bracket(), &ctx()).unwrap();
+    assert_eq!(posted.text, expected);
+}
+
+#[test]
+fn haas_output_keeps_one_m_code_per_line_and_explicit_dwell_seconds() {
+    let post = Post::builtin("haas_mill").unwrap();
+    let mut tp = bracket();
+    tp.moves.insert(5, Move::Dwell { seconds: 0.5 });
+    tp.moves.insert(5, Move::Dwell { seconds: 2.0 });
+    let posted = post.write(&tp, &ctx()).unwrap();
+    // A Haas G04 P without a fraction is milliseconds: every dwell carries its decimals.
+    assert!(posted.text.contains("\nG4 P2.000\n") && posted.text.contains("\nG4 P0.500\n"), "{}", posted.text);
+    for line in posted.text.lines() {
+        let m_words = line.split_whitespace().filter(|w| w.starts_with('M')).count();
+        assert!(m_words <= 1, "two M codes on one line: {line}");
+    }
+    // Inch: 4 places, G20 to check Setting 9.
+    let inch = post.write(&bracket(), &ProgramContext { units: LengthUnit::Inch, ..ctx() }).unwrap();
+    assert!(inch.text.contains("G20") && inch.text.contains("X0.3937 Y0. Z0.1969"));
+}
+
+#[test]
+fn a_post_that_writes_dwells_must_give_them_decimals() {
+    let good: serde_json::Value = serde_json::from_str(BUILTIN_POSTS.iter().find(|(id, _)| *id == "haas_mill").unwrap().1).unwrap();
+    let mut v = good.clone();
+    *v.pointer_mut("/numbers/dwell").unwrap() = serde_json::json!(0);
+    assert!(Post::from_json(&v.to_string()).unwrap_err().to_string().contains("milliseconds"));
 }

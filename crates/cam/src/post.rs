@@ -20,8 +20,11 @@ use crate::{Error, Result};
 /// The post file format this build reads.
 pub const POST_FORMAT: u32 = 1;
 /// The posts built into the app, by id.
-pub const BUILTIN_POSTS: &[(&str, &str)] =
-    &[("fanuc_mill", include_str!("../posts/fanuc_mill.json")), ("rs274", include_str!("../posts/rs274.json"))];
+pub const BUILTIN_POSTS: &[(&str, &str)] = &[
+    ("fanuc_mill", include_str!("../posts/fanuc_mill.json")),
+    ("haas_mill", include_str!("../posts/haas_mill.json")),
+    ("rs274", include_str!("../posts/rs274.json")),
+];
 /// The most short lines one arc may become when it cannot be written as an arc.
 const MAX_ARC_SEGMENTS: usize = 10_000;
 /// The safety text every program opens with (our own wording; each line fits 48 characters).
@@ -116,7 +119,9 @@ pub struct Post {
     pub arcs: Arcs,
     /// Digits of the `{program_number}`, zero-padded; `None` when the post has no program number.
     pub program_number_digits: Option<u8>,
-    /// Whether dwells are written (`G4 P<seconds>`); otherwise a dwell is refused.
+    /// Whether dwells are written (`G4 P<seconds>`, always with all `numbers.dwell` decimals, so a
+    /// control that reads a P without a fraction as milliseconds still reads seconds); otherwise a
+    /// dwell is refused.
     pub dwell: bool,
     /// Words put before the first move after a tool change (e.g. `G43 H{tool}`).
     pub tool_length_offset: Option<String>,
@@ -199,6 +204,9 @@ impl Post {
         if !(1.0..=360.0).contains(&a.max_sweep_degrees) || !(0.0..=1000.0).contains(&a.min_radius) || !(1e-4..=1.0).contains(&a.linearize_tolerance)
         {
             return bad("arcs: max_sweep_degrees 1-360, min_radius 0-1000 mm, linearize_tolerance 0.0001-1 mm".into());
+        }
+        if self.dwell && n.dwell == 0 {
+            return bad("a post that writes dwells needs numbers.dwell of 1 to 3 (a P without a fraction is milliseconds on some controls)".into());
         }
         if let Some(d) = self.program_number_digits
             && !(1..=8).contains(&d)
@@ -502,7 +510,8 @@ impl<'a> Writer<'a> {
                 if !self.post.dwell {
                     return Err(bad(format!("the {} post has no verified dwell format yet", self.post.id)));
                 }
-                self.emit(format!("G4 P{}", format_decimal(seconds, self.post.numbers.dwell, self.post.numbers.strip_trailing_zeros)));
+                // Never stripped: `P1.` could read as milliseconds on some controls; `P1.000` cannot.
+                self.emit(format!("G4 P{}", format_decimal(seconds, self.post.numbers.dwell, false)));
                 self.written.push(*m);
             }
             Move::ToolChange { tool } => {

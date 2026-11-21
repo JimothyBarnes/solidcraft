@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "id": "haas_mill",
+  "name": "Haas-style mill (VF series)",
+  "description": "Haas 3-axis vertical mill, from Haas's mill Programming Workbook (2005): % tape marks, O and a five-digit program number, G28 G91 Z0. to machine home before tool changes and at the end, G43 H on the first move after each tool change (G28 cancels it), one M code per line, a decimal point on every length and feed, dwells in seconds with their decimals (a Haas G04 P without a fraction is milliseconds). G20/G21 only check units on Haas: Setting 9 must match the program or the control alarms. Arcs are limited to half a turn per block until full circles are proven. Not yet checked on the owner's machine, whose control is newer than the workbook: prove out every program (air cut, single block).",
+  "machine_kind": "mill",
+  "numbers": { "length_mm": 3, "length_inch": 4, "feed_mm": 1, "feed_inch": 2, "speed": 0, "dwell": 3, "strip_trailing_zeros": true },
+  "line_numbers": null,
+  "comments": { "upper_case": true, "max_length": 60 },
+  "modal": { "repeat_motion": false, "repeat_feed": false },
+  "arcs": { "planes": ["xy", "zx", "yz"], "helical": true, "max_sweep_degrees": 180, "min_radius": 0.01, "linearize_tolerance": 0.001 },
+  "program_number_digits": 5,
+  "dwell": true,
+  "tool_length_offset": "G43 H{tool}",
+  "sequences": {
+    "program_start": ["%", "O{program_number} ({program_name})"],
+    "safe_start": ["G17 G40 G49 G80 G90 G94 {units_code}"],
+    "tool_change_before": ["G28 G91 Z0.", "G90"],
+    "tool_change_after": [],
+    "operation_start": ["{work_offset}"],
+    "program_end": ["G28 G91 Z0.", "G90", "M30", "%"]
+  }
+}
