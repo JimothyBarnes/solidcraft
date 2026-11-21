@@ -59,6 +59,7 @@ pub mod appearance;
 pub mod board_import;
 pub mod bom;
 pub mod browser;
+pub mod cam;
 pub mod canvas;
 pub mod cell_grid;
 pub mod clearance;

@@ -222,7 +222,12 @@ pub fn list(s: &Session) -> Vec<StoredPlugin> {
             let meta = plugin_data::meta(data, &id);
             let manifest = installed(s, &id);
             let writes = manifest.as_ref().and_then(|m| m.runtime.as_ref()).and_then(|runtime| runtime.data_format);
+            // Manufacture's data is written by this build itself (the CAM work's decision 0006):
+            // ready when it can read the data's format, older when the data is newer.
+            let builtin = id == solidcraft_cam::MANUFACTURE_DATA_OWNER;
             let status = match (&manifest, writes) {
+                (None, _) if builtin && meta.format <= solidcraft_cam::MANUFACTURE_FORMAT => DataStatus::Ready,
+                (None, _) if builtin => DataStatus::Older,
                 (None, _) => DataStatus::Missing,
                 (Some(_), _) if s.disabled_plugins.contains(&id) => DataStatus::Disabled,
                 (Some(_), None) => DataStatus::Older,

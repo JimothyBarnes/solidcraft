@@ -1,6 +1,6 @@
 //! What the Manufacture workspace saves with a design (decision 0006): the design's copies of
 //! tools, and its setups (stock, work coordinate system, work offset, safe heights, the bodies to
-//! machine and to avoid) with their operations. Saved as `plugins/manufacture/data.json`.
+//! machine and to avoid) with their operations. Saved as `plugins/solidcraft-cam/data.json`.
 //!
 //! Toolpaths are never saved here; they are derived from the model and these parameters. Model
 //! geometry is referred to by the design's own stable names, kept here as opaque strings: this
@@ -20,8 +20,10 @@ use crate::{Error, Result};
 
 /// The format of `data.json` this build reads and writes (our own number, decision 0006).
 pub const MANUFACTURE_FORMAT: u32 = 1;
-/// The plugin data folder Manufacture keeps its files in.
-pub const MANUFACTURE_DATA_OWNER: &str = "manufacture";
+/// The plugin data folder Manufacture keeps its files in (`plugins/solidcraft-cam/`). Our own id, not
+/// upstream's `manufacture` (its RFC 0015 example of a third-party plugin, which a future official
+/// plugin might take): two writers of one folder in different formats would corrupt each other.
+pub const MANUFACTURE_DATA_OWNER: &str = "solidcraft-cam";
 pub const MAX_SETUPS: usize = 1000;
 pub const MAX_OPERATIONS: usize = 10_000;
 pub const MAX_DESIGN_TOOLS: usize = 1000;
