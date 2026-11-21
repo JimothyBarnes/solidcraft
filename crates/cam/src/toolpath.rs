@@ -46,7 +46,7 @@ pub enum Plane {
 impl Plane {
     /// `p` as (u, v, w): two in-plane coordinates, ordered so that u × v points along the
     /// normal, then the coordinate along the normal.
-    fn split(self, p: Vec3) -> (f64, f64, f64) {
+    pub(crate) fn split(self, p: Vec3) -> (f64, f64, f64) {
         match self {
             Plane::Xy => (p.x, p.y, p.z),
             Plane::Zx => (p.z, p.x, p.y),
@@ -55,7 +55,7 @@ impl Plane {
     }
 
     /// The point with in-plane coordinates (u, v) and normal coordinate w.
-    fn join(self, u: f64, v: f64, w: f64) -> Vec3 {
+    pub(crate) fn join(self, u: f64, v: f64, w: f64) -> Vec3 {
         match self {
             Plane::Xy => Vec3 { x: u, y: v, z: w },
             Plane::Zx => Vec3 { x: v, y: w, z: u },
