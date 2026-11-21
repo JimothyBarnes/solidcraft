@@ -411,7 +411,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::HistoryFolder => crate::timeline::history_folder_items(app),
         Target::Timeline { feature } => crate::timeline::feature_items(app, *feature),
         Target::Workspace => {
-            let rendering = crate::render_workspace::active(app);
+            let rendering = crate::render_workspace::active(app) || crate::manufacture_workspace::active(app);
             let drawing = crate::drawing_workspace::active(app);
             // Design, then Drawing (the owner's order), then Render: the workspaces there are. Ones still
             // to come aren't listed.
@@ -425,9 +425,10 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
                     .with(json!({"workspace":"drawing"}))
                     .key(if drawing { "current" } else { "" })
                     .on(app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()),
+                crate::manufacture_workspace::menu_item(app),
                 act("ui.workspace.render", "Render", "ws_render")
                     .with(json!({"workspace":"render"}))
-                    .key(if rendering { "current" } else { "" })
+                    .key(if crate::render_workspace::active(app) { "current" } else { "" })
                     .on(crate::render_workspace::entry_open(app)),
             ]
         }
@@ -2086,7 +2087,7 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             }
         }
         "ui.historyShowHidden" => app.tree.history_show_hidden = p["show"].as_bool().unwrap_or(false),
-        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" | "ui.workspace.drawing" => {
+        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" | "ui.workspace.drawing" | "ui.workspace.manufacture" => {
             let result = p.get("workspace").and_then(Value::as_str).map_or(Ok(()), |workspace| crate::workspace::enter(app, workspace));
             if let Err(error) = result {
                 app.set_status(error, true);
@@ -3277,6 +3278,7 @@ fn workspace_style(item: &Item) -> Option<crate::ui_kit::WorkspaceStyle> {
         "Drawing" => {
             WorkspaceStyle { slug: "drawing", description: "ui.workspace_drawing_description", tabs: Some("ui.workspace_drawing_tabs"), ramp: None }
         }
+        "Manufacture" => crate::manufacture_workspace::STYLE,
         _ => return None,
     })
 }
@@ -3975,12 +3977,13 @@ mod workspace_menu_tests {
         h.call("ui.resize", json!({"width":1200,"height":1000}));
         h.step(&json!({"click":{"handle":"ribbon:workspace"}})).unwrap();
         let opener = rect_of("ribbon:workspace").unwrap();
-        // Design, Drawing (the owner's order), Render: no planned workspaces are listed.
-        let rows: Vec<_> = ["design", "drawing", "render"].iter().map(|slug| rect_of(&format!("workspace:menu:{slug}")).unwrap()).collect();
+        // Design, Drawing (the owner's order), Manufacture (the CAM fork's), Render: no planned workspaces are listed.
+        let rows: Vec<_> =
+            ["design", "drawing", "manufacture", "render"].iter().map(|slug| rect_of(&format!("workspace:menu:{slug}")).unwrap()).collect();
         assert!(rows.windows(2).all(|pair| pair[0].bottom() <= pair[1].top()));
         assert!(rows[0].top() > opener.bottom());
         assert_eq!(rows[0].width(), 450.0);
-        assert_eq!(items(&h.app, &Target::Workspace).len(), 3, "only the workspaces there are");
+        assert_eq!(items(&h.app, &Target::Workspace).len(), 4, "only the workspaces there are");
         assert!(rect_of("workspace:menu:animation").is_none(), "a planned workspace has no row");
         h.step(&json!({"click":{"handle":"workspace:menu:render"}})).unwrap();
         assert!(crate::render_workspace::active(&h.app));

@@ -1,0 +1,1 @@
+| crates/look/icons/design/svg/workspace/ws_manufacture.svg | SolidCraft contributors | workspace icon master (64 grid), original SolidCraft artwork | SolidCraft Brand and Interface Licence (LICENSE-BRAND) |

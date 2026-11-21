@@ -52,6 +52,17 @@ pub fn tab_label(tab: &str) -> &str {
 /// Workspace switching has one lifecycle for menus and automation.
 pub fn enter(app: &mut crate::SolveApp, workspace: &str) -> Result<(), String> {
     match workspace {
+        "manufacture" => {
+            if crate::render_workspace::active(app) {
+                crate::render_workspace::enter(app, false)?;
+            }
+            crate::drawing_workspace::enter(app, false)?;
+            crate::manufacture_workspace::enter(app, true)
+        }
+        _ if crate::manufacture_workspace::active(app) && matches!(workspace, "design" | "render" | "drawing") => {
+            crate::manufacture_workspace::enter(app, false)?;
+            enter(app, workspace)
+        }
         "drawing" => {
             if crate::render_workspace::active(app) {
                 crate::render_workspace::enter(app, false)?;
@@ -63,7 +74,7 @@ pub fn enter(app: &mut crate::SolveApp, workspace: &str) -> Result<(), String> {
             crate::drawing_workspace::enter(app, false)?;
             crate::render_workspace::enter(app, workspace == "render")
         }
-        _ => Err("workspace must be design, render or drawing".into()),
+        _ => Err("workspace must be design, render, drawing or manufacture".into()),
     }
 }
 
@@ -88,6 +99,7 @@ pub const TAB_ACCENTS: TabTable = TabTable::new(&[
     tab_style("RENDER APPEARANCE", AccentRamp::Render, None),
     tab_style("RENDER SCENE", AccentRamp::Render, None),
     tab_style("RENDER CAMERA", AccentRamp::Render, None),
+    tab_style("MANUFACTURE", AccentRamp::Main, None),
 ]);
 
 const fn tab_style(name: &'static str, ramp: AccentRamp, icon_accent: Option<&'static str>) -> TabStyle {
@@ -430,6 +442,7 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "INSERT", panel: "2D", promoted: 2, ids: &["sketch.insert_dxf", "sketch.insert_svg", "sketch.insert_airfoil"] },
     Section { tab: "INSERT", panel: "LIBRARY", promoted: 3, ids: &["parts.fastener", "parts.library", "parts.resize", "parts.insert"] },
     Section { tab: "INSERT", panel: "LINKS", promoted: 2, ids: &["component.update_links", "component.break_link"] },
+    Section { tab: "MANUFACTURE", panel: "SETUP", promoted: 1, ids: &["cam.setup.create"] },
     Section { tab: "INSPECT", panel: "MEASURE", promoted: 3, ids: &["inspect.measure", "inspect.center_of_mass", "component.properties"] },
     Section { tab: "INSPECT", panel: "SECTION", promoted: 1, ids: &["inspect.section"] },
     Section {
@@ -943,6 +956,9 @@ pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
     if crate::render_workspace::active(app) {
         return Vec::new();
     }
+    if crate::manufacture_workspace::active(app) {
+        return crate::manufacture_workspace::TABS.to_vec();
+    }
     let mut tabs: Vec<_> = TABS.iter().copied().filter(|tab| tab_turned_on(app, tab)).collect();
     if app.preferences.sketch_tab_always {
         // Right after MODEL, whether a sketch is open or not (#7904).
@@ -1129,7 +1145,7 @@ mod tests {
         type Slots = fn(&Tokens) -> [egui::Color32; 3];
         let main: Slots = |t| [t.accent, t.selected_ink, t.accent_soft];
         let render: Slots = |t| [t.render_fill, t.render_ink, t.render_soft];
-        let tabs: [(&str, Slots, Option<&str>); 16] = [
+        let tabs: [(&str, Slots, Option<&str>); 17] = [
             ("MODEL", main, None),
             ("SKETCH", |t| [t.sketch_accent, t.sketch_ink, t.sketch_soft], Some("sketch")),
             ("SURFACE", |t| [t.surface_fill, t.surface_ink, t.surface_soft], Some("surface")),
@@ -1146,6 +1162,7 @@ mod tests {
             ("RENDER APPEARANCE", render, None),
             ("RENDER SCENE", render, None),
             ("RENDER CAMERA", render, None),
+            ("MANUFACTURE", main, None),
         ];
         assert_eq!(TAB_ACCENTS.names().collect::<Vec<_>>(), tabs.iter().map(|(tab, _, _)| *tab).collect::<Vec<_>>());
         for t in [Tokens::light(), Tokens::dark()] {

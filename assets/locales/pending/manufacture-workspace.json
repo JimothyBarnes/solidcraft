@@ -1,0 +1,58 @@
+{
+  "en": {
+    "ui.workspace_manufacture_tabs": "Setup",
+    "manufacture.error_finish_operation": "Finish the current operation before entering Manufacture",
+    "help.cam.setup.create": "Adds a setup: the stock, the work origin and the work offset the part is machined with. It starts as a vise setup, stock 1 mm over the model and the origin at the top centre of the stock; change it to suit how you hold the part.",
+    "ui.workspace_manufacture_cam_description": "Setups, tools and toolpaths, posted as G-code for your machine",
+    "ui.heading_manufacture": "MANUFACTURE"
+  },
+  "ar": {
+    "ui.workspace_manufacture_tabs": "الإعداد",
+    "manufacture.error_finish_operation": "أنهِ العملية الحالية قبل الدخول إلى التصنيع",
+    "help.cam.setup.create": "يضيف إعدادًا: الخامة ونقطة أصل العمل وإزاحة العمل التي تُشغَّل بها القطعة. يبدأ كإعداد على ملزمة، بخامة تزيد 1 مم عن النموذج وأصل في منتصف أعلى الخامة؛ غيّره بما يناسب طريقة تثبيت القطعة.",
+    "ui.workspace_manufacture_cam_description": "الإعدادات والأدوات ومسارات الأدوات، تُخرَج بلغة G-code لآلتك",
+    "ui.heading_manufacture": "التصنيع"
+  },
+  "he": {
+    "ui.workspace_manufacture_tabs": "הגדרה",
+    "manufacture.error_finish_operation": "סיימו את הפעולה הנוכחית לפני הכניסה לייצור",
+    "help.cam.setup.create": "מוסיף הגדרה: חומר הגלם, ראשית העבודה והיסט העבודה שבהם החלק מעובד. היא מתחילה כהגדרה במלחציים, חומר גלם 1 מ\"מ מעבר לדגם וראשית במרכז החלק העליון של חומר הגלם; שנו אותה לפי אופן אחיזת החלק.",
+    "ui.workspace_manufacture_cam_description": "הגדרות, כלים ומסלולי כלים, מופקים כקוד G למכונה שלך",
+    "ui.heading_manufacture": "ייצור"
+  },
+  "ja": {
+    "ui.workspace_manufacture_tabs": "セットアップ",
+    "manufacture.error_finish_operation": "加工に入る前に現在の操作を終了してください",
+    "help.cam.setup.create": "セットアップを追加します。部品を加工する素材、ワーク原点、ワークオフセットです。最初はバイスのセットアップで、素材はモデルより1 mm大きく、原点は素材上面の中心です。部品の保持方法に合わせて変更してください。",
+    "ui.workspace_manufacture_cam_description": "セットアップ、工具、ツールパスを機械用のGコードとして出力",
+    "ui.heading_manufacture": "加工"
+  },
+  "vi": {
+    "ui.workspace_manufacture_tabs": "Thiết lập",
+    "manufacture.error_finish_operation": "Hãy hoàn tất thao tác hiện tại trước khi vào Gia công",
+    "help.cam.setup.create": "Thêm một thiết lập: phôi, gốc tọa độ gia công và bù tọa độ phôi dùng để gia công chi tiết. Ban đầu là thiết lập kẹp ê tô, phôi dư 1 mm quanh mô hình và gốc ở tâm mặt trên của phôi; hãy đổi cho hợp với cách bạn kẹp chi tiết.",
+    "ui.workspace_manufacture_cam_description": "Thiết lập, dao và đường chạy dao, xuất thành mã G cho máy của bạn",
+    "ui.heading_manufacture": "GIA CÔNG"
+  },
+  "zh": {
+    "ui.workspace_manufacture_tabs": "设置",
+    "manufacture.error_finish_operation": "请先完成当前操作，再进入加工",
+    "help.cam.setup.create": "添加一个设置：加工零件所用的毛坯、工件原点和工件偏置。初始为台钳装夹设置，毛坯比模型大 1 mm，原点位于毛坯顶面中心；请按零件的装夹方式修改。",
+    "ui.workspace_manufacture_cam_description": "设置、刀具和刀具路径，后处理为适用于您机床的 G 代码",
+    "ui.heading_manufacture": "加工"
+  },
+  "de": {
+    "ui.workspace_manufacture_tabs": "Aufspannung",
+    "manufacture.error_finish_operation": "Beenden Sie den aktuellen Vorgang, bevor Sie zur Fertigung wechseln",
+    "help.cam.setup.create": "Fügt eine Aufspannung hinzu: Rohteil, Werkstücknullpunkt und Nullpunktverschiebung, mit denen das Teil bearbeitet wird. Sie beginnt als Schraubstock-Aufspannung, Rohteil 1 mm größer als das Modell und Nullpunkt oben mittig auf dem Rohteil; passen Sie sie an Ihre Spannung an.",
+    "ui.workspace_manufacture_cam_description": "Aufspannungen, Werkzeuge und Werkzeugbahnen, als G-Code für Ihre Maschine ausgegeben",
+    "ui.heading_manufacture": "FERTIGUNG"
+  },
+  "ko": {
+    "ui.workspace_manufacture_tabs": "셋업",
+    "manufacture.error_finish_operation": "가공으로 들어가기 전에 현재 작업을 마치세요",
+    "help.cam.setup.create": "셋업을 추가합니다. 부품을 가공할 소재, 작업 원점, 작업 오프셋입니다. 처음에는 바이스 셋업으로 소재는 모델보다 1 mm 크고 원점은 소재 윗면 중앙입니다. 부품을 고정하는 방식에 맞게 바꾸세요.",
+    "ui.workspace_manufacture_cam_description": "셋업, 공구, 공구 경로를 기계용 G 코드로 포스트 처리",
+    "ui.heading_manufacture": "가공"
+  }
+}

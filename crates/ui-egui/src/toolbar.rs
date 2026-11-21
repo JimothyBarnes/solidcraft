@@ -1651,11 +1651,14 @@ fn ribbon_contents(app: &mut SolveApp, ui: &mut egui::Ui, shape: RibbonShape) ->
         }
         let render = crate::render_workspace::active(app);
         let drawing = crate::drawing_workspace::active(app);
+        let manufacture = crate::manufacture_workspace::active(app);
         let switcher = app_bar::Switcher {
             name: if render {
                 app.tr("ui.render")
             } else if drawing {
                 app.tr_label("Drawing")
+            } else if manufacture {
+                app.tr("ui.manufacture")
             } else {
                 app.tr("ui.design")
             },
@@ -1664,6 +1667,8 @@ fn ribbon_contents(app: &mut SolveApp, ui: &mut egui::Ui, shape: RibbonShape) ->
                 "ws_render"
             } else if drawing {
                 "ws_drawing"
+            } else if manufacture {
+                "ws_manufacture"
             } else {
                 "ws_design"
             },

@@ -225,6 +225,7 @@ mod file_load_ui_tests;
 #[cfg(test)]
 mod fillet_spline_handle_tests;
 pub(crate) mod import_report;
+pub mod manufacture_workspace;
 pub mod mouse_gesture;
 use solidcraft_ui_kit::nav_bar;
 pub(crate) mod navigation;
@@ -707,6 +708,7 @@ pub struct SolveApp {
     pub viewport: viewport::ViewportState,
     pub render_workspace: render_workspace::State,
     pub drawing_workspace: drawing_workspace::State,
+    pub manufacture_workspace: manufacture_workspace::State,
     pub tool: Option<tools::Tool>,
     pub dialog: Option<dialogs::Dialog>,
     /// The joint dialogs' picked and hovered snaps ([`dialogs_assembly::picked_snap`]).
@@ -1087,6 +1089,7 @@ impl SolveApp {
             viewport: viewport::ViewportState::default(),
             render_workspace,
             drawing_workspace: Default::default(),
+            manufacture_workspace: Default::default(),
             tool: None,
             dialog: None,
             snaps: Default::default(),

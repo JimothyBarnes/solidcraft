@@ -309,6 +309,7 @@ pub(crate) enum Workspace {
     Design,
     Render,
     Drawing,
+    Manufacture,
 }
 
 impl Workspace {
@@ -317,6 +318,7 @@ impl Workspace {
             Workspace::Design => "design",
             Workspace::Render => "render",
             Workspace::Drawing => "drawing",
+            Workspace::Manufacture => "manufacture",
         }
     }
 }
