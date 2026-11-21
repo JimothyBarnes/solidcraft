@@ -72,14 +72,14 @@ fn reply<T: serde::Serialize>(cmd: &str, value: T) -> Result<Value> {
 }
 
 /// The design's Manufacture data; empty when it has none.
-pub(crate) fn load(s: &Session, cmd: &str) -> Result<ManufactureData> {
+pub(super) fn load(s: &Session, cmd: &str) -> Result<ManufactureData> {
     let Some(bytes) = storage::blob(&s.doc, MANUFACTURE_DATA_OWNER, DATA) else { return Ok(ManufactureData::default()) };
     let text = std::str::from_utf8(bytes).map_err(|_| bad(cmd, "the design's Manufacture data is not text; it is kept as it is"))?;
     ManufactureData::from_json(text).map_err(|e| bad(cmd, format!("the design's Manufacture data can't be read ({e}); it is kept as it is")))
 }
 
 /// Checks and writes the Manufacture data as one edit.
-fn store(s: &mut Session, cmd: &str, data: &ManufactureData) -> Result<()> {
+pub(super) fn store(s: &mut Session, cmd: &str, data: &ManufactureData) -> Result<()> {
     let json = data.to_json().map_err(|e| bad(cmd, e.to_string()))?;
     storage::put(s, &owner(), DATA, Some(json.as_bytes()))
 }
