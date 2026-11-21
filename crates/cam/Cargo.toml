@@ -9,7 +9,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# 2D offsetting of regions made of lines and arcs (src/offset.rs, the only user in this crate):
+# pure Rust, no unsafe, MIT OR Apache-2.0; the same crate and version `solidcraft-io` reads Gerber
+# layers with.
+cavalier_contours = { version = "0.9.0", default-features = false }
 solidcore-record = { workspace = true }
+# Profile types' checks, ends and measures (src/offset.rs).
+solidcraft-geom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
