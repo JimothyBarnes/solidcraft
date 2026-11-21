@@ -7,6 +7,8 @@
 use crate::SolveApp;
 use solidcraft_viewport::Camera;
 
+pub(crate) mod browser;
+
 /// Manufacture's ribbon tabs.
 pub const TABS: &[&str] = &["MANUFACTURE"];
 
@@ -138,6 +140,36 @@ mod tests {
         let data = h.app.run("cam.data", json!({})).unwrap();
         assert_eq!(data["setups"], 1);
         assert_eq!(data["data"]["setups"][0]["name"], "Setup 1");
+    }
+
+    /// The labels of the Browser rows drawn this frame.
+    fn browser_labels(h: &mut Harness) -> Vec<String> {
+        h.frames(3);
+        crate::browser::drawn_rows().into_iter().map(|(label, ..)| label).collect()
+    }
+
+    #[test]
+    fn the_browser_lists_setups_operations_and_tools() {
+        let mut h = harness();
+        crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+        let tool = json!({
+            "number": 3, "name": "6 mm flat", "kind": "flat_end_mill",
+            "geometry": {"diameter": 6.0, "corner_radius": 0.0, "flute_length": 18.0, "shoulder_length": 0.0, "overall_length": 60.0,
+                         "shank_diameter": 6.0, "tip_angle": 0.0, "tip_diameter": 0.0, "thread_pitch": 0.0},
+            "flutes": 3, "holder": {"stick_out": 25.0, "segments": []}, "length_offset": 3, "diameter_offset": 3,
+            "coolant": "flood", "cutting_data": [], "overrides": {"rpm": null, "feed": null}
+        });
+        h.app.run("cam.tool.create", json!({"tool": tool})).unwrap();
+        h.app.run("cam.setup.create", json!({"name": "Op 1", "work_offset": 2})).unwrap();
+        let path = json!({"start": [0.0, 0.0, 50.0], "moves": [{"kind": "rapid", "to": [0.0, 0.0, 5.0]}]});
+        h.app.run("cam.op.manual", json!({"setup": "setup-1", "tool": 3, "toolpath": path, "name": "Face"})).unwrap();
+        let labels = browser_labels(&mut h);
+        for expected in ["Op 1 (G55)", "Face (T3)"] {
+            assert!(labels.iter().any(|l| l == expected), "{expected:?} not in {labels:?}");
+        }
+        // Back in Design the Browser shows the model again, not the setups.
+        crate::workspace::enter(&mut h.app, "design").unwrap();
+        assert!(!browser_labels(&mut h).iter().any(|l| l == "Op 1 (G55)"));
     }
 
     #[test]

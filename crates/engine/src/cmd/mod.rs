@@ -137,6 +137,7 @@ mod script;
 mod section;
 mod selection;
 pub mod settings;
+pub use cam::manufacture_data;
 pub(crate) use clipboard::{component_path_form, copy_keys};
 pub(crate) use component::matrix::{rigid as rigid_matrix, tolerance as matrix_tolerance, with_exprs as matrix_with_exprs};
 pub(crate) use component::{base_transform, move_vector};

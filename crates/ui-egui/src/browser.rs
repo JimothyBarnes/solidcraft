@@ -1567,6 +1567,12 @@ fn browser_rows_hugging(app: &mut SolveApp, ui: &mut egui::Ui) {
 }
 
 fn rows_scrolling(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions, shrink_height: bool) {
+    if crate::manufacture_workspace::active(app) {
+        let top = ui.cursor().top();
+        let output = present(app, ui, acts, (true, shrink_height), |app, rows, _| crate::manufacture_workspace::browser::show(app, rows));
+        crate::panel_runtime::report_content_extent(ui, top, output.content_height, true);
+        return;
+    }
     if crate::drawing_workspace::active(app) {
         let top = ui.cursor().top();
         let inset = egui::Margin::symmetric(Tokens::get().space_8 as i8, 0);

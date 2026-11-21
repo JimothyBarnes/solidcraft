@@ -71,11 +71,17 @@ fn reply<T: serde::Serialize>(cmd: &str, value: T) -> Result<Value> {
     serde_json::to_value(value).map_err(|e| bad(cmd, e.to_string()))
 }
 
+/// A design's Manufacture data, empty when it has none; why not, when it can't be read (the
+/// data is then kept as it is). For views such as the Manufacture browser, which only read.
+pub fn manufacture_data(doc: &solidcraft_doc::Document) -> std::result::Result<ManufactureData, String> {
+    let Some(bytes) = storage::blob(doc, MANUFACTURE_DATA_OWNER, DATA) else { return Ok(ManufactureData::default()) };
+    let text = std::str::from_utf8(bytes).map_err(|_| "the design's Manufacture data is not text; it is kept as it is".to_string())?;
+    ManufactureData::from_json(text).map_err(|e| format!("the design's Manufacture data can't be read ({e}); it is kept as it is"))
+}
+
 /// The design's Manufacture data; empty when it has none.
 pub(crate) fn load(s: &Session, cmd: &str) -> Result<ManufactureData> {
-    let Some(bytes) = storage::blob(&s.doc, MANUFACTURE_DATA_OWNER, DATA) else { return Ok(ManufactureData::default()) };
-    let text = std::str::from_utf8(bytes).map_err(|_| bad(cmd, "the design's Manufacture data is not text; it is kept as it is"))?;
-    ManufactureData::from_json(text).map_err(|e| bad(cmd, format!("the design's Manufacture data can't be read ({e}); it is kept as it is")))
+    manufacture_data(&s.doc).map_err(|e| bad(cmd, e))
 }
 
 /// Checks and writes the Manufacture data as one edit.
