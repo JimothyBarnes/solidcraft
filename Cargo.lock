@@ -6069,9 +6069,11 @@ version = "0.45.0"
 name = "solidcraft-cam"
 version = "0.45.0"
 dependencies = [
+ "cavalier_contours",
  "serde",
  "serde_json",
  "solidcore-record",
+ "solidcraft-geom",
  "thiserror 2.0.21",
 ]
 
