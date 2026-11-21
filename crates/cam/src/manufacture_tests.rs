@@ -130,6 +130,18 @@ fn hostile_data_is_refused_with_a_reason() {
         ("material name", Box::new(|d| d.setups[0].material = Some(String::new()))),
         ("material name", Box::new(|d| d.setups[0].material = Some("a\nb".into()))),
         (
+            "does not face",
+            Box::new(|d| {
+                d.tools[0].kind = crate::tool::ToolKind::BallEndMill;
+                d.tools[0].geometry.corner_radius = 0.5 * d.tools[0].geometry.diameter;
+                d.setups[0].operations[0].operation = OperationKind::Face { face: FaceOp::default() };
+            }),
+        ),
+        (
+            "stepover",
+            Box::new(|d| d.setups[0].operations[0].operation = OperationKind::Face { face: FaceOp { stepover: Some(7.0), ..FaceOp::default() } }),
+        ),
+        (
             "does not drill",
             Box::new(|d| {
                 d.tools[0].kind = crate::tool::ToolKind::FaceMill;
@@ -183,4 +195,16 @@ fn a_drill_operation_and_a_stock_material_save_and_read_back() {
     // Data written before setups had a material still reads, with none.
     let older = json.replace("\"material\": \"aluminium\",", "");
     assert_eq!(ManufactureData::from_json(&older).unwrap().setups[0].material, None);
+}
+
+#[test]
+fn a_facing_operation_saves_and_reads_back_with_its_defaults() {
+    let mut d = shop();
+    d.setups[0].operations[0].operation = OperationKind::Face { face: FaceOp { stepdown: Some(1.5), ..FaceOp::default() } };
+    let json = d.to_json().unwrap();
+    assert!(json.contains("\"kind\": \"face\"") && json.contains("\"stepdown\": 1.5"), "{json}");
+    assert_eq!(ManufactureData::from_json(&json).unwrap(), d);
+    // A facing with nothing set is all defaults.
+    let bare: OperationKind = serde_json::from_str(r#"{"kind": "face", "face": {}}"#).unwrap();
+    assert_eq!(bare, OperationKind::Face { face: FaceOp::default() });
 }

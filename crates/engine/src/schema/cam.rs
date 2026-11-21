@@ -193,6 +193,23 @@ pub struct CamOpDrillParams {
     pub drill: Value,
 }
 
+/// Add a facing operation to a setup (decision 0010 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpFaceParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: a face mill, flat end mill or bull-nose end mill.
+    pub tool: u32,
+    /// `{top?: Z (default the stock top), bottom?: Z (default the model's top), stepdown?: mm
+    /// (default one level), stepover?: mm (default 70% of the tool's diameter), clear?: mm past the
+    /// stock (default 2), pattern?: zig_zag | one_way, rpm?, feed?}`; every field has a default.
+    #[serde(default)]
+    pub face: Option<Value>,
+}
+
 /// Work out one operation's toolpath.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -216,8 +233,8 @@ pub struct CamOpToolpath {
     /// The box the tool tip passes through, in the WCS.
     pub min: [f64; 3],
     pub max: [f64; 3],
-    /// What the strategy worked out (for a drill: rpm, feed, bottom, r, clearance); empty for a
-    /// hand-made toolpath.
+    /// What the strategy worked out (a drill: rpm, feed, bottom, r, clearance; a facing: rpm, feed,
+    /// plunge_feed, levels, passes, stepover); empty for a hand-made toolpath.
     pub numbers: Value,
     pub notes: Vec<String>,
 }

@@ -1,6 +1,7 @@
 use std::f64::consts::PI;
 
 use super::*;
+use crate::feeds::GENERIC_MAX_RPM;
 use crate::manufacture::{BoxAnchor, BoxOffsets, BoxSide, Setup, SetupKind, Stock, Wcs, WcsOrientation, WcsOrigin};
 use crate::placement::Bounds;
 use crate::tool::{CuttingData, Holder, Overrides, ToolGeometry};

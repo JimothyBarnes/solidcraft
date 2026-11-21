@@ -6,7 +6,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, DrillOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData,
+    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData,
     Operation, OperationKind, Placement, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
@@ -14,9 +14,9 @@ use solidcraft_doc::plugin_data::DATA;
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
-    CamData, CamDataParams, CamOpDeleteParams, CamOpDrillParams, CamOpManualParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams,
-    CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten,
-    CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
+    CamData, CamDataParams, CamOpDeleteParams, CamOpDrillParams, CamOpFaceParams, CamOpManualParams, CamOpToolpath, CamOpToolpathParams,
+    CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupMeasureParams, CamSetupMeasured,
+    CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -52,6 +52,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.drill", "Drill", crate::checked!("cam.op.drill", op_drill)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpDrillParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a drill, spot drill, reamer or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle, order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
+    CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("edit").doc_only()
+        .contract(&TypedContract::<CamOpFaceParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only().doc_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
@@ -360,6 +363,23 @@ fn op_drill(s: &mut Session, p: &Value) -> Result<Value> {
     reply(CMD, CamOpWritten { id, setup: p.setup, operations })
 }
 
+fn op_face(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.op.face";
+    let p: CamOpFaceParams = parse(CMD, "parameters", p)?;
+    let face: FaceOp = match &p.face {
+        Some(v) => parse(CMD, "face", v)?,
+        None => FaceOp::default(),
+    };
+    let mut d = load(s, CMD)?;
+    let id = next_id("op", d.setups.iter().flat_map(|x| &x.operations).map(|o| o.id.as_str()));
+    let setup = d.setups.iter_mut().find(|x| x.id == p.setup).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.setup)))?;
+    let name = p.name.unwrap_or_else(|| format!("Face {}", setup.operations.len() + 1));
+    setup.operations.push(Operation { id: id.clone(), name, tool: p.tool, suppressed: false, operation: OperationKind::Face { face } });
+    let operations = setup.operations.len();
+    store(s, CMD, &d)?;
+    reply(CMD, CamOpWritten { id, setup: p.setup, operations })
+}
+
 /// One operation's toolpath, the numbers its strategy worked out, and its notes.
 struct Worked {
     toolpath: Toolpath,
@@ -367,8 +387,31 @@ struct Worked {
     notes: Vec<String>,
 }
 
+/// The tool and the setup's placement a strategy works from. The placement is measured on the
+/// model the first time an operation of the setup needs it.
+fn tool_and_placement<'a>(
+    s: &Session,
+    cmd: &str,
+    d: &'a ManufactureData,
+    setup: &Setup,
+    op: &Operation,
+    placed: &mut Option<Placement>,
+) -> Result<(&'a Tool, Placement)> {
+    let tool = d.tools.iter().find(|t| t.number == op.tool).ok_or_else(|| bad(cmd, format!("operation {}: no tool {}", op.id, op.tool)))?;
+    let placement = match placed {
+        Some(p) => *p,
+        None => {
+            let (model, _) = model_box(s, cmd, setup)?;
+            let p = setup.place(model).map_err(|e| bad(cmd, e.to_string()))?;
+            *placed = Some(p);
+            p
+        }
+    };
+    Ok((tool, placement))
+}
+
 /// `op`'s toolpath from `start` (`None`: where the strategy begins): a hand-made one as given, a
-/// strategy's worked out on the setup's placement, which is measured the first time one needs it.
+/// strategy's worked out with its tool on the setup's placement.
 fn work(
     s: &Session,
     cmd: &str,
@@ -378,25 +421,24 @@ fn work(
     start: Option<solidcore_record::Vec3>,
     placed: &mut Option<Placement>,
 ) -> Result<Worked> {
+    let failed = |e: solidcraft_cam::Error| bad(cmd, format!("operation {} ({}): {e}", op.id, op.name));
+    let material = setup.material.as_deref();
     match &op.operation {
         OperationKind::Manual { toolpath } => {
             Ok(Worked { toolpath: toolpath.clone(), numbers: Value::Object(Default::default()), notes: Vec::new() })
         }
         OperationKind::Drill { drill } => {
-            let tool = d.tools.iter().find(|t| t.number == op.tool).ok_or_else(|| bad(cmd, format!("operation {}: no tool {}", op.id, op.tool)))?;
-            let placement = match placed {
-                Some(p) => *p,
-                None => {
-                    let (model, _) = model_box(s, cmd, setup)?;
-                    let p = setup.place(model).map_err(|e| bad(cmd, e.to_string()))?;
-                    *placed = Some(p);
-                    p
-                }
-            };
-            let done = drill
-                .toolpath(start, tool, &placement, setup.safe_heights, setup.material.as_deref())
-                .map_err(|e| bad(cmd, format!("operation {} ({}): {e}", op.id, op.name)))?;
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            let done = drill.toolpath(start, tool, &placement, setup.safe_heights, material).map_err(failed)?;
             let numbers = serde_json::json!({"rpm": done.rpm, "feed": done.feed, "bottom": done.bottom, "r": done.r, "clearance": done.clearance});
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+        }
+        OperationKind::Face { face } => {
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            let done = face.toolpath(start, tool, &placement, material).map_err(failed)?;
+            let numbers = serde_json::json!({
+                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "levels": done.levels, "passes": done.passes, "stepover": done.stepover
+            });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
         }
     }

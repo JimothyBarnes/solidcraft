@@ -301,6 +301,58 @@ fn a_hand_made_toolpath_and_a_drill_operation_post_as_one_program() {
     }
 }
 
+/// Tool 4: a 20 mm, 4-flute flat end mill with data for aluminium (200 m/min, 0.05 mm a tooth,
+/// plunging at half): 200 000 / (20 π) = 3183.1 rev/min, 636.6 mm/min, 318.3 down.
+fn mill20() -> Value {
+    json!({
+        "number": 4, "name": "20 mm flat end mill", "kind": "flat_end_mill",
+        "geometry": {"diameter": 20.0, "corner_radius": 0.0, "flute_length": 30.0, "shoulder_length": 0.0, "overall_length": 100.0,
+                     "shank_diameter": 20.0, "tip_angle": 0.0, "tip_diameter": 0.0, "thread_pitch": 0.0},
+        "flutes": 4, "holder": {"stick_out": 50.0, "segments": []}, "length_offset": 4, "diameter_offset": 4, "coolant": "flood",
+        "cutting_data": [{"material": "aluminium", "surface_speed": 200.0, "chip_load": 0.05, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+        "overrides": {"rpm": null, "feed": null}
+    })
+}
+
+#[test]
+fn a_facing_operation_takes_the_stock_top_down_to_the_part() {
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    assert_eq!(run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}))["id"], "op-1");
+    // The stock is X -31 to 31, Y -21 to 21 in the WCS with 1 mm over the part. One level at Z -1;
+    // stepover 14 (70% of 20) puts passes at Y 17, 5.667, -5.667, -17, each from X -43 to 43.
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let rpm = 200_000.0 / (20.0 * std::f64::consts::PI);
+    let n = &t["numbers"];
+    assert!((n["rpm"].as_f64().unwrap() - rpm).abs() < 1e-9 && (n["feed"].as_f64().unwrap() - 0.2 * rpm).abs() < 1e-9, "{n}");
+    assert!((n["plunge_feed"].as_f64().unwrap() - 0.1 * rpm).abs() < 1e-9, "{n}");
+    assert_eq!((n["levels"].clone(), n["passes"].as_array().unwrap().len(), n["stepover"].as_f64()), (json!([-1.0]), 4, Some(14.0)));
+    // Cut: a 6 mm plunge, four passes of 86, three steps of 34/3. Rapids: 20 down, 6 and 20 up.
+    assert!((t["feed_length"].as_f64().unwrap() - 384.0).abs() < 1e-9 && (t["rapid_length"].as_f64().unwrap() - 46.0).abs() < 1e-9, "{t}");
+    assert!(near(&t["min"], [-43.0, -17.0, -1.0]) && near(&t["max"], [43.0, 17.0, 25.0]), "{t}");
+    let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = haas["text"].as_str().unwrap();
+    let expected = "\nT4 M6\nS3183 M3\nM8\nG43 H4 G0 X-43. Y17. Z25.\nZ5.\nG1 Z-1. F318.3\nX43. F636.6\nY5.667\nX-43.\nY-5.667\nX43.\nY-17.\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\n";
+    assert!(text.contains(expected), "{text}");
+    // Changed like any parameter: one way, in two levels to 2 mm below the stock top.
+    run(
+        &mut s,
+        "cam.op.face",
+        json!({"setup": "setup-1", "tool": 4, "name": "Face deeper", "face": {"bottom": -2, "stepdown": 1, "pattern": "one_way"}}),
+    );
+    let deeper = run(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    assert_eq!(deeper["numbers"]["levels"], json!([-1.0, -2.0]));
+    // A tool that can't face is refused when the operation is added; no stock on top when its toolpath is asked for.
+    assert!(refused(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 3})).contains("does not face"));
+    assert!(refused(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4, "face": {"angle": 45}})).contains("face"));
+    run(
+        &mut s,
+        "cam.setup.edit",
+        json!({"id": "setup-1", "stock": {"kind": "relative_box", "offsets": {"x_min": 1, "x_max": 1, "y_min": 1, "y_max": 1, "z_min": 0, "z_max": 0}}}),
+    );
+    assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"})).contains("nothing to face"));
+}
+
 #[test]
 fn every_change_is_one_undo_step() {
     let mut s = Session::default();

@@ -6,17 +6,16 @@ use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
 use crate::cycle::DrillCycle;
+use crate::feeds::op_feeds;
 use crate::manufacture::SafeHeights;
 use crate::placement::Placement;
-use crate::tool::{Engagement, FeedWarning, Tool, ToolKind};
+use crate::tool::{Engagement, Tool, ToolKind};
 use crate::toolpath::{Coolant, MAX_FEED, MAX_SPINDLE_RPM, Move, SpindleDirection, Toolpath};
 use crate::units::MAX_COORDINATE;
 use crate::{Error, Result};
 
 /// The most holes one drill operation may have.
 pub const MAX_HOLES: usize = 10_000;
-/// The top spindle speed used while there are no machine definitions, rev/min (decision 0009).
-pub const GENERIC_MAX_RPM: f64 = 10_000.0;
 /// The highest R plane above the holes' top accepted, mm.
 const MAX_R_ABOVE: f64 = 1_000.0;
 
@@ -182,7 +181,12 @@ impl DrillOp {
         if r > clearance {
             return bad(format!("the R plane ({r} mm) is above the clearance height ({clearance} mm)"));
         }
-        let (rpm, feed, notes) = self.feeds(tool, deep, material)?;
+        // A plunging end mill engages its whole diameter and feeds at its plunge feed; a drill's
+        // radial engagement does not apply. A feed the operation gives is the feed down the hole.
+        let radial = if tool.kind.is_axial() { 0.0 } else { g.diameter };
+        let f = op_feeds(tool, Engagement { axial: deep.max(1e-3), radial }, material, self.rpm, self.feed)?;
+        let (rpm, notes) = (f.rpm, f.notes);
+        let feed = if self.feed.is_some() || tool.kind.is_axial() { f.feed } else { f.plunge_feed };
         let holes = self.ordered();
         let first = holes.first().copied().unwrap_or([0.0, 0.0]);
         let above = |h: [f64; 2]| Vec3 { x: h[0], y: h[1], z: clearance };
@@ -208,44 +212,6 @@ impl DrillOp {
         let toolpath = Toolpath { start: start.unwrap_or(above(first)), moves };
         toolpath.validate()?;
         Ok(Drilled { toolpath, rpm, feed, bottom, r, clearance, notes })
-    }
-
-    /// Spindle speed and feed: given, or from the tool's cutting data for `material` at `deep`.
-    fn feeds(&self, tool: &Tool, deep: f64, material: Option<&str>) -> Result<(f64, f64, Vec<String>)> {
-        if let (Some(rpm), Some(feed)) = (self.rpm, self.feed) {
-            return Ok((rpm, feed, Vec::new()));
-        }
-        // A plunging end mill engages its whole diameter; a drill's radial engagement does not apply.
-        let radial = if tool.kind.is_axial() { 0.0 } else { tool.geometry.diameter };
-        let sf = tool.speeds_feeds(material.unwrap_or(""), Engagement { axial: deep.max(1e-3), radial }, GENERIC_MAX_RPM).map_err(|e| {
-            if material.is_none() { Error::BadValue(format!("{e}: give the setup its stock material, or the operation its rpm and feed")) } else { e }
-        })?;
-        // Warnings about a number the operation gives itself don't apply.
-        let applies = |w: &&FeedWarning| match w {
-            FeedWarning::SpindleCapped { .. } => self.rpm.is_none(),
-            FeedWarning::ChipTooThin { .. } | FeedWarning::ChipTooThick { .. } => self.feed.is_none(),
-        };
-        let notes: Vec<String> = sf.warnings.iter().filter(applies).map(describe).collect();
-        let rpm = self.rpm.unwrap_or(sf.rpm);
-        // The same chip at a typed-in speed: the feed scales with it.
-        let derived = if tool.kind.is_axial() { sf.feed } else { sf.plunge_feed };
-        let feed = self.feed.unwrap_or(derived * rpm / sf.rpm);
-        if !(feed > 0.0 && feed <= MAX_FEED) {
-            return Err(Error::BadValue(format!("the feed {feed} mm/min is out of range")));
-        }
-        Ok((rpm, feed, notes))
-    }
-}
-
-fn describe(w: &FeedWarning) -> String {
-    match *w {
-        FeedWarning::SpindleCapped { wanted, max } => {
-            format!("spindle speed capped at {max:.0} rpm (the tool's data asks {wanted:.0}); no machine is set, so this is the generic top speed")
-        }
-        FeedWarning::ChipTooThin { chip, intended } => {
-            format!("the chip is {chip:.4} mm, much thinner than the {intended:.4} mm intended: the edge rubs")
-        }
-        FeedWarning::ChipTooThick { chip, intended } => format!("the chip is {chip:.4} mm, much thicker than the {intended:.4} mm intended"),
     }
 }
 

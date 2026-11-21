@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
 use crate::drill::DrillOp;
+use crate::face::FaceOp;
 use crate::tool::Tool;
 use crate::toolpath::Toolpath;
 use crate::units::MAX_COORDINATE;
@@ -130,6 +131,8 @@ pub enum OperationKind {
     Manual { toolpath: Toolpath },
     /// Holes at points, drilled with one cycle (decision 0009 of the CAM work).
     Drill { drill: DrillOp },
+    /// The stock's top taken down to the part's top in straight passes (decision 0010).
+    Face { face: FaceOp },
 }
 
 /// One operation of a setup.
@@ -330,6 +333,7 @@ impl ManufactureData {
             match &op.operation {
                 OperationKind::Manual { toolpath } => toolpath.validate().map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Drill { drill } => drill.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Face { face } => face.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())
