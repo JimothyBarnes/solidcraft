@@ -316,3 +316,168 @@ fn a_post_that_writes_dwells_must_give_them_decimals() {
     *v.pointer_mut("/numbers/dwell").unwrap() = serde_json::json!(0);
     assert!(Post::from_json(&v.to_string()).unwrap_err().to_string().contains("milliseconds"));
 }
+
+/// Two peck holes that go back to R between them (G99), up over a clamp, then two drilled holes that
+/// come back to the height they start at (G98).
+fn holes() -> Toolpath {
+    let peck = DrillCycle::Peck { peck: 4.0 };
+    let drill = DrillCycle::Drill { dwell: 0.0 };
+    Toolpath {
+        start: p(0.0, 0.0, 50.0),
+        moves: vec![
+            Move::ToolChange { tool: 3 },
+            Move::Spindle { rpm: 1500.0, direction: SpindleDirection::Clockwise },
+            Move::Rapid { to: p(10.0, 10.0, 25.0) },
+            Move::Drill { to: p(10.0, 10.0, -12.0), r: 2.0, retract: 2.0, cycle: peck, feed: 200.0 },
+            Move::Drill { to: p(20.0, 10.0, -12.0), r: 2.0, retract: 2.0, cycle: peck, feed: 200.0 },
+            Move::Rapid { to: p(20.0, 10.0, 25.0) },
+            Move::Drill { to: p(30.0, 10.0, -5.0), r: 2.0, retract: 25.0, cycle: drill, feed: 150.0 },
+            Move::Drill { to: p(40.0, 10.0, -5.0), r: 2.0, retract: 25.0, cycle: drill, feed: 150.0 },
+            Move::Rapid { to: p(40.0, 10.0, 50.0) },
+            Move::SpindleStop,
+        ],
+    }
+}
+
+#[test]
+fn the_haas_post_writes_holes_as_canned_cycles_exactly() {
+    // Derived by hand (decision 0008): X and Y on every hole, G80 before the next other move, and
+    // that move writes Z again (after a hole the control is at the retract height, not the Z word).
+    let expected = "\
+%
+O00001 (BRACKET OP1)
+(UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)
+(PROVE OUT FIRST: AIR CUT, SINGLE BLOCK)
+G17 G40 G49 G80 G90 G94 G21
+G54
+G28 G91 Z0.
+G90
+T3 M6
+S1500 M3
+G43 H3 G0 X10. Y10. Z25.
+G99 G83 X10. Y10. Z-12. R2. Q4. F200.
+X20. Y10.
+G80
+G0 Z25.
+G98 G81 X30. Y10. Z-5. R2. F150.
+X40. Y10.
+G80
+G0 Z50.
+M5
+G28 G91 Z0.
+G90
+M30
+%
+";
+    let posted = Post::builtin("haas_mill").unwrap().write(&holes(), &ctx()).unwrap();
+    assert_eq!(posted.text, expected);
+    assert_eq!(posted.written, holes());
+    assert_eq!(posted.read_back.toolpath, holes());
+    assert!(posted.notes.is_empty(), "{:?}", posted.notes);
+}
+
+#[test]
+fn every_built_in_post_writes_g81_and_g83_and_reads_them_back() {
+    for id in ["rs274", "fanuc_mill", "haas_mill"] {
+        let posted = Post::builtin(id).unwrap().write(&holes(), &ctx()).unwrap();
+        assert!(posted.text.contains("G99 G83 X10. Y10. Z-12. R2. Q4. F200."), "{id}:\n{}", posted.text);
+        assert!(posted.text.contains("G98 G81 X30. Y10. Z-5. R2. F150."), "{id}:\n{}", posted.text);
+        assert_eq!(posted.read_back.toolpath, holes(), "{id}");
+        // In inches too, within half the last digit.
+        let inch = ProgramContext { units: LengthUnit::Inch, ..ctx() };
+        let posted = Post::builtin(id).unwrap().write(&holes(), &inch).unwrap();
+        assert!(posted.text.contains("G83"), "{id}");
+        assert!(posted.read_back.toolpath.moves.len() == holes().moves.len(), "{id}");
+    }
+}
+
+fn one_hole(cycle: DrillCycle, retract: f64) -> Toolpath {
+    Toolpath {
+        start: p(0.0, 0.0, 50.0),
+        moves: vec![
+            Move::ToolChange { tool: 1 },
+            Move::Rapid { to: p(0.0, 0.0, 10.0) },
+            Move::Drill { to: p(0.0, 0.0, -5.0), r: 1.0, retract, cycle, feed: 100.0 },
+        ],
+    }
+}
+
+#[test]
+fn a_hole_a_post_cannot_say_as_a_cycle_is_written_as_plain_moves() {
+    let chip = DrillCycle::ChipBreak { peck: 3.0 };
+    // G73 is not in RS274/NGC: 6 mm from R in two pecks, backing off the post's 0.5 mm between.
+    let posted = Post::builtin("rs274").unwrap().write(&one_hole(chip, 10.0), &ctx()).unwrap();
+    assert!(!posted.text.contains("G73"), "{}", posted.text);
+    assert!(posted.notes.iter().any(|n| n.contains("plain moves") && n.contains("G73")), "{:?}", posted.notes);
+    assert_eq!(
+        posted.written.moves[2..],
+        [
+            Move::Rapid { to: p(0.0, 0.0, 1.0) },
+            Move::Linear { to: p(0.0, 0.0, -2.0), feed: 100.0 },
+            Move::Rapid { to: p(0.0, 0.0, -1.5) },
+            Move::Linear { to: p(0.0, 0.0, -5.0), feed: 100.0 },
+            Move::Rapid { to: p(0.0, 0.0, 10.0) },
+        ]
+    );
+    // Haas has G73, and the hole returns to where it started: G98.
+    let posted = Post::builtin("haas_mill").unwrap().write(&one_hole(chip, 10.0), &ctx()).unwrap();
+    assert!(posted.text.contains("\nG98 G73 X0. Y0. Z-5. R1. Q3. F100.\nG80\n"), "{}", posted.text);
+    // A dwell keeps all its decimals, as G4's P does.
+    let dwell = DrillCycle::Drill { dwell: 0.5 };
+    let posted = Post::builtin("haas_mill").unwrap().write(&one_hole(dwell, 1.0), &ctx()).unwrap();
+    assert!(posted.text.contains("\nG99 G82 X0. Y0. Z-5. R1. P0.500 F100.\n"), "{}", posted.text);
+    // The Fanuc-style post has no verified dwell yet, so a dwell hole is refused, not guessed at.
+    let e = Post::builtin("fanuc_mill").unwrap().write(&one_hole(dwell, 1.0), &ctx()).unwrap_err();
+    assert!(e.to_string().contains("dwell"), "{e}");
+    // A hole that returns neither to R nor to where it started is no G98 or G99.
+    let posted = Post::builtin("haas_mill").unwrap().write(&one_hole(DrillCycle::Drill { dwell: 0.0 }, 5.0), &ctx()).unwrap();
+    assert!(!posted.text.contains("G81"), "{}", posted.text);
+    assert!(posted.notes.iter().any(|n| n.contains("neither")), "{:?}", posted.notes);
+    assert_eq!(posted.written.moves.last(), Some(&Move::Rapid { to: p(0.0, 0.0, 5.0) }));
+}
+
+#[test]
+fn a_hole_is_never_the_first_move_after_a_tool_change() {
+    let tp = Toolpath {
+        start: p(0.0, 0.0, 50.0),
+        moves: vec![
+            Move::ToolChange { tool: 1 },
+            Move::Drill { to: p(0.0, 0.0, -5.0), r: 1.0, retract: 50.0, cycle: DrillCycle::Drill { dwell: 0.0 }, feed: 100.0 },
+        ],
+    };
+    for (id, _) in BUILTIN_POSTS {
+        let e = Post::builtin(id).unwrap().write(&tp, &ctx()).unwrap_err();
+        assert!(e.to_string().contains("must be a rapid"), "{id}: {e}");
+    }
+}
+
+#[test]
+fn post_files_without_cycles_still_read_and_bad_cycle_data_is_refused() {
+    let mut post: serde_json::Value = serde_json::from_str(include_str!("../posts/rs274.json")).unwrap();
+    let cycles = post.as_object_mut().unwrap().remove("cycles").unwrap();
+    // An older post file: no canned cycles, every hole as plain moves.
+    let old = Post::from_json(&post.to_string()).unwrap();
+    let posted = old.write(&holes(), &ctx()).unwrap();
+    assert!(!["G81", "G83", "G98", "G99"].iter().any(|code| posted.text.contains(code)), "{}", posted.text);
+    assert_eq!(posted.notes.iter().filter(|n| n.contains("plain moves")).count(), 4);
+    // Repeating motion codes never repeats a cycle's code on its later holes (that line would start a new cycle).
+    let mut repeat = post.clone();
+    repeat["cycles"] = cycles.clone();
+    repeat["modal"]["repeat_motion"] = serde_json::json!(true);
+    let posted = Post::from_json(&repeat.to_string()).unwrap().write(&holes(), &ctx()).unwrap();
+    assert!(posted.text.contains("\nX20. Y10.\n"), "{}", posted.text);
+    let with = |path: &str, value: serde_json::Value| {
+        let mut p = post.clone();
+        p["cycles"] = cycles.clone();
+        *p.pointer_mut(path).unwrap() = value;
+        Post::from_json(&p.to_string())
+    };
+    assert!(with("/cycles/motion/peck_clearance", serde_json::json!(0)).unwrap_err().to_string().contains("cycles.motion"));
+    assert!(with("/cycles/motion/above_r", serde_json::json!(-1)).unwrap_err().to_string().contains("cycles.motion"));
+    assert!(with("/dwell", serde_json::json!(false)).unwrap_err().to_string().contains("cycles.dwell"));
+    assert!(with("/cycles/g98", serde_json::json!("sometimes")).is_err());
+    let mut unknown = post.clone();
+    unknown["cycles"] = cycles;
+    unknown["cycles"]["tapping"] = serde_json::json!(true);
+    assert!(Post::from_json(&unknown.to_string()).is_err());
+}

@@ -134,7 +134,9 @@ pub struct CamOpManualParams {
     /// One of the design's tool numbers.
     pub tool: u32,
     /// `{start: [x, y, z], moves: [{kind: rapid | linear | arc | dwell | tool_change | spindle |
-    /// spindle_stop | coolant, …}]}`, points as `[x, y, z]` in mm, feeds in mm/min.
+    /// spindle_stop | coolant | drill, …}]}`, points as `[x, y, z]` in mm, feeds in mm/min. A
+    /// `drill` is one hole: `{to, r, retract, cycle: {type: drill, dwell} | {type: peck | chip_break,
+    /// peck}, feed}`.
     pub toolpath: Value,
 }
 

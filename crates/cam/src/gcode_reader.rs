@@ -6,12 +6,19 @@
 //! `( … )` comments, block delete, line numbers, the modal groups and the order of execution of
 //! Table 8. Fanuc-style `%` tape marks and `O` program numbers are accepted and ignored.
 //!
-//! Anything outside the subset (parameters, expressions, canned cycles, cutter compensation,
-//! inverse-time feed, rotary axes, machine-coordinate moves) is refused with the line and the
-//! reason, never guessed at. A program is hostile input: every line, word and number is checked.
+//! Drilling cycles G81, G82, G83 and G73 read into one [`Move::Drill`] per hole (§3.5.16,
+//! decision 0008), in absolute mode in the XY plane, with G98's height by
+//! [`ReadSettings::g98`]. What controls run differently is refused by name: a cycle before G98
+//! or G99, a cycle line without X or Y, a hole started below its R plane, repeats (L).
+//!
+//! Anything outside the subset (parameters, expressions, tapping and boring cycles, cutter
+//! compensation, inverse-time feed, rotary axes, machine-coordinate moves) is refused with the
+//! line and the reason, never guessed at. A program is hostile input: every line, word and number
+//! is checked.
 
 use solidcore_record::Vec3;
 
+use crate::cycle::{DrillCycle, G98Rule};
 use crate::toolpath::{ARC_RADIUS_TOLERANCE, ArcDirection, Coolant, Move, Plane, SpindleDirection, Toolpath};
 use crate::units::{LengthUnit, MAX_COORDINATE};
 use crate::{Error, MAX_MOVES, Result};
@@ -32,6 +39,8 @@ pub struct ReadSettings {
     pub start: Vec3,
     /// Skip lines that start with `/` (the operator's block-delete switch is on).
     pub block_delete: bool,
+    /// What G98 returns a drilling cycle to: the control's rule (decision 0008).
+    pub g98: G98Rule,
 }
 
 /// What a program read back to.
@@ -50,7 +59,7 @@ pub struct ReadBack {
 
 /// Reads `program`. Errors name the 1-based line.
 pub fn read(program: &str, settings: &ReadSettings) -> Result<ReadBack> {
-    let mut m = Machine::new(settings.start);
+    let mut m = Machine::new(settings.start, settings.g98);
     for (index, raw) in program.split('\n').enumerate() {
         let line = index + 1;
         if line > MAX_LINES {
@@ -227,6 +236,13 @@ fn as_integer(value: f64) -> Option<i64> {
     ((value - r).abs() <= INTEGER_SLOP && r.abs() < 1e9).then_some(r as i64)
 }
 
+/// Whether two motion codes may share a line: G80 and a move (`G80 G0 Z1.`, which Haas writes),
+/// read as the cycle ending and then the move.
+fn cancel_then_move(a: i64, b: i64) -> bool {
+    let is_move = |g: i64| matches!(g, 0 | 10 | 20 | 30);
+    (a == 800 && is_move(b)) || (b == 800 && is_move(a))
+}
+
 fn g_name(code: i64) -> String {
     if code % 10 == 0 { format!("G{}", code / 10) } else { format!("G{}.{}", code / 10, code % 10) }
 }
@@ -236,7 +252,31 @@ enum Motion {
     Rapid,
     Linear,
     Arc(ArcDirection),
+    /// A drilling cycle ([`Machine::cycle`]).
+    Cycle,
     Cancelled,
+}
+
+/// Where a drilling cycle retracts to after each hole (group 10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetractMode {
+    /// G98: the height before the cycle ([`G98Rule`] says which).
+    Initial,
+    /// G99: the R plane.
+    RPlane,
+}
+
+/// A drilling cycle in force: its code (ten times its number) and the values its holes share, in
+/// mm and seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CycleState {
+    code: i64,
+    bottom: f64,
+    r: f64,
+    q: Option<f64>,
+    p: Option<f64>,
+    /// The tool's Z when the cycle was programmed.
+    start_z: f64,
 }
 
 /// The machine state the program drives.
@@ -258,10 +298,13 @@ struct Machine {
     /// absolute Z word sets it.
     z_unknown: bool,
     machine_retracts: usize,
+    retract_mode: Option<RetractMode>,
+    cycle: Option<CycleState>,
+    g98: G98Rule,
 }
 
 impl Machine {
-    fn new(start: Vec3) -> Self {
+    fn new(start: Vec3, g98: G98Rule) -> Self {
         Self {
             toolpath: Toolpath { start, moves: Vec::new() },
             at: start,
@@ -277,6 +320,9 @@ impl Machine {
             notes: Vec::new(),
             z_unknown: false,
             machine_retracts: 0,
+            retract_mode: None,
+            cycle: None,
+            g98,
         }
     }
 
@@ -295,7 +341,8 @@ impl Machine {
                 'G' => {
                     let code = as_integer(w.value * 10.0).ok_or_else(|| format!("G{} is not a G code", w.value))?;
                     let group = g_group(code).ok_or_else(|| format!("{} is not a known G code", g_name(code)))?;
-                    if group != 0 && gs.iter().any(|&g| g_group(g) == Some(group)) {
+                    let clash = gs.iter().filter(|&&g| g_group(g) == Some(group)).any(|&g| !(group == 1 && cancel_then_move(g, code)));
+                    if group != 0 && clash {
                         return Err(format!("two G codes from modal group {group} on one line"));
                     }
                     gs.push(code);
@@ -329,7 +376,7 @@ impl Machine {
         for &g in &gs {
             let unsupported = match g {
                 382 => Some("probing (G38.2)"),
-                730 | 810..=890 => Some("canned cycles"),
+                840..=890 => Some("tapping and boring cycles (G84-G89)"),
                 930 => Some("inverse-time feed (G93)"),
                 410 | 420 => Some("cutter radius compensation (G41/G42)"),
                 100 | 300 | 920..=923 => Some("moves and offsets in machine coordinates (G10, G30, G92)"),
@@ -448,6 +495,12 @@ impl Machine {
         } else if has_g(910) {
             self.incremental = true;
         }
+        // 18. Retract mode of drilling cycles
+        if has_g(980) {
+            self.retract_mode = Some(RetractMode::Initial);
+        } else if has_g(990) {
+            self.retract_mode = Some(RetractMode::RPlane);
+        }
         // 19. Retract to machine Z home: exactly `G91 G28 Z0` or `G53 G0 Z…`, the forms tool-change
         // sequences use (decision 0005). Anything else in machine coordinates is refused.
         let retract = has_g(280) || has_g(530);
@@ -469,20 +522,34 @@ impl Machine {
             self.z_unknown = true;
             self.machine_retracts += 1;
         }
-        // 20. Motion
+        // 20. Motion. G80 first: on a line with G80 and a move (as Haas writes `G80 G0 Z1.`) the
+        // cycle ends, then the tool moves.
+        if has_g(800) {
+            self.motion = Motion::Cancelled;
+            self.cycle = None;
+        }
+        let cycle_code = gs.iter().copied().find(|g| matches!(g, 730 | 810 | 820 | 830));
         for &g in &gs {
             self.motion = match g {
                 0 => Motion::Rapid,
                 10 => Motion::Linear,
                 20 => Motion::Arc(ArcDirection::Clockwise),
                 30 => Motion::Arc(ArcDirection::CounterClockwise),
-                800 => Motion::Cancelled,
+                730 | 810 | 820 | 830 => Motion::Cycle,
                 _ => continue,
             };
+            if self.motion != Motion::Cycle {
+                self.cycle = None;
+            }
         }
         let axes = [word('X'), word('Y'), word('Z')];
         if retract {
             // The retract was this line's motion.
+        } else if self.motion == Motion::Cycle && (cycle_code.is_some() || axes.iter().any(Option::is_some) || word('R').is_some()) {
+            if has_g(40) {
+                return Err("G4 and a drilling cycle on one line".into());
+            }
+            self.cycle_line(cycle_code, axes, [word('R'), word('Q'), word('P'), word('L')], &len)?;
         } else if axes.iter().any(Option::is_some) {
             if self.z_unknown {
                 if word('Z').is_none() || self.incremental {
@@ -496,6 +563,7 @@ impl Machine {
             self.z_unknown = false;
             match self.motion {
                 Motion::Cancelled => return Err("axis words with no motion mode (after G80)".into()),
+                Motion::Cycle => return Err("a drilling cycle with no cycle in force".into()),
                 Motion::Rapid => self.push(Move::Rapid { to: target }),
                 Motion::Linear => {
                     let feed = self.cutting_feed()?;
@@ -517,6 +585,95 @@ impl Machine {
         if has_m(2) || has_m(30) {
             self.ended = true;
         }
+        Ok(())
+    }
+
+    /// One hole of a drilling cycle: a line with G73, G81, G82 or G83 (`code`), or a line with X
+    /// or Y while one is in force. `words` are R, Q, P and L.
+    fn cycle_line(
+        &mut self,
+        code: Option<i64>,
+        axes: [Option<f64>; 3],
+        words: [Option<f64>; 4],
+        len: &impl Fn(f64) -> f64,
+    ) -> std::result::Result<(), String> {
+        let [r, q, p, l] = words;
+        if self.plane != Plane::Xy {
+            return Err("drilling cycles only in the XY plane (G17)".into());
+        }
+        if self.incremental {
+            return Err("drilling cycles in incremental mode (G91) are not supported yet".into());
+        }
+        if l.is_some() {
+            return Err("cycle repeats (L) are not supported".into());
+        }
+        if self.z_unknown {
+            return Err("Z is unknown after a machine retract: give an absolute Z before a drilling cycle".into());
+        }
+        let mode = self.retract_mode.ok_or("a drilling cycle before G98 or G99: controls differ in which they start in")?;
+        let [x, y, z] = axes;
+        if x.is_none() && y.is_none() {
+            return Err("a drilling cycle line without X or Y: controls differ on whether it drills (Haas Setting 28)".into());
+        }
+        let state = match (code, self.cycle) {
+            (Some(_), Some(_)) if self.g98 == G98Rule::CycleStart => {
+                return Err(
+                    "a new drilling cycle while one is in force: end it with G80 first (this control's G98 height comes from the first)".into()
+                );
+            }
+            (Some(code), _) => CycleState {
+                code,
+                bottom: len(z.ok_or("a drilling cycle needs Z (the hole's bottom)")?),
+                r: len(r.ok_or("a drilling cycle needs R (the R plane)")?),
+                q: q.map(len),
+                p,
+                start_z: self.at.z,
+            },
+            (None, Some(mut state)) => {
+                state.bottom = z.map_or(state.bottom, len);
+                state.r = r.map_or(state.r, len);
+                state.q = q.map(len).or(state.q);
+                state.p = p.or(state.p);
+                state
+            }
+            (None, None) => return Err("a drilling cycle with no cycle in force".into()),
+        };
+        let name = g_name(state.code);
+        let cycle = match state.code {
+            810 | 820 if state.q.is_some() => return Err(format!("{name} takes no Q")),
+            730 | 810 | 830 if state.p.is_some() => return Err(format!("P (a dwell) on {name} is not supported")),
+            810 => DrillCycle::Drill { dwell: 0.0 },
+            820 => match state.p {
+                Some(p) if p >= 0.0 => DrillCycle::Drill { dwell: p },
+                Some(p) => return Err(format!("dwell P{p} may not be negative")),
+                None => return Err("G82 needs P (the dwell in seconds)".into()),
+            },
+            730 | 830 => match state.q {
+                Some(q) if q > 0.0 && state.code == 830 => DrillCycle::Peck { peck: q },
+                Some(q) if q > 0.0 => DrillCycle::ChipBreak { peck: q },
+                Some(_) => return Err(format!("{name}: Q (the peck) must be above 0")),
+                None => return Err(format!("{name} needs Q (the peck)")),
+            },
+            _ => return Err(format!("{name} is not a drilling cycle")),
+        };
+        if [state.bottom, state.r].iter().any(|v| !(v.abs() <= MAX_COORDINATE)) {
+            return Err(format!("a position beyond {MAX_COORDINATE} mm"));
+        }
+        if !(state.r > state.bottom) {
+            return Err("the R plane must be above the hole's bottom (R above Z)".into());
+        }
+        if self.at.z < state.r {
+            return Err("the tool is below the R plane when the hole starts: controls differ on what happens".into());
+        }
+        let hole = self.target([x, y, None], len)?;
+        let retract = match (mode, self.g98) {
+            (RetractMode::RPlane, _) => state.r,
+            (RetractMode::Initial, G98Rule::BlockStart) => self.at.z.max(state.r),
+            (RetractMode::Initial, G98Rule::CycleStart) => state.start_z.max(state.r),
+        };
+        let feed = self.cutting_feed()?;
+        self.push(Move::Drill { to: Vec3 { x: hole.x, y: hole.y, z: state.bottom }, r: state.r, retract, cycle, feed });
+        self.cycle = Some(state);
         Ok(())
     }
 

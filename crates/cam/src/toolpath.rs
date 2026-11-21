@@ -7,6 +7,7 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
+use crate::cycle::{self, CycleMotion, DrillCycle};
 use crate::units::MAX_COORDINATE;
 use crate::{Error, Result};
 
@@ -111,6 +112,10 @@ pub enum Move {
     SpindleStop,
     /// Set the coolant.
     Coolant { mode: Coolant },
+    /// One hole of a drilling cycle (decision 0008), along Z: from at or above the R plane at
+    /// height `r`, rapid across at the current height to above `to`, rapid down to `r`, cut to
+    /// `to` as `cycle` says at `feed`, then rapid up to `retract` (`r` or above).
+    Drill { to: Vec3, r: f64, retract: f64, cycle: DrillCycle, feed: f64 },
 }
 
 impl Move {
@@ -118,6 +123,7 @@ impl Move {
     pub fn end(&self, from: Vec3) -> Vec3 {
         match *self {
             Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => to,
+            Move::Drill { to, retract, .. } => Vec3 { x: to.x, y: to.y, z: retract },
             _ => from,
         }
     }
@@ -281,12 +287,41 @@ impl Toolpath {
             Move::Spindle { rpm, .. } if rpm > 0.0 && rpm <= MAX_SPINDLE_RPM => Ok(()),
             Move::Spindle { rpm, .. } => Err(format!("spindle speed must be above 0 and at most {MAX_SPINDLE_RPM} rpm, not {rpm}")),
             Move::SpindleStop | Move::Coolant { .. } => Ok(()),
+            Move::Drill { to, r, retract, cycle, feed } => {
+                check_point(to)?;
+                check_feed(feed)?;
+                cycle::check(from, to, r, retract, cycle)
+            }
         }
     }
 
-    /// Lengths, times and bounds of a valid toolpath ([`Toolpath::validate`] first).
-    pub fn stats(&self) -> Result<Stats> {
+    /// The toolpath with every hole ([`Move::Drill`]) written out as the plain moves it makes,
+    /// with the control's cycle distances `motion`; other moves as they are.
+    pub fn expanded(&self, motion: &CycleMotion) -> Result<Toolpath> {
         self.validate()?;
+        motion.check().map_err(|e| Error::BadValue(format!("cycle motion: {e}")))?;
+        let mut moves = Vec::with_capacity(self.moves.len());
+        for (from, m) in self.walk() {
+            match *m {
+                Move::Drill { to, r, retract, cycle, feed } => cycle::expand(from, to, r, retract, cycle, feed, motion, &mut moves),
+                other => moves.push(other),
+            }
+            if moves.len() > MAX_MOVES {
+                return Err(Error::TooManyMoves { count: moves.len(), max: MAX_MOVES });
+            }
+        }
+        Ok(Toolpath { start: self.start, moves })
+    }
+
+    /// Lengths, times and bounds of a valid toolpath ([`Toolpath::validate`] first). Holes count as
+    /// they run with [`CycleMotion::default`]; [`Toolpath::expanded`] with a post's own motion
+    /// first gives that control's numbers.
+    pub fn stats(&self) -> Result<Stats> {
+        let path = self.expanded(&CycleMotion::default())?;
+        path.stats_of_plain_moves()
+    }
+
+    fn stats_of_plain_moves(&self) -> Result<Stats> {
         let mut s =
             Stats { feed_length: 0.0, rapid_length: 0.0, feed_minutes: 0.0, dwell_minutes: 0.0, tool_changes: 0, min: self.start, max: self.start };
         for (index, (from, m)) in self.walk().enumerate() {
@@ -313,7 +348,8 @@ impl Toolpath {
                 }
                 Move::Dwell { seconds } => s.dwell_minutes += seconds / 60.0,
                 Move::ToolChange { .. } => s.tool_changes += 1,
-                Move::Spindle { .. } | Move::SpindleStop | Move::Coolant { .. } => {}
+                // Holes were expanded into plain moves first.
+                Move::Spindle { .. } | Move::SpindleStop | Move::Coolant { .. } | Move::Drill { .. } => {}
             }
         }
         Ok(s)

@@ -104,6 +104,34 @@ fn a_setup_posts_on_every_built_in_post_and_reads_back() {
 }
 
 #[test]
+fn a_hand_made_hole_posts_as_a_canned_cycle_where_the_post_has_one() {
+    let mut s = Session::default();
+    run(&mut s, "cam.tool.create", json!({"tool": tool(1)}));
+    run(&mut s, "cam.setup.create", json!({}));
+    let holes = json!({"start": p(0.0, 0.0, 50.0), "moves": [
+        {"kind": "tool_change", "tool": 1},
+        {"kind": "rapid", "to": p(5.0, 5.0, 10.0)},
+        {"kind": "drill", "to": p(5.0, 5.0, -8.0), "r": 2.0, "retract": 10.0, "cycle": {"type": "chip_break", "peck": 3.0}, "feed": 120.0},
+        {"kind": "drill", "to": p(15.0, 5.0, -8.0), "r": 2.0, "retract": 10.0, "cycle": {"type": "chip_break", "peck": 3.0}, "feed": 120.0},
+        {"kind": "rapid", "to": p(15.0, 5.0, 50.0)}
+    ]});
+    run(&mut s, "cam.op.manual", json!({"setup": "setup-1", "tool": 1, "toolpath": holes}));
+    let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = haas["text"].as_str().unwrap();
+    assert!(text.contains("\nG98 G73 X5. Y5. Z-8. R2. Q3. F120.\nX15. Y5.\nG80\nG0 Z50.\n"), "{text}");
+    assert_eq!(haas["moves"], 5);
+    // RS274/NGC has no G73: the same holes as plain moves, said so in the notes.
+    let rs = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274"}));
+    assert!(!rs["text"].as_str().unwrap().contains("G73"));
+    assert!(rs["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("plain moves")), "{rs}");
+    // A hole that would start below its R plane is refused when it is added, not when it is posted.
+    let low = json!({"start": p(0.0, 0.0, 1.0), "moves": [
+        {"kind": "drill", "to": p(0.0, 0.0, -5.0), "r": 2.0, "retract": 2.0, "cycle": {"type": "drill", "dwell": 0.0}, "feed": 100.0}
+    ]});
+    assert!(refused(&mut s, "cam.op.manual", json!({"setup": "setup-1", "tool": 1, "toolpath": low})).contains("R plane"));
+}
+
+#[test]
 fn every_change_is_one_undo_step() {
     let mut s = Session::default();
     run(&mut s, "cam.setup.create", json!({"name": "Op 1"}));

@@ -1,4 +1,5 @@
 use super::*;
+use crate::units::MM_PER_INCH;
 
 fn p(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3 { x, y, z }
@@ -134,7 +135,7 @@ fn hostile_programs_are_refused_with_their_line_and_reason() {
         ("G0 X[1+2]", "expressions"),
         ("G0 X#1", "parameters"),
         ("F1\nG41 X1 D1", "line 2: G41"),
-        ("G81 X1 Z-1 R1", "canned cycles"),
+        ("G84 X1 Z-1 R1", "tapping and boring"),
         ("G28 Z0", "G91 G28 Z0"),
         ("G91 G28 X0 Z0", "G91 G28 Z0"),
         ("G91 G28 Z1", "G91 G28 Z0"),
@@ -193,7 +194,7 @@ fn hostile_programs_are_refused_with_their_line_and_reason() {
 fn random_bytes_never_panic() {
     // A fixed linear congruential generator over a G-code-flavoured alphabet: deterministic, no
     // dependency, and dense in the characters the parser treats specially.
-    let alphabet: Vec<char> = "GMXYZIJKRFSTNOP0123456789.-+ ()#[]/%;\n\r\téA".chars().collect();
+    let alphabet: Vec<char> = "GMXYZIJKRFSTNOPQL0123456789.-+ ()#[]/%;\n\r\téA".chars().collect();
     let mut state: u64 = 0x2545_f491_4f6c_dd1d;
     for _ in 0..3000 {
         let mut program = String::new();
@@ -212,4 +213,119 @@ fn machine_z_retracts_are_counted_not_moved_and_need_a_full_next_move() {
     let r = read("G0 X1 Y2 Z3\nG91 G28 Z0\nG90\nT1 M6\nG53 G0 Z0\nG0 G43 H1 X4 Y5 Z50", &ReadSettings::default()).unwrap();
     assert_eq!(r.machine_retracts, 2);
     assert_eq!(r.toolpath.moves, vec![Move::Rapid { to: p(1.0, 2.0, 3.0) }, Move::ToolChange { tool: 1 }, Move::Rapid { to: p(4.0, 5.0, 50.0) }]);
+}
+
+fn drill(x: f64, y: f64, bottom: f64, r: f64, retract: f64, cycle: DrillCycle, feed: f64) -> Move {
+    Move::Drill { to: p(x, y, bottom), r, retract, cycle, feed }
+}
+
+fn read_with(g98: G98Rule, program: &str) -> std::result::Result<Vec<Move>, String> {
+    read(program, &ReadSettings { g98, ..ReadSettings::default() }).map(|r| r.toolpath.moves).map_err(|e| e.to_string())
+}
+
+#[test]
+fn nists_g81_example_reads_as_one_hole() {
+    // NIST IR 6556 §3.5.16.2, example 1, from (1, 2, 3): G98 returns to the old Z, 3.
+    let moves = moves_from(p(1.0, 2.0, 3.0), "F100\nG90 G81 G98 X4 Y5 Z1.5 R2.8");
+    assert_eq!(moves, vec![drill(4.0, 5.0, 1.5, 2.8, 3.0, DrillCycle::Drill { dwell: 0.0 }, 100.0)]);
+}
+
+#[test]
+fn g98_returns_where_the_controls_rule_says() {
+    // G99 holes, then G98 after them, then G99 with a new depth and R plane on a hole's own line.
+    let program = "G21 G90 G17 F200\nG0 X0 Y0 Z25\nG99 G83 X10 Y10 Z-12 R2 Q4\nX20\nG98 X30\nG99 X40 Z-6 R-1\nG80 G0 Z25";
+    let peck = DrillCycle::Peck { peck: 4.0 };
+    let first = [rapid_to(0.0, 0.0, 25.0), drill(10.0, 10.0, -12.0, 2.0, 2.0, peck, 200.0), drill(20.0, 10.0, -12.0, 2.0, 2.0, peck, 200.0)];
+    // Haas: G98 goes back up to the 25 the cycle started at.
+    let haas = read_with(G98Rule::CycleStart, program).unwrap();
+    let expect: Vec<Move> = first
+        .iter()
+        .copied()
+        .chain([drill(30.0, 10.0, -12.0, 2.0, 25.0, peck, 200.0), drill(40.0, 10.0, -6.0, -1.0, -1.0, peck, 200.0), rapid_to(40.0, 10.0, 25.0)])
+        .collect();
+    assert_eq!(haas, expect);
+    // NIST: G98 goes back to where its own line started, the R plane of the hole before.
+    let nist = read_with(G98Rule::BlockStart, program).unwrap();
+    let expect: Vec<Move> = first
+        .iter()
+        .copied()
+        .chain([drill(30.0, 10.0, -12.0, 2.0, 2.0, peck, 200.0), drill(40.0, 10.0, -6.0, -1.0, -1.0, peck, 200.0), rapid_to(40.0, 10.0, 25.0)])
+        .collect();
+    assert_eq!(nist, expect);
+}
+
+fn rapid_to(x: f64, y: f64, z: f64) -> Move {
+    Move::Rapid { to: p(x, y, z) }
+}
+
+#[test]
+fn every_drilling_cycle_reads_with_its_own_words() {
+    let holes = moves("F50\nG0 Z5\nG99 G82 X1 Y1 Z-2 R1 P0.25\nG73 X2 Y2 Z-3 R1 Q0.5\nG81 X3 Y3 Z-1 R1\nG80");
+    assert_eq!(
+        holes[1..],
+        [
+            drill(1.0, 1.0, -2.0, 1.0, 1.0, DrillCycle::Drill { dwell: 0.25 }, 50.0),
+            drill(2.0, 2.0, -3.0, 1.0, 1.0, DrillCycle::ChipBreak { peck: 0.5 }, 50.0),
+            drill(3.0, 3.0, -1.0, 1.0, 1.0, DrillCycle::Drill { dwell: 0.0 }, 50.0),
+        ]
+    );
+    // In inches every length is converted, the dwell (seconds) is not.
+    let inch = moves("G20 F10\nG0 X0 Y0 Z1\nG98 G82 X1 Y1 Z-0.5 R0.1 P1.5");
+    let mm = |v: f64| v * MM_PER_INCH;
+    assert_eq!(inch[1], drill(mm(1.0), mm(1.0), mm(-0.5), mm(0.1), mm(1.0), DrillCycle::Drill { dwell: 1.5 }, mm(10.0)));
+}
+
+#[test]
+fn g80_and_a_move_on_one_line_end_the_cycle_then_move() {
+    // Haas writes `G80 G00 Z1.`; NIST would call two group 1 codes an error, but the meaning is plain.
+    for line in ["G80 G0 X5", "G0 G80 X5"] {
+        let read = moves(&format!("F10\nG0 Z5\nG98 G81 X1 Y1 Z-1 R1\n{line}"));
+        assert_eq!(read.last(), Some(&rapid_to(5.0, 1.0, 5.0)), "{line}");
+    }
+    assert!(error("G80 G1 G0 X1").contains("modal group 1"));
+    assert!(error("G81 G0 X1").contains("modal group 1"));
+    // Any other move ends the cycle too: a later X is a rapid, not another hole.
+    let read = moves("F10\nG0 Z5\nG98 G81 X1 Y1 Z-1 R1\nG0 X2\nX3");
+    assert_eq!(read.last(), Some(&rapid_to(3.0, 1.0, 5.0)));
+}
+
+#[test]
+fn drilling_cycles_controls_disagree_on_are_refused() {
+    let cases: &[(&str, &str)] = &[
+        ("G81 X1 Y1 Z-1 R1", "before G98 or G99"),
+        ("G98 G81 Z-1 R1", "without X or Y"),
+        ("G98 G81 X1 Y1 Z-1 R1\nZ-2", "without X or Y"),
+        ("G98 G81 X1 Y1 Z-1 R1\nR3", "without X or Y"),
+        ("G98 G81 X1 Y1 Z-1 R20", "below the R plane"),
+        ("G98 G81 X1 Y1 Z-1", "needs R"),
+        ("G98 G81 X1 Y1 R1", "needs Z"),
+        ("G98 G81 X1 Y1 Z2 R1", "R above Z"),
+        ("G98 G81 X1 Y1 Z1 R1", "R above Z"),
+        ("G98 G81 X1 Y1 Z-2000000 R1", "beyond"),
+        ("G91 G98 G81 X1 Y1 Z-1 R1", "incremental"),
+        ("G98 G81 X1 Y1 Z-1 R1 L2", "repeats (L)"),
+        ("G18 G98 G81 X1 Y1 Z-1 R1", "XY plane"),
+        ("G98 G81 X1 Y1 Z-1 R1 P1", "P (a dwell) on G81"),
+        ("G98 G81 X1 Y1 Z-1 R1 Q1", "G81 takes no Q"),
+        ("G98 G82 X1 Y1 Z-1 R1", "G82 needs P"),
+        ("G98 G82 X1 Y1 Z-1 R1 Q1 P1", "G82 takes no Q"),
+        ("G98 G82 X1 Y1 Z-1 R1 P-1", "negative"),
+        ("G98 G83 X1 Y1 Z-1 R1", "G83 needs Q"),
+        ("G98 G83 X1 Y1 Z-1 R1 Q0", "above 0"),
+        ("G98 G73 X1 Y1 Z-1 R1 Q-1", "above 0"),
+        ("G98 G83 X1 Y1 Z-1 R1 Q1 P1", "P (a dwell) on G83"),
+        ("G98 G81 X1 Y1 Z-1 R1\nX2 P1", "P (a dwell) on G81"),
+        ("G98 G81 X1 Y1 Z-1 R1 G4 P1", "G4 and a drilling cycle"),
+        ("G91 G28 Z0\nG90\nG98 G81 X1 Y1 Z-1 R1", "Z is unknown"),
+    ];
+    for (body, expect) in cases {
+        let program = format!("F100\nG0 Z10\n{body}");
+        let e = error(&program);
+        assert!(e.contains(expect), "{body:?}: {e:?} does not mention {expect:?}");
+    }
+    assert!(error("G0 Z10\nG98 G81 X1 Y1 Z-1 R1").contains("before any feed"));
+    // Starting another cycle without G80 is fine by NIST's G98, not by Haas's (which counts from the first).
+    let again = "F100\nG0 Z10\nG98 G81 X1 Y1 Z-1 R1\nG83 X2 Y2 Z-1 R1 Q1";
+    assert_eq!(read_with(G98Rule::BlockStart, again).map(|m| m.len()), Ok(3));
+    assert!(read_with(G98Rule::CycleStart, again).unwrap_err().contains("G80 first"));
 }

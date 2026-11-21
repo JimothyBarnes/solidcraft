@@ -4,7 +4,8 @@
 //! The crate knows nothing of documents, designs or the UI. Its inputs are plain data and its
 //! outputs are toolpaths and reports, so it can be tested on its own. Later phases add the
 //! strategies that compute toolpaths and the post-processor here. [`read_gcode`] reads G-code
-//! back into a toolpath, so every program we write can be checked against its source.
+//! back into a toolpath, so every program we write can be checked against its source. Holes are
+//! one [`Move::Drill`] each (decision 0008); [`Toolpath::expanded`] gives the moves they make.
 //!
 //! Units are millimetres, minutes and radians internally: positions in mm, feeds in mm/min,
 //! spindle speeds in rev/min, dwells in seconds. [`LengthUnit`] converts at the edges only.
@@ -14,6 +15,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod cycle;
 mod gcode_reader;
 mod manufacture;
 mod post;
@@ -21,13 +23,16 @@ mod tool;
 mod toolpath;
 mod units;
 
+pub use cycle::{CycleMotion, DrillCycle, G98Rule, MAX_CYCLE_DISTANCE, MAX_PECKS, MIN_HOLE_DEPTH, MIN_PECK, PeckRetract};
 pub use gcode_reader::{MAX_LINE_CHARS, MAX_LINES, ReadBack, ReadSettings, read as read_gcode};
 
 pub use manufacture::{
     BoxAnchor, BoxOffsets, BoxSide, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, MAX_DESIGN_TOOLS, MAX_OPERATIONS, MAX_REFERENCES, MAX_SETUPS,
     ManufactureData, Operation, OperationKind, SafeHeights, Setup, SetupKind, Stock, Wcs, WcsOrientation, WcsOrigin,
 };
-pub use post::{Arcs, BUILTIN_POSTS, Comments, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences};
+pub use post::{
+    Arcs, BUILTIN_POSTS, Comments, Cycles, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences,
+};
 pub use tool::{
     CuttingData, Engagement, FeedWarning, Holder, HolderSegment, MAX_CUTTING_DATA, MAX_HOLDER_SEGMENTS, MAX_TOOLS, Overrides, SpeedsFeeds,
     TOOL_LIBRARY_FORMAT, Tool, ToolGeometry, ToolKind, ToolLibrary,
