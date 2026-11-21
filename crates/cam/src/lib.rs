@@ -18,6 +18,7 @@
 mod cycle;
 mod gcode_reader;
 mod manufacture;
+mod placement;
 mod post;
 mod tool;
 mod toolpath;
@@ -30,6 +31,7 @@ pub use manufacture::{
     BoxAnchor, BoxOffsets, BoxSide, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, MAX_DESIGN_TOOLS, MAX_OPERATIONS, MAX_REFERENCES, MAX_SETUPS,
     ManufactureData, Operation, OperationKind, SafeHeights, Setup, SetupKind, Stock, Wcs, WcsOrientation, WcsOrigin,
 };
+pub use placement::{Bounds, Placement};
 pub use post::{
     Arcs, BUILTIN_POSTS, Comments, Cycles, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences,
 };

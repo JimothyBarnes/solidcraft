@@ -115,6 +115,26 @@ pub struct CamSetupDeleteParams {
     pub id: String,
 }
 
+/// Measure a setup on the model: its stock box, work coordinate system and safe heights.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupMeasureParams {
+    pub id: String,
+}
+
+/// A setup placed on the model, measured on the bodies' exact boxes (never a display mesh).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupMeasured {
+    pub id: String,
+    /// The bodies measured: the setup's model bodies, or every visible body when it lists none.
+    pub bodies: Vec<String>,
+    /// Their box in model coordinates: `{min: [x, y, z], max: [x, y, z]}`, mm.
+    pub model_box: Value,
+    /// `{origin, x_axis, y_axis, z_axis}` in model coordinates, then `model` and `stock` boxes and
+    /// `clearance_z`, `retract_z` in the WCS, mm.
+    pub placement: Value,
+}
+
 /// What a setup command left.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CamSetupWritten {

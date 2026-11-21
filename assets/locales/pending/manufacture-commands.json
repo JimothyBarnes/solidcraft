@@ -10,6 +10,7 @@
     "cmd.cam_setup_create": "New Setup",
     "cmd.cam_setup_delete": "Delete Setup",
     "cmd.cam_setup_edit": "Edit Setup",
+    "cmd.cam_setup_measure": "Measure Setup",
     "cmd.cam_tool_create": "Add Tool",
     "cmd.cam_tool_delete": "Delete Tool",
     "cmd.cam_tool_edit": "Edit Tool"
@@ -25,6 +26,7 @@
     "cmd.cam_setup_create": "إعداد جديد",
     "cmd.cam_setup_delete": "حذف الإعداد",
     "cmd.cam_setup_edit": "تعديل الإعداد",
+    "cmd.cam_setup_measure": "قياس الإعداد",
     "cmd.cam_tool_create": "إضافة أداة",
     "cmd.cam_tool_delete": "حذف الأداة",
     "cmd.cam_tool_edit": "تعديل الأداة"
@@ -40,6 +42,7 @@
     "cmd.cam_setup_create": "הגדרה חדשה",
     "cmd.cam_setup_delete": "מחיקת הגדרה",
     "cmd.cam_setup_edit": "עריכת הגדרה",
+    "cmd.cam_setup_measure": "מדידת הגדרה",
     "cmd.cam_tool_create": "הוספת כלי",
     "cmd.cam_tool_delete": "מחיקת כלי",
     "cmd.cam_tool_edit": "עריכת כלי"
@@ -55,6 +58,7 @@
     "cmd.cam_setup_create": "新しいセットアップ",
     "cmd.cam_setup_delete": "セットアップを削除",
     "cmd.cam_setup_edit": "セットアップを編集",
+    "cmd.cam_setup_measure": "セットアップを計測",
     "cmd.cam_tool_create": "工具を追加",
     "cmd.cam_tool_delete": "工具を削除",
     "cmd.cam_tool_edit": "工具を編集"
@@ -70,6 +74,7 @@
     "cmd.cam_setup_create": "Thiết lập mới",
     "cmd.cam_setup_delete": "Xóa thiết lập",
     "cmd.cam_setup_edit": "Sửa thiết lập",
+    "cmd.cam_setup_measure": "Đo thiết lập",
     "cmd.cam_tool_create": "Thêm dao",
     "cmd.cam_tool_delete": "Xóa dao",
     "cmd.cam_tool_edit": "Sửa dao"
@@ -85,6 +90,7 @@
     "cmd.cam_setup_create": "新建设置",
     "cmd.cam_setup_delete": "删除设置",
     "cmd.cam_setup_edit": "编辑设置",
+    "cmd.cam_setup_measure": "测量设置",
     "cmd.cam_tool_create": "添加刀具",
     "cmd.cam_tool_delete": "删除刀具",
     "cmd.cam_tool_edit": "编辑刀具"
@@ -100,6 +106,7 @@
     "cmd.cam_setup_create": "Neue Aufspannung",
     "cmd.cam_setup_delete": "Aufspannung löschen",
     "cmd.cam_setup_edit": "Aufspannung bearbeiten",
+    "cmd.cam_setup_measure": "Aufspannung messen",
     "cmd.cam_tool_create": "Werkzeug hinzufügen",
     "cmd.cam_tool_delete": "Werkzeug löschen",
     "cmd.cam_tool_edit": "Werkzeug bearbeiten"
@@ -115,6 +122,7 @@
     "cmd.cam_setup_create": "새 셋업",
     "cmd.cam_setup_delete": "셋업 삭제",
     "cmd.cam_setup_edit": "셋업 편집",
+    "cmd.cam_setup_measure": "셋업 측정",
     "cmd.cam_tool_create": "공구 추가",
     "cmd.cam_tool_delete": "공구 삭제",
     "cmd.cam_tool_edit": "공구 편집"
