@@ -8,6 +8,7 @@ use crate::SolveApp;
 use solidcraft_viewport::Camera;
 
 pub(crate) mod browser;
+pub(crate) mod scene;
 
 /// Manufacture's ribbon tabs.
 pub const TABS: &[&str] = &["MANUFACTURE"];
@@ -36,6 +37,10 @@ pub struct State {
     manufacture_camera: Option<(Camera, bool)>,
     /// The Design tab to go back to.
     previous_tab: Option<String>,
+    /// The setup the viewport draws, by id; the design's first when `None` or gone.
+    pub(crate) active_setup: Option<String>,
+    /// What the viewport draws of it, kept until the design changes.
+    pub(crate) scene: std::sync::Mutex<scene::Cache>,
 }
 
 pub fn active(app: &SolveApp) -> bool {
@@ -170,6 +175,71 @@ mod tests {
         // Back in Design the Browser shows the model again, not the setups.
         crate::workspace::enter(&mut h.app, "design").unwrap();
         assert!(!browser_labels(&mut h).iter().any(|l| l == "Op 1 (G55)"));
+    }
+
+    /// A 60 x 40 x 20 block, a 20 mm end mill with data for aluminium, the vise setup and a facing.
+    fn faced_block(h: &mut Harness) {
+        h.app.run("solid.box", json!({"length": 60, "width": 40, "height": 20, "corner": [0, 0, 0]})).unwrap();
+        let tool = json!({
+            "number": 4, "name": "20 mm flat end mill", "kind": "flat_end_mill",
+            "geometry": {"diameter": 20.0, "corner_radius": 0.0, "flute_length": 30.0, "shoulder_length": 0.0, "overall_length": 100.0,
+                         "shank_diameter": 20.0, "tip_angle": 0.0, "tip_diameter": 0.0, "thread_pitch": 0.0},
+            "flutes": 4, "holder": {"stick_out": 50.0, "segments": []}, "length_offset": 4, "diameter_offset": 4, "coolant": "flood",
+            "cutting_data": [{"material": "aluminium", "surface_speed": 200.0, "chip_load": 0.05, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+            "overrides": {"rpm": null, "feed": null}
+        });
+        h.app.run("cam.tool.create", json!({"tool": tool})).unwrap();
+        h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+        h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 4})).unwrap();
+    }
+
+    #[test]
+    fn the_viewport_draws_the_active_setups_stock_origin_and_toolpaths() {
+        use crate::gpu::LINE_SIZE;
+        let mut h = harness();
+        faced_block(&mut h);
+        // Nothing of Manufacture is drawn in Design.
+        assert_eq!((scene::counts(&h.app), scene::key(&h.app)), ((0, 0, 0), 0));
+        let design = crate::viewport::build_highlight(&h.app).merged();
+        crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+        // The stock's six sides (two triangles each); its twelve edges and the origin's three
+        // arms; the facing's eleven pieces (three rapids, a plunge, four passes, three steps).
+        assert_eq!(scene::counts(&h.app), (12, 15, 11), "{:?}", scene::trouble(&h.app));
+        // The highlight scene, the path a real frame takes, gains exactly those.
+        let shown = crate::viewport::build_highlight(&h.app).merged();
+        assert_eq!((shown.lines.len() - design.lines.len()) / LINE_SIZE, 11);
+        assert_eq!((shown.guide_lines.len() - design.guide_lines.len()) / LINE_SIZE, 15);
+        assert_eq!((shown.guide_trans.len() - design.guide_trans.len()) / crate::gpu::TRI_SIZE, 36);
+        // A second setup is drawn once its radio is picked: its stock and origin, no toolpath yet.
+        h.app.run("cam.setup.create", json!({"name": "Op 2"})).unwrap();
+        assert_eq!(scene::counts(&h.app), (12, 15, 11));
+        let first = scene::key(&h.app);
+        h.app.manufacture_workspace.active_setup = Some("setup-2".into());
+        assert_ne!(scene::key(&h.app), first);
+        assert_eq!(scene::counts(&h.app), (12, 15, 0));
+        // A setup that can't be placed draws nothing and says why.
+        h.app.run("cam.setup.edit", json!({"id": "setup-2", "model_bodies": ["Gone"]})).unwrap();
+        assert_eq!(scene::counts(&h.app), (0, 0, 0));
+        assert!(scene::trouble(&h.app).unwrap().contains("'Gone' is not in the design"));
+        // A setup that is gone falls back to the first.
+        h.app.run("cam.setup.delete", json!({"id": "setup-2"})).unwrap();
+        assert_eq!(scene::counts(&h.app), (12, 15, 11));
+        assert!(scene::trouble(&h.app).is_none());
+    }
+
+    #[test]
+    fn the_browser_marks_the_active_setup_and_says_why_one_cannot_be_drawn() {
+        let mut h = harness();
+        faced_block(&mut h);
+        crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+        h.app.run("cam.setup.create", json!({"name": "Op 2", "model_bodies": ["Gone"]})).unwrap();
+        let labels = browser_labels(&mut h);
+        assert!(labels.iter().any(|l| l == "Setup 1 (G54)") && labels.iter().any(|l| l == "Face 1 (T4)"), "{labels:?}");
+        let why = "the setup's model body 'Gone' is not in the design";
+        assert!(h.widget(why).is_none(), "the first setup is the one drawn, and it is fine");
+        h.app.manufacture_workspace.active_setup = Some("setup-2".into());
+        h.frames(3);
+        assert!(h.widget(why).is_some(), "the Browser says why the active setup is not drawn");
     }
 
     #[test]

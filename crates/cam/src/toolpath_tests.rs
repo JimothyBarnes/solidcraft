@@ -125,3 +125,42 @@ fn moves_round_trip_through_json_with_their_kind_named() {
     assert_eq!(serde_json::from_str::<Toolpath>(&json).unwrap(), tp);
     assert!(serde_json::from_str::<Toolpath>(r#"{"start":{"x":0,"y":0,"z":0},"moves":[{"kind":"teleport"}]}"#).is_err());
 }
+
+#[test]
+fn a_toolpath_is_drawn_as_straight_pieces_that_say_how_they_move() {
+    // A rapid down, a plunge, a cut, a quarter arc of radius 10 and a hole.
+    let path = Toolpath {
+        start: p(0.0, 0.0, 20.0),
+        moves: vec![
+            Move::Spindle { rpm: 1000.0, direction: SpindleDirection::Clockwise },
+            Move::Rapid { to: p(0.0, 0.0, 5.0) },
+            Move::Rapid { to: p(0.0, 0.0, 5.0) },
+            Move::Linear { to: p(0.0, 0.0, -1.0), feed: 100.0 },
+            Move::Linear { to: p(10.0, 0.0, -1.0), feed: 200.0 },
+            Move::Arc { to: p(0.0, 10.0, -1.0), center: p(0.0, 0.0, -1.0), plane: Plane::Xy, direction: ArcDirection::CounterClockwise, feed: 200.0 },
+            Move::Rapid { to: p(0.0, 10.0, 5.0) },
+            Move::Drill { to: p(20.0, 10.0, -4.0), r: 2.0, retract: 5.0, cycle: crate::DrillCycle::Drill { dwell: 0.5 }, feed: 50.0 },
+        ],
+    };
+    let pieces = path.drawn(0.1).unwrap();
+    // The arc: a chord may stray 0.1 from radius 10, so at most 2 acos(0.99) = 16.2° each: six of 15°.
+    let kinds: Vec<Drawn> = pieces.iter().map(|x| x.0).collect();
+    let mut expect = vec![Drawn::Rapid, Drawn::Plunge, Drawn::Cut];
+    expect.extend([Drawn::Cut; 6]);
+    // Up; then the hole: across at 5, down to R (2), the cut straight down, back up to 5.
+    expect.extend([Drawn::Rapid, Drawn::Rapid, Drawn::Rapid, Drawn::Plunge, Drawn::Rapid]);
+    assert_eq!(kinds, expect);
+    // The pieces join end to end, the repeated rapid and the dwell left out.
+    assert!(pieces.windows(2).all(|w| w[0].2 == w[1].1));
+    assert_eq!((pieces[0].1, pieces[pieces.len() - 1].2), (p(0.0, 0.0, 20.0), p(20.0, 10.0, 5.0)));
+    // Every corner of the drawn arc is on the circle, and the middle of every chord within 0.1 of it.
+    for (_, a, b) in &pieces[3..9] {
+        assert!((a.x.hypot(a.y) - 10.0).abs() < 1e-9 && (b.x.hypot(b.y) - 10.0).abs() < 1e-9);
+        let stray = 10.0 - (0.5 * (a.x + b.x)).hypot(0.5 * (a.y + b.y));
+        assert!((0.0..=0.1).contains(&stray), "{stray}");
+    }
+    assert_eq!(pieces[8].2, p(0.0, 10.0, -1.0));
+    // A finer tolerance draws more pieces; a useless one is refused.
+    assert!(path.drawn(0.001).unwrap().len() > pieces.len());
+    assert!(path.drawn(0.0).is_err() && path.drawn(f64::NAN).is_err());
+}

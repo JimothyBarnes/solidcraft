@@ -380,6 +380,45 @@ fn a_facing_operation_takes_the_stock_top_down_to_the_part() {
 }
 
 #[test]
+fn a_view_of_a_setup_has_its_placement_and_its_operations_as_drawn_pieces() {
+    use solidcraft_cam::Drawn;
+    let mut s = drilling();
+    // Nothing to draw before there is a setup. A setup that is gone falls back to the first.
+    assert!(crate::cmd::manufacture_view(&Session::default(), None).unwrap().is_none());
+    assert!(crate::cmd::manufacture_view(&Session::default(), Some("setup-1")).unwrap().is_none());
+    assert_eq!(crate::cmd::manufacture_view(&s, Some("setup-9")).unwrap().unwrap().id, "setup-1");
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    // An operation that can't be worked out says why and the rest are still drawn.
+    run(
+        &mut s,
+        "cam.op.drill",
+        json!({"setup": "setup-1", "tool": 3, "name": "Too deep", "drill": {"holes": [[0, 0]], "depth": 39.9, "depth_to": "full_diameter", "cycle": {"type": "drill", "dwell": 0}}}),
+    );
+    let undo = s.undo.len();
+    let view = crate::cmd::manufacture_view(&s, None).unwrap().unwrap();
+    assert_eq!(s.undo.len(), undo, "a view changes nothing");
+    assert_eq!((view.id.as_str(), view.operations.len()), ("setup-1", 3));
+    assert_eq!((view.placement.origin.x, view.placement.origin.y, view.placement.origin.z), (30.0, 20.0, 21.0));
+    // Facing: 2 rapids in (the first goes nowhere and is left out: 1), a plunge, 4 passes and 3
+    // steps, 2 rapids out.
+    let face = view.operations[0].pieces.as_ref().unwrap();
+    let count = |pieces: &[(Drawn, solidcore_record::Vec3, solidcore_record::Vec3)], kind: Drawn| pieces.iter().filter(|x| x.0 == kind).count();
+    assert_eq!((count(face, Drawn::Rapid), count(face, Drawn::Plunge), count(face, Drawn::Cut)), (3, 1, 7));
+    // Drilling starts where facing ended (X -43, Y -17 at the clearance height) and its pecks cut
+    // straight down: six a hole.
+    let drill = view.operations[1].pieces.as_ref().unwrap();
+    assert_eq!((drill[0].1.x, drill[0].1.y, drill[0].1.z), (-43.0, -17.0, 25.0));
+    assert_eq!((count(drill, Drawn::Plunge), count(drill, Drawn::Cut)), (18, 0));
+    assert!(view.operations[2].pieces.as_ref().unwrap_err().contains("flutes"), "{:?}", view.operations[2].pieces.as_ref().err());
+    // A setup that can't be placed says why, in plain words.
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "model_bodies": ["Gone"]}));
+    let why = crate::cmd::manufacture_view(&s, Some("setup-1")).err().unwrap();
+    assert!(why.contains("'Gone' is not in the design") && !why.contains("cam.view"), "{why}");
+}
+
+#[test]
 fn every_change_is_one_undo_step() {
     let mut s = Session::default();
     run(&mut s, "cam.setup.create", json!({"name": "Op 1"}));

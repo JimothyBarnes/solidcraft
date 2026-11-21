@@ -46,7 +46,7 @@ pub use tool::{
     TOOL_LIBRARY_FORMAT, Tool, ToolGeometry, ToolKind, ToolLibrary,
 };
 pub use toolpath::{
-    ARC_RADIUS_TOLERANCE, ArcDirection, Coolant, MAX_DWELL_SECONDS, MAX_FEED, MAX_MOVES, MAX_SPINDLE_RPM, MAX_TOOL_NUMBER, Move, Plane,
+    ARC_RADIUS_TOLERANCE, ArcDirection, Coolant, Drawn, MAX_DWELL_SECONDS, MAX_FEED, MAX_MOVES, MAX_SPINDLE_RPM, MAX_TOOL_NUMBER, Move, Plane,
     SpindleDirection, Stats, Toolpath,
 };
 pub use units::{DEFAULT_TOLERANCE, LengthUnit, MAX_COORDINATE, MM_PER_INCH, Tolerance};

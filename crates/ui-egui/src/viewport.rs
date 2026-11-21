@@ -5894,6 +5894,7 @@ fn highlight_geometry_key(app: &SolveApp) -> u64 {
     app.picks_bodies().hash(&mut h);
     app.picks_components().hash(&mut h);
     crate::render_workspace::active(app).hash(&mut h);
+    crate::manufacture_workspace::scene::key(app).hash(&mut h);
     app.session.active_sketch.hash(&mut h);
     (app.dialog.is_some(), app.tool.is_some()).hash(&mut h);
     // Which input is active decides what a round edge or face under the cursor stands for.
@@ -6518,6 +6519,7 @@ fn build_highlight_with_projection(app: &SolveApp, projection: impl FnOnce() -> 
             }
         }
     }
+    crate::manufacture_workspace::scene::draw(app, &mut sc);
     // A round edge or face under the cursor (or picked) in an axis input shows its axis, and a
     // circle in a point input its centre, as construction geometry. The axis runs through the
     // solid it belongs to, so it is drawn over the model.

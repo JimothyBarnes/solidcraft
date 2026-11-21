@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
     BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData,
-    Operation, OperationKind, Placement, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
+    Operation, OperationKind, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
 
@@ -442,6 +442,63 @@ fn work(
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
         }
     }
+}
+
+// The Manufacture types a view of a setup is made of, for the UI above the engine.
+pub use solidcraft_cam::{Drawn, Placement};
+
+/// One operation as a view draws it.
+pub struct OperationView {
+    pub id: String,
+    pub name: String,
+    /// Its toolpath as straight pieces in the setup's WCS (how each moves, its two ends), or why
+    /// it has none.
+    pub pieces: std::result::Result<Vec<(Drawn, solidcore_record::Vec3, solidcore_record::Vec3)>, String>,
+}
+
+/// One setup as a view draws it: where it sits on the model, and its operations' toolpaths.
+pub struct SetupView {
+    pub id: String,
+    pub placement: Placement,
+    pub operations: Vec<OperationView>,
+}
+
+/// How far a drawn arc may stray from the true one, mm.
+const VIEW_ARC_TOLERANCE: f64 = 0.02;
+
+/// The setup `id` as a view draws it, or the design's first when `id` is `None` or names no setup
+/// (one that was deleted). `Ok(None)` when the design has no setups; the reason when the setup
+/// can't be placed on the model (nothing to machine, a work coordinate system this build can't
+/// place yet). It reads the design and changes nothing.
+/// Operations that are switched off are left out; each one starts where the one before ended, as
+/// in the posted program.
+pub fn manufacture_view(s: &Session, setup: Option<&str>) -> std::result::Result<Option<SetupView>, String> {
+    const CMD: &str = "cam.view";
+    let said = |e: crate::EngineError| match e {
+        crate::EngineError::BadParams { msg, .. } => msg,
+        other => other.to_string(),
+    };
+    let d = manufacture_data(&s.doc)?;
+    let Some(setup) = setup.and_then(|id| d.setups.iter().find(|x| x.id == id)).or(d.setups.first()) else { return Ok(None) };
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let placement = setup.place(model).map_err(|e| e.to_string())?;
+    let mut placed = Some(placement);
+    let mut at = None;
+    let mut operations = Vec::new();
+    for op in setup.operations.iter().filter(|o| !o.suppressed) {
+        let pieces = match work(s, CMD, &d, setup, op, at, &mut placed) {
+            Ok(worked) => {
+                at = Some(worked.toolpath.moves.iter().fold(worked.toolpath.start, |p, m| m.end(p)));
+                worked.toolpath.drawn(VIEW_ARC_TOLERANCE).map_err(|e| e.to_string())
+            }
+            Err(e) => {
+                at = None;
+                Err(said(e))
+            }
+        };
+        operations.push(OperationView { id: op.id.clone(), name: op.name.clone(), pieces });
+    }
+    Ok(Some(SetupView { id: setup.id.clone(), placement, operations }))
 }
 
 fn op_toolpath_command(s: &mut Session, p: &Value) -> Result<Value> {

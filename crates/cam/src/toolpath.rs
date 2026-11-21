@@ -165,6 +165,20 @@ impl Stats {
     }
 }
 
+/// How one straight piece of a drawn toolpath moves ([`Toolpath::drawn`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drawn {
+    /// At the machine's rapid rate.
+    Rapid,
+    /// Cutting at feed.
+    Cut,
+    /// Cutting straight down.
+    Plunge,
+}
+
+/// The most straight pieces one arc is drawn with.
+const MAX_ARC_PIECES: usize = 720;
+
 /// An arc's geometry, worked out from its start.
 pub(crate) struct ArcGeom {
     plane: Plane,
@@ -319,6 +333,51 @@ impl Toolpath {
     pub fn stats(&self) -> Result<Stats> {
         let path = self.expanded(&CycleMotion::default())?;
         path.stats_of_plain_moves()
+    }
+
+    /// The toolpath as straight pieces for a picture: how each moves and its two ends, in order.
+    /// Arcs are within `tolerance` mm of the true curve; holes are the moves they make with the
+    /// generic control's cycle distances ([`CycleMotion::default`]); moves that go nowhere are left
+    /// out.
+    pub fn drawn(&self, tolerance: f64) -> Result<Vec<(Drawn, Vec3, Vec3)>> {
+        if !(tolerance > 0.0) {
+            return Err(Error::BadValue(format!("a drawing tolerance must be above 0, not {tolerance}")));
+        }
+        let path = self.expanded(&CycleMotion::default())?;
+        let mut pieces = Vec::with_capacity(path.moves.len());
+        let mut add = |kind: Drawn, a: Vec3, b: Vec3| {
+            if a != b {
+                pieces.push((kind, a, b));
+            }
+        };
+        for (index, (from, m)) in path.walk().enumerate() {
+            match *m {
+                Move::Rapid { to } => add(Drawn::Rapid, from, to),
+                Move::Linear { to, .. } => {
+                    let down = to.x == from.x && to.y == from.y && to.z < from.z;
+                    add(if down { Drawn::Plunge } else { Drawn::Cut }, from, to);
+                }
+                Move::Arc { to, center, plane, direction, .. } => {
+                    let arc = ArcGeom::new(from, to, center, plane, direction).map_err(|reason| Error::BadMove { index, reason })?;
+                    // A chord over an angle a strays r (1 - cos(a / 2)) from its arc.
+                    let per = if tolerance >= arc.radius { FRAC_PI_2 } else { 2.0 * (1.0 - tolerance / arc.radius).acos() };
+                    let count = (arc.sweep.abs() / per).ceil().clamp(1.0, MAX_ARC_PIECES as f64) as usize;
+                    let mut a = from;
+                    for k in 1..=count {
+                        let b = if k == count { to } else { arc.point(k as f64 / count as f64) };
+                        add(Drawn::Cut, a, b);
+                        a = b;
+                    }
+                }
+                Move::Dwell { .. }
+                | Move::ToolChange { .. }
+                | Move::Spindle { .. }
+                | Move::SpindleStop
+                | Move::Coolant { .. }
+                | Move::Drill { .. } => {}
+            }
+        }
+        Ok(pieces)
     }
 
     fn stats_of_plain_moves(&self) -> Result<Stats> {
