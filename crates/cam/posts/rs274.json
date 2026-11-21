@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "id": "rs274",
+  "name": "RS274/NGC (reference)",
+  "description": "Generic RS274/NGC as defined by NIST IR 6556. The test reference: every code it writes is in that standard. Our own post, not a controller vendor's.",
+  "machine_kind": "mill",
+  "numbers": { "length_mm": 4, "length_inch": 5, "feed_mm": 1, "feed_inch": 2, "speed": 0, "dwell": 3, "strip_trailing_zeros": true },
+  "line_numbers": null,
+  "comments": { "upper_case": false, "max_length": 200 },
+  "modal": { "repeat_motion": false, "repeat_feed": false },
+  "arcs": { "planes": ["xy", "zx", "yz"], "helical": true, "max_sweep_degrees": 360, "min_radius": 0.01, "linearize_tolerance": 0.001 },
+  "program_number_digits": null,
+  "dwell": true,
+  "tool_length_offset": "G43 H{tool}",
+  "sequences": {
+    "program_start": ["({program_name})"],
+    "safe_start": ["G17 G40 G49 G80 G90 G94 {units_code}"],
+    "tool_change_before": [],
+    "tool_change_after": [],
+    "operation_start": ["{work_offset}"],
+    "program_end": ["M2"]
+  }
+}

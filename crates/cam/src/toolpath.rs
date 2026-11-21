@@ -160,23 +160,23 @@ impl Stats {
 }
 
 /// An arc's geometry, worked out from its start.
-struct ArcGeom {
+pub(crate) struct ArcGeom {
     plane: Plane,
     /// Centre in the plane.
     cu: f64,
     cv: f64,
-    radius: f64,
+    pub(crate) radius: f64,
     /// Angle of the start around the centre.
     start_angle: f64,
     /// Signed sweep: positive counter-clockwise.
-    sweep: f64,
+    pub(crate) sweep: f64,
     /// Start and end along the normal.
     w0: f64,
     w1: f64,
 }
 
 impl ArcGeom {
-    fn new(from: Vec3, to: Vec3, center: Vec3, plane: Plane, direction: ArcDirection) -> std::result::Result<Self, String> {
+    pub(crate) fn new(from: Vec3, to: Vec3, center: Vec3, plane: Plane, direction: ArcDirection) -> std::result::Result<Self, String> {
         let (su, sv, w0) = plane.split(from);
         let (eu, ev, w1) = plane.split(to);
         let (cu, cv, _) = plane.split(center);
@@ -200,7 +200,13 @@ impl ArcGeom {
         Ok(Self { plane, cu, cv, radius: 0.5 * (r0 + r1), start_angle, sweep, w0, w1 })
     }
 
-    fn length(&self) -> f64 {
+    /// The point a fraction `t` (0 to 1) of the way along the arc.
+    pub(crate) fn point(&self, t: f64) -> Vec3 {
+        let a = self.start_angle + t * self.sweep;
+        self.plane.join(self.cu + self.radius * a.cos(), self.cv + self.radius * a.sin(), self.w0 + t * (self.w1 - self.w0))
+    }
+
+    pub(crate) fn length(&self) -> f64 {
         (self.sweep.abs() * self.radius).hypot(self.w1 - self.w0)
     }
 

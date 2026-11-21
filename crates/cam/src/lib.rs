@@ -15,11 +15,13 @@
 #![forbid(unsafe_code)]
 
 mod gcode_reader;
+mod post;
 mod toolpath;
 mod units;
 
 pub use gcode_reader::{MAX_LINE_CHARS, MAX_LINES, ReadBack, ReadSettings, read as read_gcode};
 
+pub use post::{Arcs, BUILTIN_POSTS, Comments, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences};
 pub use toolpath::{
     ARC_RADIUS_TOLERANCE, ArcDirection, Coolant, MAX_DWELL_SECONDS, MAX_FEED, MAX_MOVES, MAX_SPINDLE_RPM, MAX_TOOL_NUMBER, Move, Plane,
     SpindleDirection, Stats, Toolpath,
@@ -38,6 +40,12 @@ pub enum Error {
     /// A G-code program could not be read: the 1-based line and why.
     #[error("line {line}: {message}")]
     Gcode { line: usize, message: String },
+    /// A post file is not usable.
+    #[error("post: {0}")]
+    BadPost(String),
+    /// A written program did not read back as the moves it was written for.
+    #[error("post read-back, move {index}: {message}")]
+    PostMismatch { index: usize, message: String },
     /// A value outside its allowed range.
     #[error("{0}")]
     BadValue(String),

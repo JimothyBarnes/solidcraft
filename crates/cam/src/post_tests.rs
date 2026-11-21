@@ -1,0 +1,260 @@
+use std::f64::consts::PI;
+
+use super::*;
+
+fn p(x: f64, y: f64, z: f64) -> Vec3 {
+    Vec3 { x, y, z }
+}
+
+/// A small program on a 0.001 mm grid: a tool change, a plunge, a quarter arc, a retract.
+fn bracket() -> Toolpath {
+    Toolpath {
+        start: p(0.0, 0.0, 50.0),
+        moves: vec![
+            Move::ToolChange { tool: 1 },
+            Move::Spindle { rpm: 1200.0, direction: SpindleDirection::Clockwise },
+            Move::Coolant { mode: Coolant::Flood },
+            Move::Rapid { to: p(10.0, 0.0, 5.0) },
+            Move::Linear { to: p(10.0, 0.0, -1.0), feed: 200.0 },
+            Move::Arc { to: p(0.0, 10.0, -1.0), center: p(0.0, 0.0, -1.0), plane: Plane::Xy, direction: ArcDirection::CounterClockwise, feed: 400.0 },
+            Move::Rapid { to: p(0.0, 10.0, 5.0) },
+            Move::SpindleStop,
+            Move::Coolant { mode: Coolant::Off },
+        ],
+    }
+}
+
+fn ctx() -> ProgramContext {
+    ProgramContext { program_number: 1, program_name: "Bracket op1".into(), units: LengthUnit::Millimetre, work_offset: 1 }
+}
+
+/// The largest difference between two toolpaths' positions and arc centres, in mm.
+fn max_difference(a: &Toolpath, b: &Toolpath) -> f64 {
+    let d = |p: Vec3, q: Vec3| (p.x - q.x).abs().max((p.y - q.y).abs()).max((p.z - q.z).abs());
+    a.moves
+        .iter()
+        .zip(&b.moves)
+        .map(|(m, n)| match (m, n) {
+            (Move::Rapid { to: p }, Move::Rapid { to: q }) | (Move::Linear { to: p, .. }, Move::Linear { to: q, .. }) => d(*p, *q),
+            (Move::Arc { to: p, center: c, plane, .. }, Move::Arc { to: q, center: e, .. }) => {
+                let (cu, cv, _) = plane.split(*c);
+                let (eu, ev, _) = plane.split(*e);
+                d(*p, *q).max((cu - eu).abs()).max((cv - ev).abs())
+            }
+            _ => 0.0,
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn every_built_in_post_loads() {
+    for (id, _) in BUILTIN_POSTS {
+        let post = Post::builtin(id).unwrap();
+        assert_eq!(post.id, *id);
+    }
+    assert!(Post::builtin("nope").is_err());
+}
+
+#[test]
+fn the_fanuc_style_post_writes_this_program_exactly() {
+    // Derived by hand from the post file: tape marks and the O line unnumbered, the safety lines
+    // first, a machine-home retract before the tool change, the length offset on the first rapid,
+    // the plane before the first arc, modal words left out when unchanged.
+    let expected = "\
+%
+O0001 (BRACKET OP1)
+N10 (UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)
+N20 (PROVE OUT FIRST: AIR CUT, SINGLE BLOCK)
+N30 G17 G40 G49 G80 G90 G94 G21
+N40 G54
+N50 G91 G28 Z0.
+N60 G90
+N70 T1 M6
+N80 S1200 M3
+N90 M8
+N100 G43 H1 G0 X10. Y0. Z5.
+N110 G1 Z-1. F200.
+N120 G17
+N130 G3 X0. Y10. I-10. J0. F400.
+N140 G0 Z5.
+N150 M5
+N160 M9
+N170 G91 G28 Z0.
+N180 G90
+N190 M30
+%
+";
+    let posted = Post::builtin("fanuc_mill").unwrap().write(&bracket(), &ctx()).unwrap();
+    assert_eq!(posted.text, expected);
+    assert_eq!(posted.read_back.machine_retracts, 2);
+}
+
+#[test]
+fn a_hand_made_toolpath_reads_back_within_a_micron_from_both_posts() {
+    // P0's acceptance (SPEC §5): post, read back, the same moves within 1e-6 mm.
+    let mut tp = bracket();
+    // Add a full circle, a helix and a side-plane arc before the retract.
+    let extra = [
+        Move::Arc { to: p(0.0, 10.0, -1.0), center: p(0.0, 5.0, -1.0), plane: Plane::Xy, direction: ArcDirection::Clockwise, feed: 400.0 },
+        Move::Arc { to: p(0.0, 10.0, -3.5), center: p(0.0, 5.0, 0.0), plane: Plane::Xy, direction: ArcDirection::CounterClockwise, feed: 300.0 },
+        Move::Linear { to: p(0.0, 10.0, 0.0), feed: 300.0 },
+        Move::Arc { to: p(10.0, 10.0, 10.0), center: p(10.0, 10.0, 0.0), plane: Plane::Zx, direction: ArcDirection::CounterClockwise, feed: 250.0 },
+    ];
+    tp.moves.splice(6..6, extra);
+    tp.validate().unwrap();
+    for id in ["rs274", "fanuc_mill"] {
+        let posted = Post::builtin(id).unwrap().write(&tp, &ctx()).unwrap();
+        assert_eq!(posted.written.moves.len(), posted.read_back.toolpath.moves.len(), "{id}");
+        let diff = max_difference(&posted.written, &posted.read_back.toolpath);
+        assert!(diff <= 1e-6, "{id}: read back {diff} mm off");
+        // What was written is the toolpath meant: splitting arcs keeps their length.
+        let (meant, wrote) = (tp.stats().unwrap(), posted.written.stats().unwrap());
+        assert!((meant.feed_length - wrote.feed_length).abs() < 1e-9, "{id}");
+    }
+    // The Fanuc-style post takes at most half a turn per block: the full circle and the helix
+    // are two blocks each (their midpoints are on the grid, so the micron check above holds).
+    let fanuc = Post::builtin("fanuc_mill").unwrap().write(&tp, &ctx()).unwrap();
+    assert_eq!(fanuc.written.moves.len(), tp.moves.len() + 2);
+}
+
+#[test]
+fn a_split_point_off_the_grid_reads_back_within_the_posts_tolerance() {
+    // Three quarters of a turn, split at 135° for the Fanuc-style post's half-turn limit: the
+    // split point 10·sin 135° = 7.0710678… rounds to 3 places, so it reads back within 0.0005 mm.
+    let tp = Toolpath {
+        start: p(0.0, 10.0, 0.0),
+        moves: vec![
+            Move::Rapid { to: p(0.0, 10.0, 0.0) },
+            Move::Arc {
+                to: p(10.0, 10.0, 10.0),
+                center: p(0.0, 10.0, 10.0),
+                plane: Plane::Zx,
+                direction: ArcDirection::CounterClockwise,
+                feed: 250.0,
+            },
+        ],
+    };
+    let posted = Post::builtin("fanuc_mill").unwrap().write(&tp, &ctx()).unwrap();
+    assert_eq!(posted.written.moves.iter().filter(|m| matches!(m, Move::Arc { .. })).count(), 2);
+    let diff = max_difference(&posted.written, &posted.read_back.toolpath);
+    assert!(diff > 1e-6 && diff <= posted.tolerance + 1e-9, "{diff}");
+}
+
+#[test]
+fn inch_output_reads_back_within_half_its_last_digit() {
+    let ctx = ProgramContext { units: LengthUnit::Inch, ..ctx() };
+    let posted = Post::builtin("fanuc_mill").unwrap().write(&bracket(), &ctx).unwrap();
+    assert!(posted.text.contains("G20"));
+    assert!(posted.text.contains("X0.3937 Y0. Z0.1969")); // 10 mm, 5 mm in inches to 4 places
+    assert!((posted.tolerance - 0.00127).abs() < 1e-12);
+    assert!(max_difference(&posted.written, &posted.read_back.toolpath) <= posted.tolerance + 1e-9);
+}
+
+#[test]
+fn numbers_always_carry_a_decimal_point_and_never_a_minus_zero() {
+    assert_eq!(format_decimal(10.0, 3, true), "10.");
+    assert_eq!(format_decimal(10.0, 3, false), "10.000");
+    assert_eq!(format_decimal(-0.0001, 3, true), "0.");
+    assert_eq!(format_decimal(-1.23456, 3, true), "-1.235");
+    assert_eq!(format_decimal(0.5, 1, true), "0.5");
+}
+
+#[test]
+fn an_arc_too_small_to_round_is_written_as_a_line_not_a_full_circle() {
+    // A 0.0002 mm long arc: its ends round to the same 0.001 mm, which a reader would take as a
+    // full circle of radius 1. It must become a line (or nothing), never a circle.
+    let a = 0.0002_f64; // radians at radius 1
+    let tp = Toolpath {
+        start: p(1.0, 0.0, 0.0),
+        moves: vec![
+            Move::Rapid { to: p(1.0, 0.0, 0.0) },
+            Move::Arc {
+                to: p(a.cos(), a.sin(), 0.0),
+                center: p(0.0, 0.0, 0.0),
+                plane: Plane::Xy,
+                direction: ArcDirection::CounterClockwise,
+                feed: 100.0,
+            },
+            Move::Linear { to: p(2.0, 0.0, 0.0), feed: 100.0 },
+        ],
+    };
+    let posted = Post::builtin("fanuc_mill").unwrap().write(&tp, &ctx()).unwrap();
+    assert!(!posted.text.contains("G3"), "{}", posted.text);
+    let read = posted.read_back.toolpath.stats().unwrap();
+    assert!(read.feed_length < 1.01, "read back {} mm of cutting", read.feed_length);
+}
+
+#[test]
+fn an_arc_in_a_plane_the_post_lacks_becomes_lines_within_tolerance() {
+    let mut post = Post::builtin("rs274").unwrap();
+    post.arcs.planes = vec![Plane::Xy];
+    let tp = Toolpath {
+        start: p(0.0, 0.0, 10.0),
+        moves: vec![
+            Move::Rapid { to: p(0.0, 0.0, 10.0) },
+            Move::Arc { to: p(10.0, 0.0, 0.0), center: p(0.0, 0.0, 0.0), plane: Plane::Zx, direction: ArcDirection::CounterClockwise, feed: 100.0 },
+        ],
+    };
+    let posted = post.write(&tp, &ctx()).unwrap();
+    // Radius 10, a quarter turn, 0.001 mm: each line spans 2·acos(1 − 0.0001) rad, so 56 lines.
+    assert_eq!(posted.written.moves.iter().filter(|m| matches!(m, Move::Linear { .. })).count(), 56);
+    assert!(posted.notes.iter().any(|n| n.contains("56 lines")));
+    // Every line's midpoint stays within the tolerance of the circle.
+    let mut at = tp.start;
+    for m in &posted.written.moves {
+        let to = m.end(at);
+        let mid = p(0.5 * (at.x + to.x), 0.0, 0.5 * (at.z + to.z));
+        assert!(10.0 - mid.x.hypot(mid.z) <= 0.001 + 1e-12);
+        at = to;
+    }
+    let length = posted.written.stats().unwrap().feed_length;
+    assert!((length - 5.0 * PI).abs() < 0.01);
+}
+
+#[test]
+fn unsafe_or_unwritable_toolpaths_are_refused() {
+    let post = Post::builtin("fanuc_mill").unwrap();
+    let spindle_on = Toolpath {
+        start: p(0.0, 0.0, 50.0),
+        moves: vec![Move::Spindle { rpm: 1000.0, direction: SpindleDirection::Clockwise }, Move::ToolChange { tool: 2 }],
+    };
+    assert!(post.write(&spindle_on, &ctx()).unwrap_err().to_string().contains("stop the spindle"));
+    let cut_first =
+        Toolpath { start: p(0.0, 0.0, 50.0), moves: vec![Move::ToolChange { tool: 2 }, Move::Linear { to: p(1.0, 0.0, 0.0), feed: 10.0 }] };
+    assert!(post.write(&cut_first, &ctx()).unwrap_err().to_string().contains("must be a rapid"));
+    // The machine is wherever it was when a program starts: the first move must be a rapid too.
+    let opens_with_a_cut = Toolpath { start: p(0.0, 0.0, 50.0), moves: vec![Move::Linear { to: p(1.0, 0.0, 0.0), feed: 10.0 }] };
+    assert!(post.write(&opens_with_a_cut, &ctx()).unwrap_err().to_string().contains("first move of a program"));
+    let dwell = Toolpath { start: p(0.0, 0.0, 0.0), moves: vec![Move::Dwell { seconds: 1.0 }] };
+    assert!(post.write(&dwell, &ctx()).unwrap_err().to_string().contains("dwell"));
+    assert!(Post::builtin("rs274").unwrap().write(&dwell, &ctx()).unwrap().text.contains("G4 P1."));
+    assert!(post.write(&bracket(), &ProgramContext { program_number: 12345, ..ctx() }).is_err());
+    assert!(post.write(&bracket(), &ProgramContext { work_offset: 7, ..ctx() }).is_err());
+}
+
+#[test]
+fn bad_post_files_are_refused_when_read() {
+    let good: serde_json::Value = serde_json::from_str(BUILTIN_POSTS.iter().find(|(id, _)| *id == "fanuc_mill").unwrap().1).unwrap();
+    let with = |pointer: &str, value: serde_json::Value| {
+        let mut v = good.clone();
+        *v.pointer_mut(pointer).unwrap() = value;
+        Post::from_json(&v.to_string())
+    };
+    use serde_json::json;
+    assert!(with("/format", json!(2)).is_err());
+    assert!(with("/id", json!("Bad Id")).is_err());
+    assert!(with("/numbers/length_mm", json!(9)).is_err());
+    assert!(with("/comments/max_length", json!(10)).is_err());
+    assert!(with("/arcs/max_sweep_degrees", json!(0)).is_err());
+    assert!(with("/arcs/linearize_tolerance", json!(f64::MAX)).is_err());
+    assert!(with("/sequences/safe_start", json!(["G21 {nope}"])).unwrap_err().to_string().contains("unknown placeholder"));
+    assert!(with("/sequences/safe_start", json!(["T{tool} M6"])).unwrap_err().to_string().contains("{tool} only"));
+    assert!(with("/sequences/safe_start", json!(["G0 X1"])).unwrap_err().to_string().contains("makes moves"));
+    assert!(with("/sequences/safe_start", json!(["G21 }"])).is_err());
+    assert!(with("/sequences/program_end", json!(["#1=2"])).unwrap_err().to_string().contains("does not read"));
+    assert!(with("/program_number_digits", json!(null)).unwrap_err().to_string().contains("program_number_digits"));
+    let mut unknown = good.clone();
+    unknown.as_object_mut().unwrap().insert("script".into(), json!("rm -rf"));
+    assert!(Post::from_json(&unknown.to_string()).is_err());
+    assert!(Post::from_json("not json").is_err());
+}
