@@ -1,13 +1,16 @@
 //! The drill operation (decision 0009): holes at points of the setup's WCS, cut with one drilling
-//! cycle (decision 0008). Its toolpath is worked out from the setup's placement, its safe heights
-//! and the tool, never stored.
+//! cycle (decision 0008). Its toolpath is worked out from the setup's placement and the tool,
+//! never stored.
+//!
+//! Depths are the part's: holes are measured from the model's top unless the operation says, so
+//! stock left on the part (or faced off it) never changes how deep a hole is. The R plane stays
+//! above the stock, which may still be there.
 
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
 use crate::cycle::DrillCycle;
 use crate::feeds::op_feeds;
-use crate::manufacture::SafeHeights;
 use crate::placement::Placement;
 use crate::tool::{Engagement, Tool, ToolKind};
 use crate::toolpath::{Coolant, MAX_FEED, MAX_SPINDLE_RPM, Move, SpindleDirection, Toolpath};
@@ -60,14 +63,15 @@ pub struct DrillOp {
     pub holes: Vec<[f64; 2]>,
     #[serde(default)]
     pub order: HoleOrder,
-    /// The Z of the holes' top in the WCS; `None` for the stock's top.
+    /// The Z of the holes' top in the WCS; `None` for the model's top (the part's highest face).
     #[serde(default)]
     pub top: Option<f64>,
     /// How far below the top the hole goes, mm.
     pub depth: f64,
     #[serde(default)]
     pub depth_to: DepthTo,
-    /// The R plane's height above the top, mm; `None` for the setup's retract height.
+    /// The R plane's height above the holes' top, mm, for when the stock above them is gone;
+    /// `None` for the setup's retract height above the stock's top.
     #[serde(default)]
     pub r_above: Option<f64>,
     #[serde(default)]
@@ -160,12 +164,11 @@ impl DrillOp {
     }
 
     /// The toolpath from `start` (where the tool is; `None` for above the first hole at the
-    /// clearance height) for `tool` in a setup placed at `placement`, with its safe heights and
-    /// stock `material`.
-    pub fn toolpath(&self, start: Option<Vec3>, tool: &Tool, placement: &Placement, safe: SafeHeights, material: Option<&str>) -> Result<Drilled> {
+    /// clearance height) for `tool` in a setup placed at `placement`, with its stock `material`.
+    pub fn toolpath(&self, start: Option<Vec3>, tool: &Tool, placement: &Placement, material: Option<&str>) -> Result<Drilled> {
         self.validate(tool)?;
         let bad = |m: String| Err(Error::BadValue(m));
-        let top = self.top.unwrap_or(placement.stock.max.z);
+        let top = self.top.unwrap_or(placement.model.max.z);
         let g = tool.geometry;
         let point = match self.depth_to {
             DepthTo::FullDiameter if g.tip_angle > 0.0 => 0.5 * g.diameter / (0.5 * g.tip_angle).tan(),
@@ -176,7 +179,7 @@ impl DrillOp {
             return bad(format!("the holes go {deep} mm deep, past tool {}'s {} mm of flutes: chips would pack", tool.number, g.flute_length));
         }
         let bottom = top - deep;
-        let r = top + self.r_above.unwrap_or(safe.retract);
+        let r = self.r_above.map_or(placement.retract_z, |above| top + above);
         let clearance = placement.clearance_z;
         if r > clearance {
             return bad(format!("the R plane ({r} mm) is above the clearance height ({clearance} mm)"));

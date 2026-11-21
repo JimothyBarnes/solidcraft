@@ -214,21 +214,23 @@ fn a_drill_operation_works_out_its_toolpath_from_the_setup_and_the_tool() {
     let rpm = 100_000.0 / (10.0 * std::f64::consts::PI);
     let n = &t["numbers"];
     assert!((n["rpm"].as_f64().unwrap() - rpm).abs() < 1e-9 && (n["feed"].as_f64().unwrap() - 0.2 * rpm).abs() < 1e-9, "{n}");
-    assert_eq!((n["bottom"].as_f64(), n["r"].as_f64(), n["clearance"].as_f64()), (Some(-10.0), Some(5.0), Some(25.0)));
-    // Each hole: 15 mm from R to the bottom in five pecks, each after the first re-entering 0.5 mm
-    // above the last depth (the generic control): 17 mm cut a hole.
-    assert!((t["feed_length"].as_f64().unwrap() - 51.0).abs() < 1e-9, "{t}");
-    // Rapids, worked out peck by peck: 93 for the first hole (20 down to R), 113 for the second
-    // (40 across), 93 for the third (20 across), 20 back up to clearance.
-    assert!((t["rapid_length"].as_f64().unwrap() - 319.0).abs() < 1e-9, "{}", t["rapid_length"]);
-    assert!(near(&t["min"], [-20.0, -10.0, -10.0]) && near(&t["max"], [20.0, 10.0, 25.0]), "{t}");
+    // 10 deep from the part's top (Z -1, under 1 mm of stock): bottom -11. R is the setup's retract
+    // above the stock top: 5.
+    assert_eq!((n["bottom"].as_f64(), n["r"].as_f64(), n["clearance"].as_f64()), (Some(-11.0), Some(5.0), Some(25.0)));
+    // Each hole: 16 mm from R to the bottom in six pecks (to 2, -1, -4, -7, -10, -11), each after
+    // the first re-entering 0.5 mm above the last depth (the generic control): 18.5 mm cut a hole.
+    assert!((t["feed_length"].as_f64().unwrap() - 55.5).abs() < 1e-9, "{t}");
+    // Rapids, worked out peck by peck: out and back in 87.5 a hole and 16 up at its end. The first
+    // hole adds 20 down to R, the second 40 across, the third 20 across; then 20 up to clearance.
+    assert!((t["rapid_length"].as_f64().unwrap() - 410.5).abs() < 1e-9, "{}", t["rapid_length"]);
+    assert!(near(&t["min"], [-20.0, -10.0, -11.0]) && near(&t["max"], [20.0, 10.0, 25.0]), "{t}");
     let holes: Vec<&Value> = t["toolpath"]["moves"].as_array().unwrap().iter().filter(|m| m["kind"] == "drill").collect();
     assert_eq!(holes.len(), 3);
     // Posted for the Haas: one G83 cycle back to R between holes, the drill's speed and coolant.
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = haas["text"].as_str().unwrap();
     let expected =
-        "\nS3183 M3\nM8\nG43 H3 G0 X-20. Y-10. Z25.\nG99 G83 X-20. Y-10. Z-10. R5. Q3. F636.6\nX20. Y-10.\nX20. Y10.\nG80\nG0 Z25.\nM9\nM5\n";
+        "\nS3183 M3\nM8\nG43 H3 G0 X-20. Y-10. Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\nX20. Y-10.\nX20. Y10.\nG80\nG0 Z25.\nM9\nM5\n";
     assert!(text.contains(expected), "{text}");
     // The design keeps the parameters, never the toolpath.
     let data = run(&mut s, "cam.data", json!({}));
@@ -241,8 +243,11 @@ fn a_drill_operation_works_out_its_toolpath_from_the_setup_and_the_tool() {
 fn a_drill_operation_follows_its_setup_and_says_what_it_needs() {
     let mut s = drilling();
     run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
-    // 4 mm more stock on top: the WCS origin rises with the stock top (21 to 25 on the model), and
-    // the holes, measured from that top, keep their numbers in the WCS: bottom -10, R 5.
+    let bottom = |s: &mut Session| run(s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["bottom"].as_f64().unwrap();
+    assert_eq!(bottom(&mut s), -11.0);
+    // 4 mm more stock on top: the WCS origin rises with the stock top (21 to 25 on the model). The
+    // holes stay where they are on the part, 10 below its top (Z 10 on the model), so their bottom
+    // is now -15 in the WCS; R stays 5 above the stock.
     run(
         &mut s,
         "cam.setup.edit",
@@ -250,7 +255,7 @@ fn a_drill_operation_follows_its_setup_and_says_what_it_needs() {
     );
     assert!(near(&run(&mut s, "cam.setup.measure", json!({"id": "setup-1"}))["placement"]["origin"], [30.0, 20.0, 25.0]));
     let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
-    assert_eq!((t["numbers"]["bottom"].as_f64(), t["numbers"]["r"].as_f64()), (Some(-10.0), Some(5.0)));
+    assert_eq!((t["numbers"]["bottom"].as_f64(), t["numbers"]["r"].as_f64()), (Some(-15.0), Some(5.0)));
     // No material: the error names the two ways out; giving one back fixes it.
     run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": ""}));
     let e = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
@@ -284,6 +289,27 @@ fn a_drill_operation_follows_its_setup_and_says_what_it_needs() {
         "cam.op.drill",
         json!({"setup": "setup-1", "tool": 1, "drill": {"holes": [[0, 0]], "depth": 3, "cycle": {"type": "drill", "dwell": 0}, "rpm": 3000, "feed": 100}}),
     );
+}
+
+#[test]
+fn a_faced_and_drilled_part_posts_as_one_program() {
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    // Facing takes the stock down to the part's top (Z -1); the holes are 10 deep from there (Z -11).
+    // The drill starts where facing ended, changes tool with the spindle stopped, and comes in
+    // from the clearance height.
+    let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = haas["text"].as_str().unwrap();
+    let join = "\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\nG28 G91 Z0.\nG90\nT3 M6\nS3183 M3\nM8\nG43 H3 G0 X-20. Y-10. Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\n";
+    assert!(text.contains(join), "{text}");
+    assert!(haas["notes"].as_array().unwrap().is_empty(), "{haas}");
+    for post in ["rs274", "fanuc_mill"] {
+        let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": post, "units": "inch"}));
+        let text = posted["text"].as_str().unwrap();
+        assert!(text.find("T4 M6") < text.find("T3 M6") && text.contains("G83"), "{post}:\n{text}");
+    }
 }
 
 #[test]

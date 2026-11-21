@@ -429,7 +429,7 @@ fn work(
         }
         OperationKind::Drill { drill } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
-            let done = drill.toolpath(start, tool, &placement, setup.safe_heights, material).map_err(failed)?;
+            let done = drill.toolpath(start, tool, &placement, material).map_err(failed)?;
             let numbers = serde_json::json!({"rpm": done.rpm, "feed": done.feed, "bottom": done.bottom, "r": done.r, "clearance": done.clearance});
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
         }

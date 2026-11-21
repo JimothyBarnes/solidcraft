@@ -2,7 +2,7 @@ use std::f64::consts::PI;
 
 use super::*;
 use crate::feeds::GENERIC_MAX_RPM;
-use crate::manufacture::{BoxAnchor, BoxOffsets, BoxSide, Setup, SetupKind, Stock, Wcs, WcsOrientation, WcsOrigin};
+use crate::manufacture::{BoxAnchor, BoxOffsets, BoxSide, SafeHeights, Setup, SetupKind, Stock, Wcs, WcsOrientation, WcsOrigin};
 use crate::placement::Bounds;
 use crate::tool::{CuttingData, Holder, Overrides, ToolGeometry};
 
@@ -44,8 +44,13 @@ fn drill10() -> Tool {
 
 const RPM: f64 = 100_000.0 / (10.0 * PI);
 
-/// The vise setup on a 60 x 40 x 20 block: the stock top is Z 0 in the WCS, clearance 25, retract 5.
-fn placed() -> (Placement, SafeHeights) {
+/// The vise setup on a 60 x 40 x 20 block with 1 mm of stock on top: the stock top is Z 0 in the
+/// WCS and the part's top Z -1, clearance 25, retract 5.
+fn placed() -> Placement {
+    placed_with(1.0)
+}
+
+fn placed_with(on_top: f64) -> Placement {
     let setup = Setup {
         id: "setup-1".into(),
         name: "Op 1".into(),
@@ -57,14 +62,13 @@ fn placed() -> (Placement, SafeHeights) {
             orientation: WcsOrientation::Model,
         },
         work_offset: 1,
-        stock: Stock::RelativeBox { offsets: BoxOffsets { x_min: 1.0, x_max: 1.0, y_min: 1.0, y_max: 1.0, z_min: 0.0, z_max: 1.0 } },
+        stock: Stock::RelativeBox { offsets: BoxOffsets { x_min: 1.0, x_max: 1.0, y_min: 1.0, y_max: 1.0, z_min: 0.0, z_max: on_top } },
         model_bodies: vec![],
         fixture_bodies: vec![],
         safe_heights: SafeHeights { clearance: 25.0, retract: 5.0 },
         operations: vec![],
     };
-    let placement = setup.place(Bounds { min: p(0.0, 0.0, 0.0), max: p(60.0, 40.0, 20.0) }).unwrap();
-    (placement, setup.safe_heights)
+    setup.place(Bounds { min: p(0.0, 0.0, 0.0), max: p(60.0, 40.0, 20.0) }).unwrap()
 }
 
 fn op(holes: Vec<[f64; 2]>, depth: f64) -> DrillOp {
@@ -83,18 +87,17 @@ fn op(holes: Vec<[f64; 2]>, depth: f64) -> DrillOp {
 }
 
 fn drilled(o: &DrillOp, tool: &Tool) -> Result<Drilled> {
-    let (placement, safe) = placed();
-    o.toolpath(None, tool, &placement, safe, Some("aluminium"))
+    o.toolpath(None, tool, &placed(), Some("aluminium"))
 }
 
 #[test]
-fn three_holes_drill_nearest_first_from_the_stock_top_with_the_tools_feeds() {
-    // From (0, 0) the nearest is (5, 0), then (20, 0). Top 0 (the stock's), R 5 (the setup's
-    // retract above it), 12 deep to the tip, back to R between holes.
+fn three_holes_drill_nearest_first_from_the_parts_top_with_the_tools_feeds() {
+    // From (0, 0) the nearest is (5, 0), then (20, 0). 12 deep to the tip from the part's top (-1):
+    // bottom -13. R 5: the setup's retract above the stock's top (0). Back to R between holes.
     let d = drilled(&op(vec![[0.0, 0.0], [20.0, 0.0], [5.0, 0.0]], 12.0), &drill10()).unwrap();
     assert!(close(d.rpm, RPM) && close(d.feed, 0.2 * RPM), "{} {}", d.rpm, d.feed);
-    assert_eq!((d.bottom, d.r, d.clearance), (-12.0, 5.0, 25.0));
-    let hole = |x: f64| Move::Drill { to: p(x, 0.0, -12.0), r: 5.0, retract: 5.0, cycle: DrillCycle::Peck { peck: 4.0 }, feed: d.feed };
+    assert_eq!((d.bottom, d.r, d.clearance), (-13.0, 5.0, 25.0));
+    let hole = |x: f64| Move::Drill { to: p(x, 0.0, -13.0), r: 5.0, retract: 5.0, cycle: DrillCycle::Peck { peck: 4.0 }, feed: d.feed };
     assert_eq!(d.toolpath.start, p(0.0, 0.0, 25.0));
     assert_eq!(
         d.toolpath.moves,
@@ -118,6 +121,21 @@ fn three_holes_drill_nearest_first_from_the_stock_top_with_the_tools_feeds() {
     let d = drilled(&given, &drill10()).unwrap();
     let xs: Vec<f64> = d.toolpath.moves.iter().filter_map(|m| if let Move::Drill { to, .. } = m { Some(to.x) } else { None }).collect();
     assert_eq!(xs, vec![0.0, 20.0, 5.0]);
+}
+
+#[test]
+fn a_holes_depth_is_the_parts_whatever_stock_is_on_it() {
+    // 1 mm or 6 mm of stock on top: the WCS origin rides the stock top, but the hole ends 12 mm
+    // below the part's top (Z 20 on the model, so Z 8) either way, and R stays 5 above the stock.
+    for on_top in [1.0, 6.0] {
+        let placement = placed_with(on_top);
+        let d = op(vec![[0.0, 0.0]], 12.0).toolpath(None, &drill10(), &placement, Some("aluminium")).unwrap();
+        assert_eq!(d.bottom + placement.origin.z, 8.0, "{on_top} mm on top");
+        assert_eq!((d.r, d.r + placement.origin.z), (5.0, 25.0 + on_top), "{on_top} mm on top");
+    }
+    // With no stock on top the R plane is the retract height above the part itself.
+    let d = op(vec![[0.0, 0.0]], 12.0).toolpath(None, &drill10(), &placed_with(0.0), Some("aluminium")).unwrap();
+    assert_eq!((d.bottom, d.r), (-12.0, 5.0));
 }
 
 #[test]
@@ -173,10 +191,10 @@ fn feeds_given_or_derived_and_capped_are_said_so() {
     let d = drilled(&op(vec![[0.0, 0.0]], 5.0), &mill).unwrap();
     assert!(close(d.feed, 0.5 * 0.15 * RPM), "{}", d.feed);
     // No material on the setup and nothing typed in: the error says both ways out.
-    let (placement, safe) = placed();
-    let e = op(vec![[0.0, 0.0]], 5.0).toolpath(None, &drill10(), &placement, safe, None).unwrap_err().to_string();
+    let placement = placed();
+    let e = op(vec![[0.0, 0.0]], 5.0).toolpath(None, &drill10(), &placement, None).unwrap_err().to_string();
     assert!(e.contains("stock material") && e.contains("rpm and feed"), "{e}");
-    let e = op(vec![[0.0, 0.0]], 5.0).toolpath(None, &drill10(), &placement, safe, Some("steel")).unwrap_err().to_string();
+    let e = op(vec![[0.0, 0.0]], 5.0).toolpath(None, &drill10(), &placement, Some("steel")).unwrap_err().to_string();
     assert!(e.contains("no cutting data for 'steel'"), "{e}");
 }
 
