@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod gcode_reader;
+mod manufacture;
 mod post;
 mod tool;
 mod toolpath;
@@ -22,6 +23,10 @@ mod units;
 
 pub use gcode_reader::{MAX_LINE_CHARS, MAX_LINES, ReadBack, ReadSettings, read as read_gcode};
 
+pub use manufacture::{
+    BoxAnchor, BoxOffsets, BoxSide, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, MAX_DESIGN_TOOLS, MAX_OPERATIONS, MAX_REFERENCES, MAX_SETUPS,
+    ManufactureData, Operation, OperationKind, SafeHeights, Setup, SetupKind, Stock, Wcs, WcsOrientation, WcsOrigin,
+};
 pub use post::{Arcs, BUILTIN_POSTS, Comments, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences};
 pub use tool::{
     CuttingData, Engagement, FeedWarning, Holder, HolderSegment, MAX_CUTTING_DATA, MAX_HOLDER_SEGMENTS, MAX_TOOLS, Overrides, SpeedsFeeds,
