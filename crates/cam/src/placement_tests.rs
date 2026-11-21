@@ -20,6 +20,7 @@ fn vise() -> Setup {
         name: "Op 1 (vise)".into(),
         kind: SetupKind::Milling,
         machine: None,
+        material: None,
         wcs: Wcs {
             origin: WcsOrigin::StockBox { anchor: anchor(BoxSide::Center, BoxSide::Center, BoxSide::Max) },
             orientation: WcsOrientation::Model,

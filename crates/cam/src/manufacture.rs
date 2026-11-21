@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
+use crate::drill::DrillOp;
 use crate::tool::Tool;
 use crate::toolpath::Toolpath;
 use crate::units::MAX_COORDINATE;
@@ -120,12 +121,15 @@ pub struct SafeHeights {
     pub retract: f64,
 }
 
-/// What an operation does. P0 has the hand-made toolpath only; P1 adds the 2.5D strategies.
+/// What an operation does: a hand-made toolpath, or a strategy whose toolpath is worked out from
+/// its parameters, the setup's placement and the tool (P1 adds them one by one).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationKind {
     /// A toolpath given move by move (tests, the P0 demo, scripts). Its moves are its parameters.
     Manual { toolpath: Toolpath },
+    /// Holes at points, drilled with one cycle (decision 0009 of the CAM work).
+    Drill { drill: DrillOp },
 }
 
 /// One operation of a setup.
@@ -157,6 +161,9 @@ pub struct Setup {
     pub kind: SetupKind,
     /// The machine definition's id; `None` for a generic machine.
     pub machine: Option<String>,
+    /// The stock's material, as named in the tools' cutting data (`aluminium`); `None` when not set.
+    #[serde(default)]
+    pub material: Option<String>,
     pub wcs: Wcs,
     /// 1 to 6 for G54 to G59.
     pub work_offset: u8,
@@ -261,6 +268,11 @@ impl ManufactureData {
         if let Some(m) = &s.machine {
             check_id(&format!("{what} machine"), m)?;
         }
+        if let Some(m) = &s.material
+            && (m.is_empty() || m.len() > 64 || m.chars().any(char::is_control))
+        {
+            return Err(Error::BadValue(format!("{what}: a material name of 1 to 64 bytes without control characters")));
+        }
         match &s.wcs.origin {
             WcsOrigin::StockBox { .. } => {}
             WcsOrigin::ModelPoint { reference } => check_reference(&what, reference)?,
@@ -312,11 +324,12 @@ impl ManufactureData {
             if self.setups.iter().flat_map(|t| &t.operations).filter(|o| o.id == op.id).count() > 1 {
                 return Err(Error::BadValue(format!("{what}: the id is used twice")));
             }
-            if !self.tools.iter().any(|t| t.number == op.tool) {
+            let Some(tool) = self.tools.iter().find(|t| t.number == op.tool) else {
                 return Err(Error::BadValue(format!("{what}: tool {} is not one of the design's tools", op.tool)));
-            }
+            };
             match &op.operation {
                 OperationKind::Manual { toolpath } => toolpath.validate().map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Drill { drill } => drill.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())

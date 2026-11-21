@@ -6,17 +6,17 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation,
-    OperationKind, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
+    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, DrillOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData,
+    Operation, OperationKind, Placement, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
 
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
-    CamData, CamDataParams, CamOpDeleteParams, CamOpManualParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams,
-    CamSetupEditParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams,
-    CamToolWritten,
+    CamData, CamDataParams, CamOpDeleteParams, CamOpDrillParams, CamOpManualParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams,
+    CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten,
+    CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -49,6 +49,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
+    CommandSpec::new("cam.op.drill", "Drill", crate::checked!("cam.op.drill", op_drill)).icon("edit").doc_only()
+        .contract(&TypedContract::<CamOpDrillParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a drill, spot drill, reamer or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle, order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
+    CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only().doc_only()
+        .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
+        .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
@@ -160,6 +166,7 @@ fn default_setup(id: String, name: String) -> Setup {
         name,
         kind: SetupKind::Milling,
         machine: None,
+        material: None,
         wcs: Wcs {
             origin: WcsOrigin::StockBox { anchor: BoxAnchor { x: BoxSide::Center, y: BoxSide::Center, z: BoxSide::Max } },
             orientation: WcsOrientation::Model,
@@ -177,6 +184,7 @@ fn default_setup(id: String, name: String) -> Setup {
 struct SetupFields {
     name: Option<String>,
     machine: Option<String>,
+    material: Option<String>,
     wcs: Option<Value>,
     work_offset: Option<u8>,
     stock: Option<Value>,
@@ -191,6 +199,9 @@ fn apply(cmd: &str, setup: &mut Setup, f: SetupFields) -> Result<()> {
     }
     if let Some(v) = f.machine {
         setup.machine = Some(v);
+    }
+    if let Some(v) = f.material {
+        setup.material = (!v.is_empty()).then_some(v);
     }
     if let Some(v) = f.wcs {
         setup.wcs = parse(cmd, "wcs", &v)?;
@@ -223,6 +234,7 @@ fn setup_create(s: &mut Session, p: &Value) -> Result<Value> {
     let fields = SetupFields {
         name: p.name,
         machine: p.machine,
+        material: p.material,
         wcs: p.wcs,
         work_offset: p.work_offset,
         stock: p.stock,
@@ -244,6 +256,7 @@ fn setup_edit(s: &mut Session, p: &Value) -> Result<Value> {
     let fields = SetupFields {
         name: p.name,
         machine: p.machine,
+        material: p.material,
         wcs: p.wcs,
         work_offset: p.work_offset,
         stock: p.stock,
@@ -333,6 +346,90 @@ fn op_manual(s: &mut Session, p: &Value) -> Result<Value> {
     reply(CMD, CamOpWritten { id, setup: p.setup, operations })
 }
 
+fn op_drill(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.op.drill";
+    let p: CamOpDrillParams = parse(CMD, "parameters", p)?;
+    let drill: DrillOp = parse(CMD, "drill", &p.drill)?;
+    let mut d = load(s, CMD)?;
+    let id = next_id("op", d.setups.iter().flat_map(|x| &x.operations).map(|o| o.id.as_str()));
+    let setup = d.setups.iter_mut().find(|x| x.id == p.setup).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.setup)))?;
+    let name = p.name.unwrap_or_else(|| format!("Drill {}", setup.operations.len() + 1));
+    setup.operations.push(Operation { id: id.clone(), name, tool: p.tool, suppressed: false, operation: OperationKind::Drill { drill } });
+    let operations = setup.operations.len();
+    store(s, CMD, &d)?;
+    reply(CMD, CamOpWritten { id, setup: p.setup, operations })
+}
+
+/// One operation's toolpath, the numbers its strategy worked out, and its notes.
+struct Worked {
+    toolpath: Toolpath,
+    numbers: Value,
+    notes: Vec<String>,
+}
+
+/// `op`'s toolpath from `start` (`None`: where the strategy begins): a hand-made one as given, a
+/// strategy's worked out on the setup's placement, which is measured the first time one needs it.
+fn work(
+    s: &Session,
+    cmd: &str,
+    d: &ManufactureData,
+    setup: &Setup,
+    op: &Operation,
+    start: Option<solidcore_record::Vec3>,
+    placed: &mut Option<Placement>,
+) -> Result<Worked> {
+    match &op.operation {
+        OperationKind::Manual { toolpath } => {
+            Ok(Worked { toolpath: toolpath.clone(), numbers: Value::Object(Default::default()), notes: Vec::new() })
+        }
+        OperationKind::Drill { drill } => {
+            let tool = d.tools.iter().find(|t| t.number == op.tool).ok_or_else(|| bad(cmd, format!("operation {}: no tool {}", op.id, op.tool)))?;
+            let placement = match placed {
+                Some(p) => *p,
+                None => {
+                    let (model, _) = model_box(s, cmd, setup)?;
+                    let p = setup.place(model).map_err(|e| bad(cmd, e.to_string()))?;
+                    *placed = Some(p);
+                    p
+                }
+            };
+            let done = drill
+                .toolpath(start, tool, &placement, setup.safe_heights, setup.material.as_deref())
+                .map_err(|e| bad(cmd, format!("operation {} ({}): {e}", op.id, op.name)))?;
+            let numbers = serde_json::json!({"rpm": done.rpm, "feed": done.feed, "bottom": done.bottom, "r": done.r, "clearance": done.clearance});
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+        }
+    }
+}
+
+fn op_toolpath_command(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.op.toolpath";
+    let p: CamOpToolpathParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let (setup, op) = d
+        .setups
+        .iter()
+        .find_map(|x| x.operations.iter().find(|o| o.id == p.id).map(|o| (x, o)))
+        .ok_or_else(|| bad(CMD, format!("the design has no operation '{}'", p.id)))?;
+    let worked = work(s, CMD, &d, setup, op, None, &mut None)?;
+    let stats = worked.toolpath.stats().map_err(|e| bad(CMD, e.to_string()))?;
+    reply(
+        CMD,
+        CamOpToolpath {
+            id: p.id,
+            setup: setup.id.clone(),
+            toolpath: serde_json::to_value(&worked.toolpath).map_err(|e| bad(CMD, e.to_string()))?,
+            feed_length: stats.feed_length,
+            rapid_length: stats.rapid_length,
+            cut_minutes: stats.feed_minutes + stats.dwell_minutes,
+            min: [stats.min.x, stats.min.y, stats.min.z],
+            max: [stats.max.x, stats.max.y, stats.max.z],
+            numbers: worked.numbers,
+            notes: worked.notes,
+        },
+    )
+}
+
 fn op_delete(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "cam.op.delete";
     let p: CamOpDeleteParams = parse(CMD, "parameters", p)?;
@@ -365,8 +462,13 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // One program: the setup's operations in order, each starting where the one before ended.
     let mut program: Option<Toolpath> = None;
+    let mut placed = None;
+    let mut notes = Vec::new();
     for op in setup.operations.iter().filter(|o| !o.suppressed) {
-        let OperationKind::Manual { toolpath } = &op.operation;
+        let start = program.as_ref().map(|all| all.moves.iter().fold(all.start, |at, m| m.end(at)));
+        let worked = work(s, CMD, &d, setup, op, start, &mut placed)?;
+        notes.extend(worked.notes.into_iter().map(|n| format!("operation {}: {n}", op.id)));
+        let toolpath = &worked.toolpath;
         match &mut program {
             None => program = Some(toolpath.clone()),
             Some(all) => {
@@ -399,7 +501,7 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
             moves: posted.written.moves.len(),
             machine_retracts: posted.read_back.machine_retracts,
             tolerance_mm: posted.tolerance,
-            notes: posted.notes,
+            notes: notes.into_iter().chain(posted.notes).collect(),
         },
     )
 }

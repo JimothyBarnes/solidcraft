@@ -64,6 +64,10 @@ pub struct CamSetupCreateParams {
     /// A machine definition's id; none for a generic machine.
     #[serde(default)]
     pub machine: Option<String>,
+    /// The stock's material, as the tools' cutting data names it (`aluminium`); feeds come from
+    /// it. An empty string clears it.
+    #[serde(default)]
+    pub material: Option<String>,
     /// `{origin, orientation}` as in the Manufacture data.
     #[serde(default)]
     pub wcs: Option<Value>,
@@ -94,6 +98,10 @@ pub struct CamSetupEditParams {
     pub name: Option<String>,
     #[serde(default)]
     pub machine: Option<String>,
+    /// The stock's material, as the tools' cutting data names it (`aluminium`); feeds come from
+    /// it. An empty string clears it.
+    #[serde(default)]
+    pub material: Option<String>,
     #[serde(default)]
     pub wcs: Option<Value>,
     #[serde(default)]
@@ -166,6 +174,52 @@ pub struct CamOpManualParams {
 pub struct CamOpDeleteParams {
     /// The operation's id (`op-1`, …).
     pub id: String,
+}
+
+/// Add a drill operation to a setup (decision 0009 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpDrillParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: a drill, spot drill, reamer or flat end mill.
+    pub tool: u32,
+    /// `{holes: [[x, y], …] in the WCS, depth, cycle: {type: drill, dwell} | {type: peck |
+    /// chip_break, peck}, order?: nearest | as_given, top?: Z (default the stock top), depth_to?:
+    /// tip | full_diameter, r_above?: mm above the top (default the setup's retract), between?:
+    /// r_plane | clearance, rpm?, feed?}`, mm and mm/min.
+    pub drill: Value,
+}
+
+/// Work out one operation's toolpath.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpToolpathParams {
+    /// The operation's id.
+    pub id: String,
+}
+
+/// One operation's toolpath, worked out from its parameters now (never stored), and its measures.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamOpToolpath {
+    pub id: String,
+    pub setup: String,
+    /// `{start, moves}` in the setup's WCS, mm and mm/min; holes are one `drill` move each.
+    pub toolpath: Value,
+    /// Length cut at feed and moved at rapid (holes as the generic control runs them), mm.
+    pub feed_length: f64,
+    pub rapid_length: f64,
+    /// Time cutting and dwelling, minutes; rapids depend on the machine and are left out.
+    pub cut_minutes: f64,
+    /// The box the tool tip passes through, in the WCS.
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    /// What the strategy worked out (for a drill: rpm, feed, bottom, r, clearance); empty for a
+    /// hand-made toolpath.
+    pub numbers: Value,
+    pub notes: Vec<String>,
 }
 
 /// What an operation command left.

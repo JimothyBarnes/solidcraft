@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 mod cycle;
+mod drill;
 mod gcode_reader;
 mod manufacture;
 mod placement;
@@ -25,6 +26,7 @@ mod toolpath;
 mod units;
 
 pub use cycle::{CycleMotion, DrillCycle, G98Rule, MAX_CYCLE_DISTANCE, MAX_PECKS, MIN_HOLE_DEPTH, MIN_PECK, PeckRetract};
+pub use drill::{Between, DepthTo, DrillOp, Drilled, GENERIC_MAX_RPM, HoleOrder, MAX_HOLES};
 pub use gcode_reader::{MAX_LINE_CHARS, MAX_LINES, ReadBack, ReadSettings, read as read_gcode};
 
 pub use manufacture::{

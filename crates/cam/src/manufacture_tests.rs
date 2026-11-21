@@ -43,6 +43,7 @@ fn shop() -> ManufactureData {
             name: "Op 1 (vise)".into(),
             kind: SetupKind::Milling,
             machine: None,
+            material: None,
             wcs: Wcs {
                 origin: WcsOrigin::StockBox { anchor: BoxAnchor { x: BoxSide::Center, y: BoxSide::Center, z: BoxSide::Max } },
                 orientation: WcsOrientation::Model,
@@ -126,11 +127,25 @@ fn hostile_data_is_refused_with_a_reason() {
         ("control characters", Box::new(|d| d.setups[0].model_bodies = vec!["body\u{0}x".into()])),
         ("control characters", Box::new(|d| d.setups[0].wcs.origin = WcsOrigin::ModelPoint { reference: String::new() })),
         ("name of at most", Box::new(|d| d.setups[0].name = "x".repeat(201))),
+        ("material name", Box::new(|d| d.setups[0].material = Some(String::new()))),
+        ("material name", Box::new(|d| d.setups[0].material = Some("a\nb".into()))),
+        (
+            "does not drill",
+            Box::new(|d| {
+                d.tools[0].kind = crate::tool::ToolKind::FaceMill;
+                d.setups[0].operations[0].operation = OperationKind::Drill { drill: drill_op() };
+            }),
+        ),
+        (
+            "1 to 10000 holes",
+            Box::new(|d| d.setups[0].operations[0].operation = OperationKind::Drill { drill: DrillOp { holes: vec![], ..drill_op() } }),
+        ),
         (
             "finite",
             Box::new(move |d| {
-                let OperationKind::Manual { toolpath } = &mut d.setups[0].operations[0].operation;
-                toolpath.moves.push(Move::Rapid { to: p(nan, 0.0, 0.0) });
+                if let OperationKind::Manual { toolpath } = &mut d.setups[0].operations[0].operation {
+                    toolpath.moves.push(Move::Rapid { to: p(nan, 0.0, 0.0) });
+                }
             }),
         ),
     ];
@@ -151,4 +166,21 @@ fn hostile_data_is_refused_with_a_reason() {
     let json = shop().to_json().unwrap();
     assert!(ManufactureData::from_json(&json.replacen("\"suppressed\": false", "\"suppressed\": false, \"extra\": 1", 1)).is_err());
     assert!(ManufactureData::from_json("{").is_err());
+}
+
+fn drill_op() -> DrillOp {
+    serde_json::from_str(r#"{"holes": [[0, 0], [10, 0]], "depth": 5, "cycle": {"type": "peck", "peck": 2}}"#).unwrap()
+}
+
+#[test]
+fn a_drill_operation_and_a_stock_material_save_and_read_back() {
+    let mut d = shop();
+    d.setups[0].material = Some("aluminium".into());
+    d.setups[0].operations[0].operation = OperationKind::Drill { drill: drill_op() };
+    let json = d.to_json().unwrap();
+    assert!(json.contains("\"kind\": \"drill\"") && json.contains("\"material\": \"aluminium\""), "{json}");
+    assert_eq!(ManufactureData::from_json(&json).unwrap(), d);
+    // Data written before setups had a material still reads, with none.
+    let older = json.replace("\"material\": \"aluminium\",", "");
+    assert_eq!(ManufactureData::from_json(&older).unwrap().setups[0].material, None);
 }

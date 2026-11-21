@@ -180,6 +180,127 @@ fn a_setup_with_nothing_to_machine_says_so() {
     assert!(refused(&mut s, "cam.setup.measure", json!({"id": "setup-1"})).contains("no bodies to machine"));
 }
 
+/// Tool 3: a 10 mm, 2-flute, 118° drill with data for aluminium (100 m/min, 0.1 mm a tooth): it
+/// turns 100 000 / (10 π) = 3183.1 rev/min and feeds 0.2 mm a revolution, 636.6 mm/min.
+fn drill10() -> Value {
+    json!({
+        "number": 3, "name": "10 mm drill", "kind": "drill",
+        "geometry": {"diameter": 10.0, "corner_radius": 0.0, "flute_length": 40.0, "shoulder_length": 0.0, "overall_length": 90.0,
+                     "shank_diameter": 10.0, "tip_angle": 118f64.to_radians(), "tip_diameter": 0.0, "thread_pitch": 0.0},
+        "flutes": 2, "holder": {"stick_out": 50.0, "segments": []}, "length_offset": 3, "diameter_offset": 3, "coolant": "flood",
+        "cutting_data": [{"material": "aluminium", "surface_speed": 100.0, "chip_load": 0.1, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+        "overrides": {"rpm": null, "feed": null}
+    })
+}
+
+/// A 60 x 40 x 20 block in the vise setup (stock top at Z 0, clearance 25, retract 5), aluminium.
+fn drilling() -> Session {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 60, "width": 40, "height": 20, "corner": [0, 0, 0], "body_name": "Block"}));
+    run(&mut s, "cam.tool.create", json!({"tool": drill10()}));
+    run(&mut s, "cam.setup.create", json!({"material": "aluminium"}));
+    s
+}
+
+fn three_holes() -> Value {
+    json!({"holes": [[-20, -10], [20, -10], [20, 10]], "depth": 10, "cycle": {"type": "peck", "peck": 3}})
+}
+
+#[test]
+fn a_drill_operation_works_out_its_toolpath_from_the_setup_and_the_tool() {
+    let mut s = drilling();
+    assert_eq!(run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let rpm = 100_000.0 / (10.0 * std::f64::consts::PI);
+    let n = &t["numbers"];
+    assert!((n["rpm"].as_f64().unwrap() - rpm).abs() < 1e-9 && (n["feed"].as_f64().unwrap() - 0.2 * rpm).abs() < 1e-9, "{n}");
+    assert_eq!((n["bottom"].as_f64(), n["r"].as_f64(), n["clearance"].as_f64()), (Some(-10.0), Some(5.0), Some(25.0)));
+    // Each hole: 15 mm from R to the bottom in five pecks, each after the first re-entering 0.5 mm
+    // above the last depth (the generic control): 17 mm cut a hole.
+    assert!((t["feed_length"].as_f64().unwrap() - 51.0).abs() < 1e-9, "{t}");
+    // Rapids, worked out peck by peck: 93 for the first hole (20 down to R), 113 for the second
+    // (40 across), 93 for the third (20 across), 20 back up to clearance.
+    assert!((t["rapid_length"].as_f64().unwrap() - 319.0).abs() < 1e-9, "{}", t["rapid_length"]);
+    assert!(near(&t["min"], [-20.0, -10.0, -10.0]) && near(&t["max"], [20.0, 10.0, 25.0]), "{t}");
+    let holes: Vec<&Value> = t["toolpath"]["moves"].as_array().unwrap().iter().filter(|m| m["kind"] == "drill").collect();
+    assert_eq!(holes.len(), 3);
+    // Posted for the Haas: one G83 cycle back to R between holes, the drill's speed and coolant.
+    let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = haas["text"].as_str().unwrap();
+    let expected =
+        "\nS3183 M3\nM8\nG43 H3 G0 X-20. Y-10. Z25.\nG99 G83 X-20. Y-10. Z-10. R5. Q3. F636.6\nX20. Y-10.\nX20. Y10.\nG80\nG0 Z25.\nM9\nM5\n";
+    assert!(text.contains(expected), "{text}");
+    // The design keeps the parameters, never the toolpath.
+    let data = run(&mut s, "cam.data", json!({}));
+    let op = &data["data"]["setups"][0]["operations"][0];
+    assert_eq!(op["operation"]["kind"], "drill");
+    assert!(op["operation"].get("toolpath").is_none() && op["operation"]["drill"]["holes"].as_array().unwrap().len() == 3, "{op}");
+}
+
+#[test]
+fn a_drill_operation_follows_its_setup_and_says_what_it_needs() {
+    let mut s = drilling();
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    // 4 mm more stock on top: the WCS origin rises with the stock top (21 to 25 on the model), and
+    // the holes, measured from that top, keep their numbers in the WCS: bottom -10, R 5.
+    run(
+        &mut s,
+        "cam.setup.edit",
+        json!({"id": "setup-1", "stock": {"kind": "relative_box", "offsets": {"x_min": 1, "x_max": 1, "y_min": 1, "y_max": 1, "z_min": 0, "z_max": 5}}}),
+    );
+    assert!(near(&run(&mut s, "cam.setup.measure", json!({"id": "setup-1"}))["placement"]["origin"], [30.0, 20.0, 25.0]));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!((t["numbers"]["bottom"].as_f64(), t["numbers"]["r"].as_f64()), (Some(-10.0), Some(5.0)));
+    // No material: the error names the two ways out; giving one back fixes it.
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": ""}));
+    let e = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(e.contains("stock material") && e.contains("rpm and feed"), "{e}");
+    assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274"})).contains("stock material"));
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": "aluminium"}));
+    run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    // A tool that can't drill, a tool the design lacks, bad holes: refused, nothing added.
+    run(&mut s, "cam.tool.create", json!({"tool": tool(1)}));
+    let mut ball = tool(2);
+    ball["kind"] = json!("ball_end_mill");
+    ball["geometry"]["corner_radius"] = json!(3.0);
+    run(&mut s, "cam.tool.create", json!({"tool": ball}));
+    let undo = s.undo.len();
+    assert!(refused(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 2, "drill": three_holes()})).contains("does not drill"));
+    assert!(refused(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 9, "drill": three_holes()})).contains("tool 9"));
+    assert!(
+        refused(
+            &mut s,
+            "cam.op.drill",
+            json!({"setup": "setup-1", "tool": 3, "drill": {"holes": [], "depth": 5, "cycle": {"type": "drill", "dwell": 0}}})
+        )
+        .contains("holes")
+    );
+    assert!(refused(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": {"holes": [[0, 0]], "depth": 5}})).contains("cycle"));
+    assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-9"})).contains("no operation 'op-9'"));
+    assert_eq!(s.undo.len(), undo);
+    // A plunging flat end mill is fine.
+    run(
+        &mut s,
+        "cam.op.drill",
+        json!({"setup": "setup-1", "tool": 1, "drill": {"holes": [[0, 0]], "depth": 3, "cycle": {"type": "drill", "dwell": 0}, "rpm": 3000, "feed": 100}}),
+    );
+}
+
+#[test]
+fn a_hand_made_toolpath_and_a_drill_operation_post_as_one_program() {
+    let mut s = shop();
+    run(&mut s, "solid.box", json!({"length": 60, "width": 40, "height": 20, "corner": [0, 0, 0], "body_name": "Block"}));
+    run(&mut s, "cam.tool.create", json!({"tool": drill10()}));
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": "aluminium"}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    for post in ["rs274", "fanuc_mill", "haas_mill"] {
+        let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": post}));
+        let text = posted["text"].as_str().unwrap();
+        assert!(text.contains("T1 M6") && text.contains("T3 M6") && text.contains("G83"), "{post}:\n{text}");
+        assert!(text.find("T1 M6") < text.find("T3 M6"), "{post}");
+    }
+}
+
 #[test]
 fn every_change_is_one_undo_step() {
     let mut s = Session::default();
