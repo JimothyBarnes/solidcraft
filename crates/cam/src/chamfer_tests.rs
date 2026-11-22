@@ -106,10 +106,10 @@ fn a_chamfer_goes_once_round_the_wall_below_the_edge_and_outside_it() {
     assert_eq!((d.entries.clone(), d.leads.clone()), (vec![[1.0, -22.0]], vec![1.0]));
     assert!(close(d.round, 200.0 + 2.0 * PI), "{}", d.round);
     assert_eq!(ChamferOp::default().wall_height(&chamfer10(), &faced_block()).unwrap(), -0.5);
-    // 100 m/min on its 10 mm: the chip thinned by the cut's half millimetre of width, so the
-    // feed is 0.05 mm a tooth over 2 sqrt(0.05 - 0.05^2).
+    // 100 m/min on its 10 mm, and its own 0.05 mm a tooth on four teeth: nothing is added for
+    // the chip a narrow cut thins.
     let rpm = 100_000.0 / (10.0 * PI);
-    let feed = 0.05 / (2.0 * (0.05_f64 - 0.0025).sqrt()) * 4.0 * rpm;
+    let feed = 0.05 * 4.0 * rpm;
     assert!(close(d.rpm, rpm) && close(d.feed, feed) && close(d.plunge_feed, 0.5 * feed), "{} {} {}", d.rpm, d.feed, d.plunge_feed);
     let z = -1.5;
     let arc = |x: f64, y: f64, cx: f64, cy: f64, direction: ArcDirection| Move::Arc {

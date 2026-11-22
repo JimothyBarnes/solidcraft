@@ -1455,9 +1455,10 @@ fn chamfer_breaks_the_top_edge_and_keeps_only_what_is_typed() {
     ribbon(&mut h, "cam.op.chamfer");
     let form = chamfer_form(&mut h);
     assert_eq!((form.tool, form.width, form.typed_width, form.tip_below, form.typed_tip_below, form.direction), (0, 0.5, false, 1.0, false, 0));
-    // 200 m/min on its 10 mm, the chip thinned by the cut's half millimetre of width.
+    // 200 m/min on its 10 mm, and its own 0.05 mm a tooth on four teeth: nothing is added for
+    // the chip a narrow cut thins.
     let rpm = 200_000.0 / (10.0 * PI);
-    let feed = 0.05 / (2.0 * (0.05_f64 - 0.0025).sqrt()) * 4.0 * rpm;
+    let feed = 0.05 * 4.0 * rpm;
     assert!(form.rpm == rpm.round() && (form.feed - feed).abs() < 1e-6, "{} rev/min, {} mm/min: {:?}", form.rpm, form.feed, form.worked.trouble());
     assert!(h.widget("-2.50 mm").is_some(), "where the tip runs");
     assert!(h.widget(tr("manufacture.chamfer_note")).is_some() && h.widget(tr("manufacture.preview_note")).is_some());
