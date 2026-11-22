@@ -1,0 +1,42 @@
+{
+  "en": {
+    "cmd.cam_setup_sheet": "Setup Sheet",
+    "help.cam.setup.sheet": "Saves a page for the shop: the stock's size and material, where the work origin is, the tools to load with how far each sticks out and the lowest its tip goes, the operations in order with their speeds, feeds and times, and the setup seen from above. It also lists what is worth checking: what the operations and the simulation noted, and any tool that goes deeper than it sticks out of its holder. The page is HTML: it opens in a browser and prints.",
+    "manufacture.sheet_saved": "Setup sheet written to {path}"
+  },
+  "ar": {
+    "cmd.cam_setup_sheet": "ورقة الإعداد",
+    "help.cam.setup.sheet": "يحفظ صفحة للورشة: مقاس الخامة ومادتها، وموضع نقطة أصل الشغلة، والأدوات المطلوب تركيبها مع مقدار بروز كل منها وأدنى موضع يصل إليه رأسها، والعمليات بترتيبها مع سرعاتها وتغذياتها وأزمنتها، ومنظر الإعداد من الأعلى. وتسرد أيضًا ما يستحق الفحص: ما لاحظته العمليات والمحاكاة، وكل أداة تنزل أعمق من بروزها عن الحامل. الصفحة بصيغة HTML: تُفتح في المتصفح وتُطبع.",
+    "manufacture.sheet_saved": "تمت كتابة ورقة الإعداد في {path}"
+  },
+  "he": {
+    "cmd.cam_setup_sheet": "דף הכנה",
+    "help.cam.setup.sheet": "שומר דף עבור בית המלאכה: גודל חומר הגלם והחומר שלו, מיקום ראשית העבודה, הכלים שיש לטעון עם אורך הבליטה של כל אחד והנקודה הנמוכה ביותר שאליה מגיע החוד שלו, הפעולות לפי הסדר עם המהירויות, ההזנות והזמנים שלהן, ומבט על ההכנה מלמעלה. הוא מפרט גם מה כדאי לבדוק: מה שהפעולות והסימולציה ציינו, וכל כלי שיורד עמוק יותר מאורך הבליטה שלו מהמחזיק. הדף הוא HTML: הוא נפתח בדפדפן וניתן להדפסה.",
+    "manufacture.sheet_saved": "דף ההכנה נכתב אל {path}"
+  },
+  "ja": {
+    "cmd.cam_setup_sheet": "セットアップシート",
+    "help.cam.setup.sheet": "現場用の1ページを保存します。素材の寸法と材質、ワーク原点の位置、取り付ける工具とそれぞれの突き出し量および先端が達する最下点、加工順の工程とその回転数・送り・時間、そして上から見たセットアップの図が載ります。確認すべき点も一覧にします。工程とシミュレーションが指摘した内容や、ホルダーからの突き出し量より深く入る工具などです。ページは HTML で、ブラウザーで開いて印刷できます。",
+    "manufacture.sheet_saved": "セットアップシートを {path} に書き込みました"
+  },
+  "vi": {
+    "cmd.cam_setup_sheet": "Phiếu gá đặt",
+    "help.cam.setup.sheet": "Lưu một trang cho xưởng: kích thước và vật liệu phôi, vị trí gốc phôi, các dao cần lắp cùng độ nhô của từng dao và điểm thấp nhất mà mũi dao đi tới, các nguyên công theo thứ tự với tốc độ, lượng chạy dao và thời gian, và hình gá đặt nhìn từ trên xuống. Trang cũng liệt kê những gì cần kiểm tra: điều các nguyên công và phần mô phỏng ghi nhận, và mọi dao đi sâu hơn độ nhô khỏi đầu kẹp của nó. Trang ở dạng HTML: mở được bằng trình duyệt và in được.",
+    "manufacture.sheet_saved": "Đã ghi phiếu gá đặt vào {path}"
+  },
+  "zh": {
+    "cmd.cam_setup_sheet": "装夹单",
+    "help.cam.setup.sheet": "为车间保存一页说明：毛坯的尺寸和材料、工件原点的位置、需要装上的刀具及各自的伸出长度和刀尖到达的最低位置、按顺序排列的工序及其转速、进给和时间，以及从上方看到的装夹图。它还列出值得检查的内容：各工序和仿真给出的提示，以及下探深度超过其伸出刀柄长度的刀具。页面为 HTML：可用浏览器打开并打印。",
+    "manufacture.sheet_saved": "装夹单已写入 {path}"
+  },
+  "de": {
+    "cmd.cam_setup_sheet": "Einrichteblatt",
+    "help.cam.setup.sheet": "Speichert eine Seite für die Werkstatt: Größe und Werkstoff des Rohteils, die Lage des Werkstücknullpunkts, die einzuwechselnden Werkzeuge mit ihrer Auskraglänge und dem tiefsten Punkt, den ihre Spitze erreicht, die Bearbeitungen in ihrer Reihenfolge mit Drehzahl, Vorschub und Zeit sowie die Aufspannung von oben gesehen. Sie führt auch auf, was zu prüfen ist: was die Bearbeitungen und die Simulation angemerkt haben und jedes Werkzeug, das tiefer eintaucht, als es aus seinem Halter ragt. Die Seite ist HTML: Sie lässt sich im Browser öffnen und drucken.",
+    "manufacture.sheet_saved": "Einrichteblatt nach {path} geschrieben"
+  },
+  "ko": {
+    "cmd.cam_setup_sheet": "셋업 시트",
+    "help.cam.setup.sheet": "현장용 한 장을 저장합니다. 소재의 크기와 재질, 공작물 원점의 위치, 장착할 공구와 각 공구의 돌출 길이 및 공구 끝이 닿는 가장 낮은 위치, 순서대로의 작업과 그 회전 속도·이송·시간, 그리고 위에서 본 셋업 그림이 들어갑니다. 확인할 사항도 나열합니다. 작업과 시뮬레이션이 알린 내용, 홀더에서 돌출된 길이보다 깊이 들어가는 공구 등입니다. 페이지는 HTML이므로 브라우저에서 열고 인쇄할 수 있습니다.",
+    "manufacture.sheet_saved": "셋업 시트를 {path}에 기록했습니다"
+  }
+}

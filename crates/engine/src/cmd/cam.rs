@@ -90,6 +90,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.simulate", "Simulate", crate::checked!("cam.simulate", simulate)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSimulateParams>::new()).output(output_schema_for::<CamSimulated>)
         .params("setup: id, cell?: mm → the setup's operations cut from its stock on a grid of heights: stock_volume, removed, over_part, beside_part (mm3), operations: [{id, name, removed, gouges, rapid_hits, skipped?}], gouges and rapid_hits: [{operation, move, at: [x, y, z], depth}] with their counts, below_stock; the part's heights are read from the bodies' exact faces; a check as fine as its cells (cell, cells, tolerance), never a proof that a program is safe to run"),
+    CommandSpec::new("cam.setup.sheet", "Setup Sheet", crate::checked!("cam.setup.sheet", setup_sheet)).icon("inspect").noundo().read_only()
+        .contract(&TypedContract::<crate::schema::cam::CamSetupSheetParams>::new()).output(output_schema_for::<crate::schema::cam::CamSetupSheet>)
+        .params("setup: id, units?: mm | inch (default the design's), date?: text to write on it, path?: also write it to this .html file, overwrite?: replace an existing file (default false) → html: one page for the shop with the stock, the work origin, the tools (how far each sticks out, the lowest its tip goes), the operations in order with speeds, feeds and times, the setup from above, and what to check (the operations' and the simulation's notes, a tool that goes deeper than it sticks out)"),
     CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamPostParams>::new()).output(output_schema_for::<CamPosted>)
         .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
@@ -1321,6 +1324,186 @@ fn op_delete(s: &mut Session, p: &Value) -> Result<Value> {
     let (setup_id, operations) = (setup.id.clone(), setup.operations.len());
     store(s, CMD, &d)?;
     reply(CMD, CamOpWritten { id: p.id, setup: setup_id, operations })
+}
+
+/// Where a setup's work origin is, in a sheet's words.
+fn origin_words(origin: &WcsOrigin) -> String {
+    match origin {
+        WcsOrigin::StockBox { anchor } => {
+            let level = match anchor.z {
+                BoxSide::Max => "top",
+                BoxSide::Min => "bottom",
+                BoxSide::Center => "middle height",
+            };
+            let across = match anchor.x {
+                BoxSide::Min => "left",
+                BoxSide::Max => "right",
+                BoxSide::Center => "",
+            };
+            let along = match anchor.y {
+                BoxSide::Min => "front",
+                BoxSide::Max => "back",
+                BoxSide::Center => "",
+            };
+            let place = match (along, across) {
+                ("", "") => "the middle".to_string(),
+                ("", side) | (side, "") => format!("the middle of the {side} edge"),
+                (along, across) => format!("the {along} {across} corner"),
+            };
+            format!("{place} of the stock's {level}")
+        }
+        WcsOrigin::ModelPoint { reference } => format!("the model's point {reference}"),
+        WcsOrigin::Explicit { point } => format!("X {} Y {} Z {} of the model", point.x, point.y, point.z),
+    }
+}
+
+/// A kind as serde names it (`flat_end_mill`), in words.
+fn kind_words(kind: &impl serde::Serialize) -> String {
+    let named = serde_json::to_value(kind).unwrap_or(Value::Null);
+    named.as_str().or_else(|| named.get("kind").and_then(Value::as_str)).unwrap_or("").replace('_', " ")
+}
+
+fn setup_sheet(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.sheet";
+    let p: crate::schema::cam::CamSetupSheetParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let setup = d.setups.iter().find(|x| x.id == p.setup).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.setup)))?;
+    let units = match p.units.as_deref() {
+        Some("mm") => LengthUnit::Millimetre,
+        Some("inch") => LengthUnit::Inch,
+        Some(other) => return Err(bad(CMD, format!("units must be mm or inch, not '{other}'"))),
+        None => {
+            // The design's own: inches where it is drawn in inches or feet.
+            let per_mm = crate::doc::display_units::unit_scale(&s.doc.units).0;
+            if [25.4, 304.8].iter().any(|mm| (per_mm * mm - 1.0).abs() < 1e-9) { LengthUnit::Inch } else { LengthUnit::Millimetre }
+        }
+    };
+    if let Some(path) = &p.path
+        && !(path.to_ascii_lowercase().ends_with(".html") || path.to_ascii_lowercase().ends_with(".htm"))
+    {
+        return Err(bad(CMD, "a setup sheet is written to an .html file"));
+    }
+    // The operations as Post Process works them out, in the same order; one whose toolpath can't
+    // be worked out is listed with the reason, and the next starts afresh.
+    let (mut placed, mut at) = (None, None);
+    let (mut operations, mut notes) = (Vec::new(), Vec::new());
+    for op in setup.operations.iter().filter(|o| !o.suppressed) {
+        let listed = work(s, CMD, &d, setup, op, at, &mut placed).map_err(said).and_then(|worked| {
+            let stats = worked.toolpath.stats().map_err(|e| e.to_string())?;
+            let pieces = worked.toolpath.drawn(VIEW_ARC_TOLERANCE).map_err(|e| e.to_string())?;
+            Ok((worked, stats, pieces))
+        });
+        let named = solidcraft_cam::SheetOperation {
+            name: op.name.clone(),
+            tool: op.tool,
+            kind: kind_words(&op.operation),
+            rpm: None,
+            feed: None,
+            lowest_z: None,
+            minutes: None,
+            trouble: None,
+            cuts: Vec::new(),
+        };
+        operations.push(match listed {
+            Ok((worked, stats, pieces)) => {
+                at = Some(worked.toolpath.moves.iter().fold(worked.toolpath.start, |p, m| m.end(p)));
+                notes.extend(worked.notes.iter().map(|note| format!("{}: {note}", op.name)));
+                let number = |key: &str| worked.numbers.get(key).and_then(Value::as_f64);
+                solidcraft_cam::SheetOperation {
+                    rpm: number("rpm"),
+                    feed: number("feed"),
+                    lowest_z: Some(stats.min.z),
+                    minutes: Some(stats.feed_minutes + stats.dwell_minutes),
+                    cuts: pieces.iter().filter(|(how, ..)| *how != Drawn::Rapid).map(|(_, a, b)| [a.x, a.y, b.x, b.y]).collect(),
+                    ..named
+                }
+            }
+            Err(why) => {
+                at = None;
+                solidcraft_cam::SheetOperation { trouble: Some(why), ..named }
+            }
+        });
+    }
+    let placement = match placed {
+        Some(placement) => placement,
+        None => {
+            let (model, _) = model_box(s, CMD, setup)?;
+            setup.place(model).map_err(|e| bad(CMD, e.to_string()))?
+        }
+    };
+    // What the simulation found, in a line each: it is the last look before the machine.
+    match manufacture_simulation(s, &setup.id, None) {
+        Ok(done) => {
+            let sim = &done.stock;
+            let name_of = |index: usize| done.operations.get(index).map_or("an operation", |op| op.name.as_str());
+            if let Some(deepest) = sim.gouges.iter().max_by(|a, b| a.depth.total_cmp(&b.depth)) {
+                notes.push(format!(
+                    "The simulation found {} move(s) that cut into the part, the deepest {:.2} mm, in {}.",
+                    sim.gouge_count,
+                    deepest.depth,
+                    name_of(deepest.operation)
+                ));
+            }
+            if let Some(deepest) = sim.rapid_hits.iter().max_by(|a, b| a.depth.total_cmp(&b.depth)) {
+                notes.push(format!(
+                    "The simulation found {} rapid move(s) through material, the deepest {:.2} mm, in {}.",
+                    sim.rapid_hit_count,
+                    deepest.depth,
+                    name_of(deepest.operation)
+                ));
+            }
+            if sim.below_stock > sim.tolerance {
+                notes.push(format!("A tool goes {:.2} mm below the bottom of the stock: check what is under the part.", sim.below_stock));
+            }
+            notes.extend(done.operations.iter().filter_map(|op| op.skipped.as_ref().map(|why| format!("{} was not simulated: {why}", op.name))));
+        }
+        Err(why) => notes.push(format!("The simulation could not be run: {why}")),
+    }
+    let used: Vec<u32> = operations.iter().map(|o| o.tool).collect();
+    let tools: Vec<solidcraft_cam::SheetTool> = d
+        .tools
+        .iter()
+        .filter(|t| used.contains(&t.number))
+        .map(|t| solidcraft_cam::SheetTool {
+            number: t.number,
+            name: t.name.clone(),
+            kind: kind_words(&t.kind),
+            diameter: t.geometry.diameter,
+            flutes: t.flutes,
+            stick_out: t.holder.stick_out,
+            length_offset: t.length_offset,
+            diameter_offset: t.diameter_offset,
+        })
+        .collect();
+    let sheet = solidcraft_cam::SetupSheet {
+        title: s.doc.name.clone(),
+        setup: setup.name.clone(),
+        date: p.date,
+        units,
+        material: setup.material.clone(),
+        work_offset: setup.work_offset,
+        origin: origin_words(&setup.wcs.origin),
+        placement,
+        tools,
+        operations,
+        notes,
+    };
+    let html = sheet.html().map_err(|e| bad(CMD, e.to_string()))?;
+    if let Some(path) = &p.path {
+        write_file(CMD, path, html.as_bytes(), p.overwrite, "the setup sheet")?;
+    }
+    reply(
+        CMD,
+        crate::schema::cam::CamSetupSheet {
+            html,
+            tools: sheet.tools.len(),
+            operations: sheet.operations.len(),
+            left_out: sheet.operations.iter().filter(|o| o.trouble.is_some()).count(),
+            minutes: sheet.operations.iter().filter_map(|o| o.minutes).sum(),
+            notes: sheet.notes,
+            path: p.path,
+        },
+    )
 }
 
 fn post(s: &mut Session, p: &Value) -> Result<Value> {

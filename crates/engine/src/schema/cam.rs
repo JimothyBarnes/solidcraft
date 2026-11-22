@@ -528,6 +528,42 @@ pub struct CamSimulated {
     pub rapid_hits: Vec<CamSimulatedHit>,
 }
 
+/// Write a setup's sheet for the shop (decision 0019 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupSheetParams {
+    /// The setup's id.
+    pub setup: String,
+    /// `mm` or `inch`; default: the design's own unit.
+    #[serde(default)]
+    pub units: Option<String>,
+    /// The day to write on the sheet, as text; none when left out.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// Also write the page to this `.html` file.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Replace a file that is already there (default false).
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// A setup sheet: one page of HTML, and what it lists.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupSheet {
+    pub html: String,
+    pub tools: usize,
+    pub operations: usize,
+    /// The operations it lists as not in the program: their toolpaths could not be worked out.
+    pub left_out: usize,
+    /// The cutting time in all, minutes.
+    pub minutes: f64,
+    /// The lines it gives to check.
+    pub notes: Vec<String>,
+    /// The file the page was written to, when a path was given.
+    pub path: Option<String>,
+}
+
 /// Post a setup's operations as one program.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

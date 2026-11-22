@@ -577,7 +577,14 @@ fn commands_that_measure_the_model_bring_it_up_to_date_first() {
     for spec in super::COMMANDS {
         let measures = matches!(
             spec.id,
-            "cam.setup.measure" | "cam.setup.holes" | "cam.setup.outline" | "cam.setup.pockets" | "cam.op.toolpath" | "cam.simulate" | "cam.post"
+            "cam.setup.measure"
+                | "cam.setup.holes"
+                | "cam.setup.outline"
+                | "cam.setup.pockets"
+                | "cam.setup.sheet"
+                | "cam.op.toolpath"
+                | "cam.simulate"
+                | "cam.post"
         );
         assert_eq!(spec.reads_model, measures, "{}", spec.id);
     }
@@ -1610,4 +1617,104 @@ fn a_chamfer_goes_round_the_parts_top_edge_and_the_simulation_takes_it_as_meant(
     run(&mut s, "cam.op.edit", json!({"id": id, "chamfer": {"width": 1.0, "tip_below": 0.5}}));
     let n = run(&mut s, "cam.op.toolpath", json!({"id": id}))["numbers"].clone();
     assert_eq!((n["z"].as_f64(), n["offset"].as_f64(), n["leads"].clone()), (Some(-2.5), Some(0.5), json!([1.5])));
+}
+
+#[test]
+fn a_setup_sheet_lists_what_the_shop_sets_up_and_what_to_check() {
+    // The block faced and contoured with the 20 mm tool (T4), and three holes pecked 10 deep with
+    // the 10 mm drill (T3).
+    let mut s = milling();
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    // So far there is nothing to check: no notes, and no heading for them.
+    let clean = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    assert_eq!((clean["notes"].clone(), clean["tools"].as_u64(), clean["operations"].as_u64()), (json!([]), Some(1), Some(2)));
+    assert!(!clean["html"].as_str().unwrap().contains("To check"));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1", "date": "2026-11-22"}));
+    assert_eq!(
+        (sheet["tools"].as_u64(), sheet["operations"].as_u64(), sheet["left_out"].as_u64(), sheet["path"].clone()),
+        (Some(2), Some(3), Some(0), Value::Null),
+        "{sheet:#}"
+    );
+    let html = sheet["html"].as_str().unwrap();
+    let has = |text: &str| assert!(html.contains(text), "no {text:?} in:\n{html}");
+    has("Work offset G54 · 2026-11-22");
+    has("Unverified program. Prove it out on the machine first: air cut, then single block.");
+    has("<tr><th>Stock</th><td>62.00 × 42.00 × 21.00 mm, aluminium</td></tr>");
+    has("<tr><th>Part</th><td>60.00 × 40.00 × 20.00 mm</td></tr>");
+    has("<tr><th>Work origin</th><td>G54 at the middle of the stock&#39;s top</td></tr>");
+    has("<tr><th>Safe heights</th><td>clearance Z 25.00, retract Z 5.00 mm</td></tr>");
+    // The tools the operations use, each with the lowest its tip goes: the drill to Z -11, the
+    // end mill to the bottom of the block.
+    has(
+        "<td>10 mm drill</td><td class=\"n\">10.00</td><td class=\"n\">2</td><td class=\"n\">50.00</td><td class=\"n\">3</td><td class=\"n\">3</td><td class=\"n\">-11.00</td>",
+    );
+    has(
+        "<td>20 mm flat end mill</td><td class=\"n\">20.00</td><td class=\"n\">4</td><td class=\"n\">50.00</td><td class=\"n\">4</td><td class=\"n\">4</td><td class=\"n\">-21.00</td>",
+    );
+    // The operations in the order they run, and the time in all: what each toolpath gives.
+    let minutes: f64 =
+        ["op-1", "op-2", "op-3"].iter().map(|id| run(&mut s, "cam.op.toolpath", json!({"id": id}))["cut_minutes"].as_f64().unwrap()).sum();
+    assert!(about(&sheet["minutes"], minutes), "{} and {minutes}", sheet["minutes"]);
+    for (k, name) in ["Face 1", "Contour 2", "Drill 3"].iter().enumerate() {
+        has(&format!("<td class=\"n\">{}</td><td>{name}</td>", k + 1));
+    }
+    // From above: the three holes as the drill's own circles, and the cuts as lines.
+    assert_eq!(html.matches("r=\"5.00\" stroke=\"#1f5fbf\"").count(), 3, "{html}");
+    assert!(html.contains("<path d=\"M") && html.contains("<circle cx=\"0\" cy=\"0\""));
+    // The model has no holes where the drill goes, and the sheet says what the simulation found.
+    assert_eq!(sheet["notes"].as_array().map(Vec::len), Some(1), "{}", sheet["notes"]);
+    has("<h2>To check</h2>\n<ul>\n<li>The simulation found 3 move(s) that cut into the part, the deepest ");
+
+    // In inches when asked, or when the design is drawn in inches.
+    let inch = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1", "units": "inch"}));
+    assert!(
+        inch["html"].as_str().unwrap().contains("<td>2.441 × 1.654 × 0.827 in, aluminium</td>") && !inch["html"].as_str().unwrap().contains("2026")
+    );
+    assert!(refused(&mut s, "cam.setup.sheet", json!({"setup": "setup-1", "units": "furlong"})).contains("mm or inch"));
+    assert!(refused(&mut s, "cam.setup.sheet", json!({"setup": "setup-9"})).contains("no setup 'setup-9'"));
+
+    // What is worth checking gets a line: a drill that goes through into what is under the part,
+    // a tool that goes deeper than it sticks out of its holder, a cut into the part.
+    run(&mut s, "cam.op.edit", json!({"id": "op-3", "drill": {"holes": [[-20, -10]], "depth": 24, "cycle": {"type": "peck", "peck": 5}}}));
+    let mut short = mill20();
+    short["holder"]["stick_out"] = json!(20.0);
+    run(&mut s, "cam.tool.edit", json!({"number": 4, "tool": short}));
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    let notes: Vec<&str> = sheet["notes"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    let html = sheet["html"].as_str().unwrap();
+    assert!(notes.iter().any(|n| n.contains("A tool goes 4.00 mm below the bottom of the stock")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("The simulation found 1 move(s) that cut into the part")), "{notes:?}");
+    assert!(html.contains("T4 goes 21.00 mm below the top of the stock and sticks out 20.00 mm from its holder"), "{html}");
+    assert!(html.contains("<h2>To check</h2>"));
+    // An operation whose toolpath can't be worked out is listed as not in the program.
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": "titanium"}));
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    assert_eq!((sheet["left_out"].as_u64(), sheet["minutes"].as_f64()), (Some(3), Some(0.0)));
+    assert!(sheet["html"].as_str().unwrap().contains("Not in the program:"));
+}
+
+#[test]
+fn a_setup_sheet_is_written_to_an_html_file_and_never_over_one_by_surprise() {
+    let mut s = milling();
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    let dir = std::env::temp_dir().join(format!("solidcraft-cam-sheet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("block.html").to_string_lossy().to_string();
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1", "path": file}));
+    assert_eq!(sheet["path"], json!(file));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), sheet["html"].as_str().unwrap());
+    assert!(refused(&mut s, "cam.setup.sheet", json!({"setup": "setup-1", "path": file})).contains("could not write the setup sheet"));
+    run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1", "path": file, "overwrite": true}));
+    // A sheet is a page: another kind of file is refused, and nothing is written.
+    let other = dir.join("block.nc").to_string_lossy().to_string();
+    assert!(refused(&mut s, "cam.setup.sheet", json!({"setup": "setup-1", "path": other})).contains("an .html file"));
+    assert!(!std::path::Path::new(&other).exists());
+    // A setup with no operations still has its stock and origin to say.
+    run(&mut s, "cam.op.delete", json!({"id": "op-1"}));
+    let empty = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    assert_eq!((empty["tools"].as_u64(), empty["operations"].as_u64()), (Some(0), Some(0)));
+    assert!(empty["html"].as_str().unwrap().contains("<tr><th>Stock</th><td>62.00 × 42.00 × 21.00 mm, aluminium</td></tr>"));
 }

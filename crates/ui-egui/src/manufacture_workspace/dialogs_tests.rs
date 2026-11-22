@@ -507,6 +507,7 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
         ("cam.op.drill", "DRILLING"),
         ("cam.simulate", "ACTIONS"),
         ("cam.post", "ACTIONS"),
+        ("cam.setup.sheet", "ACTIONS"),
         ("cam.tool.create", "MANAGE"),
     ];
     for (id, panel) in placed {
@@ -1480,4 +1481,30 @@ fn chamfer_breaks_the_top_edge_and_keeps_only_what_is_typed() {
     assert_eq!((form.width, form.typed_width, form.tip_below, form.direction, form.typed_rpm), (2.0, true, 0.5, 1, false));
     assert_eq!(form.params()["chamfer"], json!({"width": 2.0, "tip_below": 0.5, "top": null, "direction": "conventional", "lead": null}));
     assert!(ChamferForm::edit(&h.app, "op-9").is_err());
+}
+
+#[test]
+fn the_setup_sheet_is_saved_where_the_save_prompt_says() {
+    let mut h = harness();
+    let status = |h: &Harness| h.app.status.as_ref().map(|s| (s.0.clone(), s.2));
+    // No setup yet: said, and no file is asked for.
+    h.app.start("cam.setup.sheet");
+    h.frames(3);
+    assert_eq!(status(&h), Some((tr("manufacture.no_setup").to_string(), true)));
+    // The block faced with the 20 mm end mill: the button asks where to save, and the page for
+    // the setup the viewport draws is written there. No form opens.
+    block(&mut h);
+    add_mill(&mut h, "aluminium");
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 1})).unwrap();
+    ribbon(&mut h, "cam.setup.sheet");
+    h.frames(5);
+    let file = h.dir.join(file_name(&format!("{} setup sheet", h.app.session.doc.name), "setup-sheet", "html"));
+    let path = file.to_string_lossy().to_string();
+    assert!(file.exists(), "{path}: {:?}", h.app.status);
+    assert_eq!(status(&h), Some((solidcraft_ui_text::format("manufacture.sheet_saved", &[("path", &path)]), false)));
+    assert_eq!(open(&h), "none");
+    let html = std::fs::read_to_string(&file).unwrap();
+    assert!(html.starts_with("<!DOCTYPE html>") && html.contains("Face 1") && html.contains("<svg") && html.contains("Unverified program"), "{html}");
+    assert!(html.contains("<tr><th>Stock</th><td>62.00 × 42.00 × 21.00 mm, aluminium</td></tr>"));
 }

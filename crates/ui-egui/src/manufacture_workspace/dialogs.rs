@@ -610,6 +610,24 @@ fn export_library(app: &mut SolveApp) {
     });
 }
 
+/// Setup Sheet: asks where to save and writes there the sheet of the setup the viewport draws, a
+/// page for the shop. The save prompt asks before replacing a file.
+fn save_sheet(app: &mut SolveApp) {
+    let (list, at) = setups(app);
+    let Some(setup) = list.get(at).map(|setup| setup.id.clone()) else {
+        app.set_status(tr("manufacture.no_setup"), true);
+        return;
+    };
+    let name = file_name(&format!("{} setup sheet", app.session.doc.name), "setup-sheet", "html");
+    app.pick_save(&name, &["html"], move |app, path| {
+        let Some(path) = path else { return };
+        // A refusal is on the status line already.
+        if app.run("cam.setup.sheet", json!({"setup": setup, "path": path, "overwrite": true})).is_ok() {
+            app.set_status(solidcraft_ui_text::format("manufacture.sheet_saved", &[("path", &path)]), false);
+        }
+    });
+}
+
 /// Import Tools: copies tools from a tool library file into the design.
 pub(crate) struct ImportForm {
     /// The library file.
@@ -1735,6 +1753,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
             | "cam.op.chamfer"
             | "cam.op.drill"
             | "cam.simulate"
+            | "cam.setup.sheet"
             | "cam.post"
     ) {
         return false;
@@ -1748,6 +1767,10 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
     if id == "cam.library.export" {
         // No form: the save prompt is all it asks.
         export_library(app);
+        return true;
+    }
+    if id == "cam.setup.sheet" {
+        save_sheet(app);
         return true;
     }
     app.manufacture_workspace.dialog = Some(match id {

@@ -27,6 +27,7 @@ mod offset;
 mod placement;
 mod pocket;
 mod post;
+mod sheet;
 mod sim;
 mod tool;
 mod toolpath;
@@ -56,6 +57,7 @@ pub use pocket::{
 pub use post::{
     Arcs, BUILTIN_POSTS, Comments, Cycles, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences,
 };
+pub use sheet::{MAX_SHEET_PIECES, MAX_SHEET_ROWS, SetupSheet, SheetOperation, SheetTool};
 pub use sim::{CutReport, Gouge, HeightField, MAX_FIELD_CELLS, MAX_LISTED, MIN_CELL, RapidHit, Simulation};
 pub use tool::{
     CuttingData, Engagement, FeedWarning, Holder, HolderSegment, MAX_CUTTING_DATA, MAX_HOLDER_SEGMENTS, MAX_TOOLS, Overrides, SpeedsFeeds,
