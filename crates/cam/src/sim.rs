@@ -7,14 +7,18 @@
 //! axis. A cutting move lowers every cell the tool passes over to the tool's surface there: for
 //! a flat tool exactly, whatever the move's slope (the lowest the tool gets over a cell is at one
 //! end of the stretch during which the cell is under it); for other profiles the lowest of a few
-//! places along that stretch. A gouge is a cell lowered below the part; a rapid that passes below
-//! the material's top is a hit.
+//! places along that stretch. A straight move and an arc in the XY plane are each cut as they
+//! are: which cells the tool passes over, and for how much of the move, is worked out from the
+//! line or the circle itself. A gouge is a cell lowered below the part; a rapid that passes below
+//! the material's top is a hit. A rapid in more than one axis has no one path: a control may
+//! move each axis at its own top speed, the shortest arriving first (Haas's workbook says so of
+//! G00, p. 28), so it is checked over the whole box between its ends, at the lower end's height.
 //!
 //! Above its flutes a tool does not cut: its neck, its shank and its holder are discs at their
 //! heights above the tip, and a move that brings one of them into material is a hit of its own
 //! ([`BodyHit`]). The holder is checked where the tool's data describes one.
 
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 
 use solidcore_record::{Vec2, Vec3};
 
@@ -31,10 +35,9 @@ pub const MAX_FIELD_CELLS: usize = 4_000_000;
 pub const MIN_CELL: f64 = 0.01;
 /// The most gouges and the most rapid hits a simulation lists (it counts them all).
 pub const MAX_LISTED: usize = 100;
-/// The most chords an arc is cut as.
+/// The most chords an arc is cut as, where it is cut as chords (in the ZX and YZ planes).
 const MAX_CHORDS: usize = 10_000;
-/// The finest an arc's chords are made for a tool with a sloping side: how far inside the arc
-/// they may run, as a share of a cell.
+/// The finest such chords are made: how far inside the arc they may run, as a share of a cell.
 const FINEST_SAG: f64 = 0.001;
 /// How far inside the tool's edge a cell must be for a cut there to cut into the part, in
 /// cells: along a wall the part and the cut share a row of cells, and that row is the grid's
@@ -221,8 +224,8 @@ impl Cutter {
     }
 
     /// How much its cutting surface rises for each millimetre out, where it slopes all the way
-    /// (a cone). 0 for the others: beside a wall their side is upright, which the slack at the
-    /// tool's edge covers, and no toolpath yet follows a surface with a rounded corner.
+    /// (a cone); 0 for the others. It is what an arc's chords cost in depth, where an arc is cut
+    /// as chords.
     fn steepness(&self) -> f64 {
         match self.profile {
             Profile::Point(_, slope) => slope,
@@ -281,14 +284,24 @@ pub struct BodyHit {
     pub depth: f64,
 }
 
-/// The stretch of a straight move (as shares of it) during which a point `(px, py)` from the
-/// move's start is within `r` of the tool's axis, the share at which the axis is nearest, and
-/// how near that is; `None` when it never is. `(dx, dy)` is the move seen from above.
-fn stretch(px: f64, py: f64, dx: f64, dy: f64, r: f64) -> Option<(f64, f64, f64, f64)> {
+/// A stretch of a piece of a move during which a point is under the tool: where it begins and
+/// ends and where the tool's axis is nearest the point, as shares of the piece, and how near
+/// that is, mm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Stretch {
+    from: f64,
+    to: f64,
+    nearest: f64,
+    least: f64,
+}
+
+/// The stretch of a straight move during which a point `(px, py)` from the move's start is
+/// within `r` of the tool's axis; `None` when it never is. `(dx, dy)` is the move seen from above.
+fn stretch(px: f64, py: f64, dx: f64, dy: f64, r: f64) -> Option<Stretch> {
     let along = dx * dx + dy * dy;
     if along <= 1e-18 {
         let out = px.hypot(py);
-        return (out <= r).then_some((0.0, 1.0, 0.0, out));
+        return (out <= r).then_some(Stretch { from: 0.0, to: 1.0, nearest: 0.0, least: out });
     }
     let middle = (px * dx + py * dy) / along;
     let off = (px * dy - py * dx).abs() / along.sqrt();
@@ -296,12 +309,169 @@ fn stretch(px: f64, py: f64, dx: f64, dy: f64, r: f64) -> Option<(f64, f64, f64,
         return None;
     }
     let half = (r * r - off * off).sqrt() / along.sqrt();
-    let (t0, t1) = ((middle - half).max(0.0), (middle + half).min(1.0));
-    if t0 > t1 {
+    let (from, to) = ((middle - half).max(0.0), (middle + half).min(1.0));
+    if from > to {
         return None;
     }
     let nearest = middle.clamp(0.0, 1.0);
-    Some((t0, t1, nearest, (px - nearest * dx).hypot(py - nearest * dy)))
+    Some(Stretch { from, to, nearest, least: (px - nearest * dx).hypot(py - nearest * dy) })
+}
+
+/// The stretches of an arc during which a point is within `r` of the tool's axis, as [`stretch`]
+/// has the one of a line: at most two (a full circle begins and ends over the same cells). The
+/// arc is about the origin, of `radius`, from the angle `start` through the signed `sweep`; the
+/// point is `(px, py)`.
+///
+/// With the point `d` from the centre, the axis at an angle `u` round from the point's own
+/// direction is sqrt(d² + R² - 2 d R cos u) from it: within `r` while cos u is at least
+/// (d² + R² - r²) / 2 d R.
+fn around(px: f64, py: f64, radius: f64, start: f64, sweep: f64, r: f64) -> [Option<Stretch>; 2] {
+    let total = sweep.abs();
+    let d = px.hypot(py);
+    let (cosine, limit) = (d * d + radius * radius - r * r, 2.0 * d * radius);
+    if !(total > 0.0 && radius > 0.0) || cosine > limit {
+        return [None, None];
+    }
+    // How far round the arc, the way it goes, the point's own direction is from its start.
+    let middle = if d > 0.0 { (sweep.signum() * (py.atan2(px) - start)).rem_euclid(TAU) } else { 0.0 };
+    let apart = |u: f64| (d * d + radius * radius - 2.0 * d * radius * (u - middle).cos()).max(0.0).sqrt();
+    if cosine <= -limit {
+        // Within reach all the way round: nearest where the arc passes the point's direction,
+        // or at whichever end is nearer when it stops short of that.
+        let nearest = if middle <= total || apart(total) <= apart(0.0) { middle.min(total) } else { 0.0 };
+        return [Some(Stretch { from: 0.0, to: 1.0, nearest: nearest / total, least: apart(nearest) }), None];
+    }
+    let half = (cosine / limit).clamp(-1.0, 1.0).acos();
+    let mut found = [None, None];
+    let mut slots = found.iter_mut();
+    for turn in [-TAU, 0.0, TAU] {
+        let passing = middle + turn;
+        let (from, to) = ((passing - half).max(0.0), (passing + half).min(total));
+        if from <= to
+            && let Some(slot) = slots.next()
+        {
+            let nearest = passing.clamp(from, to);
+            *slot = Some(Stretch { from: from / total, to: to / total, nearest: nearest / total, least: apart(nearest) });
+        }
+    }
+    found
+}
+
+/// One piece of a move, as the tool's tip goes along it: straight, round an arc in the XY
+/// plane (a helix when its ends differ in height), or anywhere between two points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Piece {
+    Line {
+        a: Vec3,
+        b: Vec3,
+    },
+    /// A rapid in more than one axis: the tool may be anywhere in the box between its ends, as
+    /// low as the lower of them.
+    Across {
+        a: Vec3,
+        b: Vec3,
+    },
+    Arc {
+        centre: Vec2,
+        radius: f64,
+        /// The angle it starts at about its centre and how far round it goes (counter-clockwise
+        /// when above 0), radians.
+        start: f64,
+        sweep: f64,
+        /// The heights it starts and ends at.
+        z: (f64, f64),
+        /// The box round it seen from above: the least and the greatest X, then Y.
+        bounds: (f64, f64, f64, f64),
+    },
+}
+
+impl Piece {
+    /// The arc `arc` from `a` to `b` as a piece, when it lies in the XY plane.
+    fn round(arc: &ArcGeom, a: Vec3, b: Vec3) -> Option<Piece> {
+        let (centre, start, z) = arc.level()?;
+        let mut bounds = (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y));
+        for p in arc.extremes() {
+            bounds = (bounds.0.min(p.x), bounds.1.max(p.x), bounds.2.min(p.y), bounds.3.max(p.y));
+        }
+        (arc.sweep.abs() > 0.0).then_some(Piece::Arc { centre, radius: arc.radius, start, sweep: arc.sweep, z, bounds })
+    }
+
+    /// A rapid from `a` to `b`: a line when it moves along one axis, the box between its ends
+    /// when it moves along more.
+    fn rapid(a: Vec3, b: Vec3) -> Piece {
+        let axes = [a.x != b.x, a.y != b.y, a.z != b.z].into_iter().filter(|moves| *moves).count();
+        if axes > 1 { Piece::Across { a, b } } else { Piece::Line { a, b } }
+    }
+
+    /// The box round the piece seen from above: the least and the greatest X, then Y.
+    fn bounds(&self) -> (f64, f64, f64, f64) {
+        match *self {
+            Piece::Line { a, b } | Piece::Across { a, b } => (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y)),
+            Piece::Arc { bounds, .. } => bounds,
+        }
+    }
+
+    /// Where along X the cells of the row at `y` can be within `r` of the piece: the whole of
+    /// its box for a line; for an arc the ring round its circle, which the row crosses once or,
+    /// where it passes through the circle's inside, on each side.
+    fn spans(&self, y: f64, r: f64) -> [Option<(f64, f64)>; 2] {
+        let (x0, x1, ..) = self.bounds();
+        let Piece::Arc { centre, radius, .. } = *self else { return [Some((x0 - r, x1 + r)), None] };
+        let up = y - centre.y;
+        let outer = (radius + r) * (radius + r) - up * up;
+        if !(outer >= 0.0) {
+            return [None, None];
+        }
+        let (outer, hollow) = (outer.sqrt(), (radius - r).max(0.0));
+        let inner = (hollow * hollow - up * up).max(0.0).sqrt();
+        let clip = |lo: f64, hi: f64| (lo.max(x0 - r) <= hi.min(x1 + r)).then_some((lo.max(x0 - r), hi.min(x1 + r)));
+        if inner > 0.0 {
+            [clip(centre.x - outer, centre.x - inner), clip(centre.x + inner, centre.x + outer)]
+        } else {
+            [clip(centre.x - outer, centre.x + outer), None]
+        }
+    }
+
+    /// The tip's height a share `t` of the way along.
+    fn height(&self, t: f64) -> f64 {
+        match *self {
+            Piece::Line { a, b } => a.z + t * (b.z - a.z),
+            Piece::Across { a, b } => a.z.min(b.z),
+            Piece::Arc { z, .. } => z.0 + t * (z.1 - z.0),
+        }
+    }
+
+    /// How far the point `(x, y)` is from the tool's axis a share `t` of the way along, seen
+    /// from above.
+    fn away(&self, x: f64, y: f64, t: f64) -> f64 {
+        match *self {
+            Piece::Line { a, b } => (x - a.x - t * (b.x - a.x)).hypot(y - a.y - t * (b.y - a.y)),
+            Piece::Across { .. } => self.outside(x, y),
+            Piece::Arc { centre, radius, start, sweep, .. } => {
+                let (sin, cos) = (start + t * sweep).sin_cos();
+                (x - centre.x - radius * cos).hypot(y - centre.y - radius * sin)
+            }
+        }
+    }
+
+    /// How far the point `(x, y)` is outside the box round the piece, seen from above (0 within).
+    fn outside(&self, x: f64, y: f64) -> f64 {
+        let (x0, x1, y0, y1) = self.bounds();
+        (x0 - x).max(x - x1).max(0.0).hypot((y0 - y).max(y - y1).max(0.0))
+    }
+
+    /// The stretches of the piece during which the point `(x, y)` is within `r` of the tool's
+    /// axis.
+    fn over(&self, x: f64, y: f64, r: f64) -> [Option<Stretch>; 2] {
+        match *self {
+            Piece::Line { a, b } => [stretch(x - a.x, y - a.y, b.x - a.x, b.y - a.y, r), None],
+            Piece::Across { .. } => {
+                let least = self.outside(x, y);
+                [(least <= r).then_some(Stretch { from: 0.0, to: 1.0, nearest: 0.0, least }), None]
+            }
+            Piece::Arc { centre, radius, start, sweep, .. } => around(x - centre.x, y - centre.y, radius, start, sweep, r),
+        }
+    }
 }
 
 /// What one move of a toolpath has been found to do, as its pieces are passed.
@@ -310,7 +480,8 @@ struct Found {
     move_index: usize,
     /// How far into the part the toolpath is meant to cut ([`Simulation::cut_into`]).
     allowed: f64,
-    /// How much lower than the true move the piece being passed may cut: an arc's chords, mm.
+    /// How much lower than the true move the piece being passed may cut, mm: an arc's chords,
+    /// where it is cut as chords.
     slack: f64,
     /// Its deepest cut below the part, and where as a rapid it was furthest below the material.
     gouge: Option<Gouge>,
@@ -462,30 +633,35 @@ impl Simulation {
             let mut found = Found { operation, move_index: index, allowed: into_part, slack: 0.0, gouge: None, hit: None, body: None };
             for step in &plain {
                 match *step {
-                    Move::Rapid { to } => self.pass(at, to, &cutter, false, &mut found),
-                    Move::Linear { to, .. } => self.pass(at, to, &cutter, true, &mut found),
+                    Move::Rapid { to } => self.pass(&Piece::rapid(at, to), &cutter, false, &mut found),
+                    Move::Linear { to, .. } => self.pass(&Piece::Line { a: at, b: to }, &cutter, true, &mut found),
                     Move::Arc { to, center, plane, direction, .. } => {
                         let arc = ArcGeom::new(at, to, center, plane, direction).map_err(|reason| Error::BadMove { index, reason })?;
-                        // Chords that stay within a quarter of a cell of the arc. A chord runs
-                        // inside its arc, so a tool with a sloping side is nearer whatever the
-                        // arc goes round and cuts lower there, by its slope times how far
-                        // inside: for such a tool the chords are fine enough to keep that within
-                        // the tolerance, and what is left of it is the simulation's own error,
-                        // not a cut into the part.
-                        let cell = self.stock.dx.min(self.stock.dy);
-                        let steep = cutter.steepness();
-                        let sag = if steep > 0.0 { (self.tolerance / steep).clamp(FINEST_SAG * cell, 0.25 * cell) } else { 0.25 * cell };
-                        let each = if sag >= arc.radius { 0.5 * PI } else { 2.0 * (1.0 - sag / arc.radius).acos() };
-                        let chords = ((arc.sweep.abs() / each).ceil() as usize).clamp(1, MAX_CHORDS);
-                        let inside = arc.radius * (1.0 - (0.5 * arc.sweep.abs() / chords as f64).cos());
-                        found.slack = inside * steep;
-                        let mut from = at;
-                        for k in 1..=chords {
-                            let end = if k == chords { to } else { arc.point(k as f64 / chords as f64) };
-                            self.pass(from, end, &cutter, true, &mut found);
-                            from = end;
+                        if let Some(round) = Piece::round(&arc, at, to) {
+                            self.pass(&round, &cutter, true, &mut found);
+                        } else {
+                            // In the other two planes, as chords. A chord runs inside its arc,
+                            // which there is lower or to one side: the tool cuts lower by as
+                            // much and, where its side slopes, by its slope times as much
+                            // again. The chords are fine enough to keep that within the
+                            // tolerance (between a thousandth and a quarter of a cell), and
+                            // what is left of it, worked out from the chords used, is the
+                            // simulation's own error and not a cut into the part.
+                            let cell = self.stock.dx.min(self.stock.dy);
+                            let steep = 1.0 + cutter.steepness();
+                            let sag = (self.tolerance / steep).clamp(FINEST_SAG * cell, 0.25 * cell);
+                            let each = if sag >= arc.radius { 0.5 * PI } else { 2.0 * (1.0 - sag / arc.radius).acos() };
+                            let chords = ((arc.sweep.abs() / each).ceil() as usize).clamp(1, MAX_CHORDS);
+                            let inside = arc.radius * (1.0 - (0.5 * arc.sweep.abs() / chords as f64).cos());
+                            found.slack = inside * steep;
+                            let mut from = at;
+                            for k in 1..=chords {
+                                let end = if k == chords { to } else { arc.point(k as f64 / chords as f64) };
+                                self.pass(&Piece::Line { a: from, b: end }, &cutter, true, &mut found);
+                                from = end;
+                            }
+                            found.slack = 0.0;
                         }
-                        found.slack = 0.0;
                     }
                     _ => {}
                 }
@@ -518,123 +694,143 @@ impl Simulation {
         })
     }
 
-    /// Notes where a part of the tool that does not cut is in material during one straight move
-    /// of the tip from `a` to `b`, cutting or not: the material as it stands before the move.
-    /// A part higher than the stock ever was is not looked at, which is nearly every move.
-    fn body_pass(&self, a: Vec3, b: Vec3, cutter: &Cutter, found: &mut Found) {
+    /// Notes where a part of the tool that does not cut is in material during one piece of a
+    /// move, cutting or not: the material as it stands before the piece. A part higher than the
+    /// stock ever was is not looked at, which is nearly every move.
+    fn body_pass(&self, piece: &Piece, cutter: &Cutter, found: &mut Found) {
         let field = &self.stock;
-        let (dx, dy, dz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+        let lowest = piece.height(0.0).min(piece.height(1.0));
+        let (.., y0, y1) = piece.bounds();
         for disc in &cutter.body {
-            if !(a.z.min(b.z) + disc.above < self.top - self.tolerance) {
+            if !(lowest + disc.above < self.top - self.tolerance) {
                 continue;
             }
             // Under the cutter itself the wall's own row of cells is the grid's error, as it is
             // for a cut; a wider shank and a holder are checked to their full width.
             let r = if disc.radius <= cutter.radius + 1e-9 { (disc.radius - WALL_SLACK * field.dx.max(field.dy)).max(0.0) } else { disc.radius };
-            let Some((i0, i1)) = field.columns(a.x.min(b.x) - r, a.x.max(b.x) + r) else { continue };
-            let Some((j0, j1)) = field.rows(a.y.min(b.y) - r, a.y.max(b.y) + r) else { continue };
+            let Some((j0, j1)) = field.rows(y0 - r, y1 + r) else { continue };
             for j in j0..=j1 {
                 let y = field.y + (j as f64 + 0.5) * field.dy;
-                for i in i0..=i1 {
-                    let x = field.x + (i as f64 + 0.5) * field.dx;
-                    let Some((t0, t1, ..)) = stretch(x - a.x, y - a.y, dx, dy, r) else { continue };
-                    let Some(height) = field.heights.get(j * field.nx + i) else { continue };
-                    // The lowest that part of the tool gets over the cell.
-                    let z = (a.z + t0 * dz).min(a.z + t1 * dz) + disc.above;
-                    let depth = height - z;
-                    if depth > self.tolerance && found.body.is_none_or(|worst| depth > worst.depth) {
-                        found.body =
-                            Some(BodyHit { operation: found.operation, move_index: found.move_index, part: disc.part, at: Vec3 { x, y, z }, depth });
+                for (i0, i1) in piece.spans(y, r).into_iter().flatten().filter_map(|(lo, hi)| field.columns(lo, hi)) {
+                    for i in i0..=i1 {
+                        let x = field.x + (i as f64 + 0.5) * field.dx;
+                        let Some(height) = field.heights.get(j * field.nx + i) else { continue };
+                        for s in piece.over(x, y, r).into_iter().flatten() {
+                            // The lowest that part of the tool gets over the cell.
+                            let z = piece.height(s.from).min(piece.height(s.to)) + disc.above;
+                            let depth = height - z;
+                            if depth > self.tolerance && found.body.is_none_or(|worst| depth > worst.depth) {
+                                found.body = Some(BodyHit {
+                                    operation: found.operation,
+                                    move_index: found.move_index,
+                                    part: disc.part,
+                                    at: Vec3 { x, y, z },
+                                    depth,
+                                });
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    /// One straight move of the tool's tip from `a` to `b`: cutting, it lowers the cells under
-    /// the tool and notes the deepest cut below the part; at rapid, it notes where the tool is
-    /// furthest below the material's top.
-    fn pass(&mut self, a: Vec3, b: Vec3, cutter: &Cutter, cutting: bool, found: &mut Found) {
-        self.body_pass(a, b, cutter, found);
-        let (operation, move_index) = (found.operation, found.move_index);
-        let field = &mut self.stock;
+    /// One piece of a move of the tool's tip: cutting, it lowers the cells under the tool and
+    /// notes the deepest cut below the part; at rapid, it notes where the tool is furthest below
+    /// the material's top.
+    fn pass(&mut self, piece: &Piece, cutter: &Cutter, cutting: bool, found: &mut Found) {
+        self.body_pass(piece, cutter, found);
         let r = cutter.radius;
-        // The cells whose centres can be under the tool somewhere along the move.
-        let Some((i0, i1)) = field.columns(a.x.min(b.x) - r, a.x.max(b.x) + r) else { return };
-        let Some((j0, j1)) = field.rows(a.y.min(b.y) - r, a.y.max(b.y) + r) else { return };
-        let (dx, dy, dz) = (b.x - a.x, b.y - a.y, b.z - a.z);
-        let area = field.dx * field.dy;
-        let inner = (r - WALL_SLACK * field.dx.max(field.dy)).max(0.0);
+        let (.., y0, y1) = piece.bounds();
+        let Some((j0, j1)) = self.stock.rows(y0 - r, y1 + r) else { return };
+        let (left, front, dx, dy) = (self.stock.x, self.stock.y, self.stock.dx, self.stock.dy);
+        let inner = (r - WALL_SLACK * dx.max(dy)).max(0.0);
         for j in j0..=j1 {
-            let y = field.y + (j as f64 + 0.5) * field.dy;
-            for i in i0..=i1 {
-                let x = field.x + (i as f64 + 0.5) * field.dx;
-                let (px, py) = (x - a.x, y - a.y);
-                // The stretch of the move (as shares of it) during which the cell is under the
-                // tool, and how near the tool's axis comes to it.
-                let Some((t0, t1, nearest, least)) = stretch(px, py, dx, dy, r) else { continue };
-                // The lowest the tool's surface gets over the cell.
-                let surface = |t: f64| a.z + t * dz + cutter.rise((px - t * dx).hypot(py - t * dy).min(r));
-                let z = match cutter.profile {
-                    Profile::Flat => (a.z + t0 * dz).min(a.z + t1 * dz),
-                    _ => {
-                        let mut lowest = surface(t0).min(surface(t1)).min(surface(nearest));
-                        for k in 1..=PROFILE_SAMPLES {
-                            lowest = lowest.min(surface(t0 + (t1 - t0) * k as f64 / (PROFILE_SAMPLES + 1) as f64));
-                        }
-                        lowest
+            let y = front + (j as f64 + 0.5) * dy;
+            // The cells of the row whose centres can be under the tool somewhere along the piece.
+            for (lo, hi) in piece.spans(y, r).into_iter().flatten() {
+                let Some((i0, i1)) = self.stock.columns(lo, hi) else { continue };
+                for i in i0..=i1 {
+                    let x = left + (i as f64 + 0.5) * dx;
+                    // The lowest the tool's surface and its tip get over the cell and the nearest
+                    // its axis comes to it, over every stretch the cell is under the tool.
+                    let mut under: Option<(f64, f64, f64)> = None;
+                    for s in piece.over(x, y, r).into_iter().flatten() {
+                        let tip = piece.height(s.from).min(piece.height(s.to));
+                        let z = match cutter.profile {
+                            Profile::Flat => tip,
+                            _ => {
+                                let surface = |t: f64| piece.height(t) + cutter.rise(piece.away(x, y, t).min(r));
+                                let mut lowest = surface(s.from).min(surface(s.to)).min(surface(s.nearest));
+                                for k in 1..=PROFILE_SAMPLES {
+                                    lowest = lowest.min(surface(s.from + (s.to - s.from) * k as f64 / (PROFILE_SAMPLES + 1) as f64));
+                                }
+                                lowest
+                            }
+                        };
+                        under = Some(under.map_or((z, tip, s.least), |(a, b, c)| (a.min(z), b.min(tip), c.min(s.least))));
                     }
-                };
-                let Some(height) = field.heights.get_mut(j * field.nx + i) else { continue };
-                // At the tool's very edge a cell is the grid's own error (a wall and the cut
-                // beside it share the cell, and an arc is cut as chords a hair inside it): there
-                // the part is neither cut into nor said to be, and a wall the tool stands
-                // beside is not material a rapid passes through.
-                let edge = least > inner;
-                // There is material, and part, only above the stock's bottom: a tool that has
-                // gone through (a drill past the part, a cut into a spoil board) is in air there.
-                let within = z.max(self.floor);
-                if !cutting {
-                    let under = *height - within;
-                    if !edge && under > self.tolerance && found.hit.is_none_or(|worst| under > worst.depth) {
-                        found.hit = Some(RapidHit { operation, move_index, at: Vec3 { x, y, z }, depth: under });
+                    if let Some((z, tip, least)) = under {
+                        self.touch(i, j, Vec3 { x, y, z }, tip, least > inner, cutting, found);
                     }
-                    continue;
-                }
-                // How far the tool's tip is below the stock's bottom while it is over the cell.
-                self.below_stock = self.below_stock.max(self.floor - (a.z + t0 * dz).min(a.z + t1 * dz));
-                let cell = j * field.nx + i;
-                let part = self.part.as_ref().and_then(|part| part.get(cell)).copied();
-                let to = match part {
-                    Some(part) if edge => within.max(part),
-                    _ => within,
-                };
-                if to < *height {
-                    self.removed += (*height - to) * area;
-                    *height = to;
-                }
-                // A cut into the part: where there is none (a hole through it, beside it) its
-                // height is below the stock's bottom, and nothing is cut into. It is a gouge
-                // when it goes below the part as it stands, and below the part as the model
-                // has it by more than the toolpath means to: what an earlier pass was let cut
-                // does not let the next go as far again.
-                let under = part.map_or(0.0, |part| part - within);
-                let below_model = self.model.as_ref().and_then(|model| model.get(cell)).map_or(under, |model| model - within);
-                let least = self.tolerance + found.slack;
-                if edge || under <= 0.0 {
-                    continue;
-                }
-                if under > least && below_model > least + found.allowed {
-                    if found.gouge.is_none_or(|worst| under > worst.depth) {
-                        found.gouge = Some(Gouge { operation, move_index, at: Vec3 { x, y, z }, depth: under });
-                    }
-                } else if found.allowed > 0.0
-                    && let Some(meant) = self.part.as_mut().and_then(|part| part.get_mut(cell))
-                {
-                    // Cut into, as meant: the part is what the cut leaves there.
-                    *meant = within;
                 }
             }
+        }
+    }
+
+    /// What the tool does to the cell `i` along X and `j` along Y, whose centre is at `at`'s X
+    /// and Y: the lowest the tool's surface gets over it is `at`'s Z, and the lowest its tip
+    /// gets `tip`. `edge`: the cell is at the tool's very edge.
+    fn touch(&mut self, i: usize, j: usize, at: Vec3, tip: f64, edge: bool, cutting: bool, found: &mut Found) {
+        let (operation, move_index) = (found.operation, found.move_index);
+        let cell = j * self.stock.nx + i;
+        let area = self.stock.dx * self.stock.dy;
+        let Some(height) = self.stock.heights.get_mut(cell) else { return };
+        // At the tool's very edge a cell is the grid's own error (a wall and the cut beside it
+        // share the cell): there the part is neither cut into nor said to be, and a wall the
+        // tool stands beside is not material a rapid passes through.
+        //
+        // There is material, and part, only above the stock's bottom: a tool that has gone
+        // through (a drill past the part, a cut into a spoil board) is in air there.
+        let within = at.z.max(self.floor);
+        if !cutting {
+            let under = *height - within;
+            if !edge && under > self.tolerance && found.hit.is_none_or(|worst| under > worst.depth) {
+                found.hit = Some(RapidHit { operation, move_index, at, depth: under });
+            }
+            return;
+        }
+        // How far the tool's tip is below the stock's bottom while it is over the cell.
+        self.below_stock = self.below_stock.max(self.floor - tip);
+        let part = self.part.as_ref().and_then(|part| part.get(cell)).copied();
+        let to = match part {
+            Some(part) if edge => within.max(part),
+            _ => within,
+        };
+        if to < *height {
+            self.removed += (*height - to) * area;
+            *height = to;
+        }
+        // A cut into the part: where there is none (a hole through it, beside it) its height is
+        // below the stock's bottom, and nothing is cut into. It is a gouge when it goes below
+        // the part as it stands, and below the part as the model has it by more than the
+        // toolpath means to: what an earlier pass was let cut does not let the next go as far
+        // again.
+        let under = part.map_or(0.0, |part| part - within);
+        let below_model = self.model.as_ref().and_then(|model| model.get(cell)).map_or(under, |model| model - within);
+        let least = self.tolerance + found.slack;
+        if edge || under <= 0.0 {
+            return;
+        }
+        if under > least && below_model > least + found.allowed {
+            if found.gouge.is_none_or(|worst| under > worst.depth) {
+                found.gouge = Some(Gouge { operation, move_index, at, depth: under });
+            }
+        } else if found.allowed > 0.0
+            && let Some(meant) = self.part.as_mut().and_then(|part| part.get_mut(cell))
+        {
+            // Cut into, as meant: the part is what the cut leaves there.
+            *meant = within;
         }
     }
 }

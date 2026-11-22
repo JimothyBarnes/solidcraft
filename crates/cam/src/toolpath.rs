@@ -5,7 +5,7 @@
 use std::f64::consts::{FRAC_PI_2, TAU};
 
 use serde::{Deserialize, Serialize};
-use solidcore_record::Vec3;
+use solidcore_record::{Vec2, Vec3};
 
 use crate::cycle::{self, CycleMotion, DrillCycle};
 use crate::units::MAX_COORDINATE;
@@ -230,8 +230,14 @@ impl ArcGeom {
         (self.sweep.abs() * self.radius).hypot(self.w1 - self.w0)
     }
 
+    /// The arc as it lies when its plane is XY: its centre, the angle it starts at about it, and
+    /// the heights it starts and ends at.
+    pub(crate) fn level(&self) -> Option<(Vec2, f64, (f64, f64))> {
+        matches!(self.plane, Plane::Xy).then_some((Vec2 { x: self.cu, y: self.cv }, self.start_angle, (self.w0, self.w1)))
+    }
+
     /// The points where the arc reaches its furthest along the in-plane axes (at most four).
-    fn extremes(&self) -> impl Iterator<Item = Vec3> + '_ {
+    pub(crate) fn extremes(&self) -> impl Iterator<Item = Vec3> + '_ {
         (0..4).filter_map(move |k| {
             let theta = f64::from(k) * FRAC_PI_2;
             // How far (in the arc's own direction) theta is past the start.

@@ -281,11 +281,10 @@ fn the_simulation_finds_the_chamfer_where_it_was_meant() {
 
 #[test]
 fn a_chamfer_round_an_arc_is_not_a_cut_into_the_part() {
-    // A disc of 40: the tool goes round it in arcs, which the simulation cuts as chords a hair
-    // inside them, so the cone is a hair nearer the disc and cuts as much lower. For a tool
-    // with a sloping side the chords are fine enough to keep that within the tolerance, on a
-    // coarse grid as on a fine one: no gouge, and the chamfer no deeper than its half
-    // millimetre and a tolerance (0.01) anywhere round the disc.
+    // A disc of 40: the tool goes round it in arcs, which the simulation cuts as they are (cut
+    // as chords, a hair inside the arc, the cone was a hair nearer the disc and cut as much
+    // lower: a cut into the part all round). On a coarse grid as on a fine one: no gouge, and
+    // the chamfer no deeper than its half millimetre anywhere round the disc.
     let disc = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 20.0, start: 0.0, sweep: 2.0 * PI }] };
     let d = ChamferOp::default().toolpath(None, &chamfer10(), &faced_block(), Some("aluminium"), &[disc]).unwrap();
     for cell in [0.25, 0.1] {
@@ -297,7 +296,7 @@ fn a_chamfer_round_an_arc_is_not_a_cut_into_the_part() {
         let cut = sim.cut_into(0, &d.toolpath, &chamfer10(), d.leg).unwrap();
         assert_eq!(cut.gouges, 0, "cells of {cell}: {:?}", sim.gouges.first());
         let deepest = sim.stock.heights.iter().zip(&part).filter(|(_, part)| **part > -20.0).map(|(stock, part)| part - stock).fold(0.0, f64::max);
-        assert!(deepest <= d.leg + 0.01 + 1e-9 && deepest > 0.3, "cells of {cell}: the chamfer goes {deepest} down");
+        assert!(deepest <= d.leg + 1e-9 && deepest > 0.3, "cells of {cell}: the chamfer goes {deepest} down");
         // Told nothing was meant, the same toolpath is a cut into the part at every arc.
         let mut plain =
             Simulation::new(Bounds { min: p(-31.0, -21.0, -20.0), max: p(31.0, 21.0, 0.0) }, cell, 0.01).unwrap().with_part(part).unwrap();

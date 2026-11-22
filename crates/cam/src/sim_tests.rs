@@ -162,6 +162,105 @@ fn an_arc_is_cut_as_the_ring_it_sweeps() {
     assert_eq!((height(&sim, 50.0, 30.0), height(&sim, 50.0, 50.0), height(&sim, 50.0, 44.0)), (0.0, -4.0, 0.0));
 }
 
+#[test]
+fn an_arc_in_the_xy_plane_is_cut_as_it_is() {
+    // Once round a circle of radius 20 about (50, 30) at Z -4 with the 10 mm tool: every cell
+    // whose centre is within 5 of the circle is cut to -4, and no other is touched. (Cut as
+    // chords, the cells in the slivers between chord and arc came out wrong.)
+    for direction in [ArcDirection::Clockwise, ArcDirection::CounterClockwise] {
+        let mut sim = stock();
+        let round = Move::Arc { to: p(70.0, 30.0, -4.0), center: p(50.0, 30.0, 0.0), plane: Plane::Xy, direction, feed: 500.0 };
+        sim.cut(1, &path(p(70.0, 30.0, 5.0), vec![feed(70.0, 30.0, -4.0), round]), &flat10()).unwrap();
+        let f = &sim.stock;
+        let mut looked = 0;
+        for k in 0..f.nx * f.ny {
+            let c = f.centre(k % f.nx, k / f.nx);
+            let off = ((c.x - 50.0).hypot(c.y - 30.0) - 20.0).abs() - 5.0;
+            if off.abs() > 1e-9 {
+                looked += 1;
+                assert_eq!(f.heights[k], if off < 0.0 { -4.0 } else { 0.0 }, "the cell at ({}, {}), {off} from the tool's edge", c.x, c.y);
+            }
+        }
+        assert!(looked > 95_000, "{looked}");
+    }
+
+    // A quarter turn going down, from (70, 30) at Z 0 round to (50, 50) at Z -4. A cell on the
+    // circle is under the tool while the axis is within 5 of it, which is 14.36 degrees to
+    // either side (cos = 1 - 25 / 800), and the tool is lowest over it as it leaves. The cell
+    // at 45 degrees: 59.36 of the 90 degrees round, Z -4 x 59.36 / 90 = -2.638. The cell where
+    // the arc ends has the tool at its lowest, -4; the one where it begins is left 14.7 degrees
+    // round, at -0.65.
+    let mut sim = stock();
+    let quarter =
+        Move::Arc { to: p(50.0, 50.0, -4.0), center: p(50.0, 30.0, 0.0), plane: Plane::Xy, direction: ArcDirection::CounterClockwise, feed: 500.0 };
+    sim.cut(1, &path(p(70.0, 30.0, 5.0), vec![feed(70.0, 30.0, 0.0), quarter]), &flat10()).unwrap();
+    let on = 20.0 * std::f64::consts::FRAC_1_SQRT_2;
+    assert!((height(&sim, 50.0 + on, 30.0 + on) + 2.638).abs() < 0.01, "{}", height(&sim, 50.0 + on, 30.0 + on));
+    assert_eq!(height(&sim, 50.1, 50.1), -4.0);
+    assert!((height(&sim, 70.1, 30.1) + 0.65).abs() < 0.01, "{}", height(&sim, 70.1, 30.1));
+    // Every cell, by the same reckoning from its own centre: the tool leaves it `reach` round
+    // from its own direction, or at the arc's end.
+    let f = &sim.stock;
+    for k in 0..f.nx * f.ny {
+        let c = f.centre(k % f.nx, k / f.nx);
+        let (d, at) = ((c.x - 50.0).hypot(c.y - 30.0), (c.y - 30.0).atan2(c.x - 50.0));
+        let cosine = (d * d + 400.0 - 25.0) / (40.0 * d);
+        // Left alone: out of the tool's reach, or within it only before the arc begins or after
+        // it ends (which the plunge at the start, at Z 0, does not lower either).
+        let leaves = at + cosine.clamp(-1.0, 1.0).acos();
+        let enters = at - cosine.clamp(-1.0, 1.0).acos();
+        let want = if cosine > 1.0 || leaves < 0.0 || enters > 0.5 * PI { 0.0 } else { -4.0 * leaves.min(0.5 * PI) / (0.5 * PI) };
+        if (cosine - 1.0).abs() > 1e-9 && leaves.abs() > 1e-9 && (enters - 0.5 * PI).abs() > 1e-9 {
+            assert!((f.heights[k] - want).abs() < 1e-9, "the cell at ({}, {}): {} and {want}", c.x, c.y, f.heights[k]);
+        }
+    }
+}
+
+#[test]
+fn a_round_pocket_is_cut_to_its_wall_with_nothing_left_standing() {
+    // A round pocket of radius 7, 6 deep, about (50, 30), cut by an 8 mm tool that goes down at
+    // its middle, out to a circle of radius 3 and once round it: the tool's edge runs along the
+    // wall. No cell of the pocket is left standing, none of the part is cut into, and what is
+    // removed is the pocket's own cells, 6 deep.
+    let sim = stock();
+    let f = sim.stock.clone();
+    let out = |k: usize| (f.centre(k % f.nx, k / f.nx).x - 50.0).hypot(f.centre(k % f.nx, k / f.nx).y - 30.0);
+    let part: Vec<f64> = (0..f.nx * f.ny).map(|k| if out(k) < 7.0 { -6.0 } else { 0.0 }).collect();
+    let cells = part.iter().filter(|h| **h < 0.0).count();
+    let mut sim = sim.with_part(part).unwrap();
+    let round =
+        Move::Arc { to: p(53.0, 30.0, -6.0), center: p(50.0, 30.0, -6.0), plane: Plane::Xy, direction: ArcDirection::CounterClockwise, feed: 500.0 };
+    let moves = vec![feed(50.0, 30.0, -6.0), feed(53.0, 30.0, -6.0), round];
+    let cut = sim.cut(1, &path(p(50.0, 30.0, 5.0), moves), &tool(ToolKind::FlatEndMill, 8.0, 0.0, 0.0)).unwrap();
+    assert_eq!((cut.gouges, cut.rapid_hits, sim.leftover()), (0, 0, (0.0, 0.0)));
+    assert!((cut.removed - cells as f64 * 0.0625 * 6.0).abs() < 1e-6, "{} mm3 from {cells} cells", cut.removed);
+    assert!((0..f.nx * f.ny).all(|k| sim.stock.heights[k] == if out(k) < 7.0 { -6.0 } else { 0.0 }));
+}
+
+#[test]
+fn an_arc_in_another_plane_is_cut_as_chords_within_the_tolerance() {
+    // A half circle of radius 10 in the ZX plane along Y 30: from (20, 30, 0) down under its
+    // centre (30, 30, 0) and up to (40, 30, 0). The 10 mm tool is lowest over a cell while its
+    // axis is within 5 of it, seen from above: over the cell at (30.125, 30.125) at the very
+    // bottom, Z -10; over the one at (22.125, 30.125) when the axis is sqrt(25 - 0.125^2)
+    // further along, at X 27.123, where the circle is at -sqrt(100 - 2.877^2) = -9.577. The
+    // chords are within the tolerance (0.01) of the circle.
+    let mut sim = stock();
+    let dip = Move::Arc { to: p(40.0, 30.0, 0.0), center: p(30.0, 30.0, 0.0), plane: Plane::Zx, direction: ArcDirection::Clockwise, feed: 500.0 };
+    let cut = sim.cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, 0.0), dip]), &flat10()).unwrap();
+    assert_eq!(cut.gouges, 0);
+    let low = height(&sim, 30.1, 30.1);
+    assert!((-10.0..=-9.99).contains(&low), "{low}");
+    let reach = (25.0_f64 - 0.125 * 0.125).sqrt();
+    let want = -(100.0 - (22.125 + reach - 30.0).powi(2)).sqrt();
+    assert!((want + 9.577).abs() < 1e-3 && (height(&sim, 22.1, 30.1) - want).abs() <= 0.01 + 1e-9, "{} and {want}", height(&sim, 22.1, 30.1));
+    // The other way round the same ends, the half circle is above the stock and cuts nothing.
+    let mut sim = stock();
+    let over =
+        Move::Arc { to: p(40.0, 30.0, 0.0), center: p(30.0, 30.0, 0.0), plane: Plane::Zx, direction: ArcDirection::CounterClockwise, feed: 500.0 };
+    assert_eq!(sim.cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, 0.0), over]), &flat10()).unwrap().removed, 0.0);
+}
+
 /// A part under the stock: a slab whose top is at Z -5 from X 10 to 90 and Y 10 to 50, with a
 /// boss up to Z -1 from X 40 to 60 and Y 20 to 40. Nothing elsewhere.
 fn with_boss(sim: Simulation) -> Simulation {
@@ -241,6 +340,42 @@ fn a_rapid_through_material_is_a_hit_and_a_cut_below_the_stock_is_measured() {
     // A rapid below the stock's bottom under material that is still there is in it all the same.
     let under = sim.cut(4, &path(p(50.0, 50.0, -22.0), vec![rapid(70.0, 50.0, -22.0)]), &flat10()).unwrap();
     assert_eq!((under.rapid_hits, sim.rapid_hits.last().map(|hit| hit.depth)), (1, Some(20.0)));
+}
+
+#[test]
+fn a_rapid_in_two_axes_is_checked_wherever_the_control_may_take_it() {
+    // The stock taken down to Z -10 but for a block left standing in one corner, X under 30 and
+    // Y over 40. A rapid at Z -5 from (10, 10) to (90, 50) passes well clear of the block along
+    // the straight line between them, but a control that moves each axis at its own speed may
+    // go anywhere in the box between the two points, and the block is in it: a hit, 5 deep.
+    let cleared = |sim: &mut Simulation| {
+        let mut passes = vec![feed(-6.0, 5.0, -10.0)];
+        for k in 0..6 {
+            let y = 5.0 + 10.0 * f64::from(k);
+            // Up to Y 40 all the way along; above it, from X 35 on (the tool's edge at 30).
+            let from = if y > 35.0 { 35.0 } else { -6.0 };
+            passes.extend([feed(from, y, -10.0), feed(106.0, y, -10.0), feed(from, y, -10.0), feed(from, (y + 10.0).min(55.0), -10.0)]);
+        }
+        sim.cut(0, &path(p(-6.0, 5.0, 5.0), passes), &flat10()).unwrap();
+        assert_eq!((height(sim, 20.0, 50.0), height(sim, 20.0, 30.0), height(sim, 60.0, 50.0)), (0.0, -10.0, -10.0));
+    };
+    let mut sim = stock();
+    cleared(&mut sim);
+    let across = path(p(10.0, 10.0, 5.0), vec![rapid(10.0, 10.0, -5.0), rapid(90.0, 50.0, -5.0), rapid(90.0, 50.0, 5.0)]);
+    let cut = sim.cut(1, &across, &flat10()).unwrap();
+    assert_eq!((cut.rapid_hits, sim.rapid_hits[0].move_index, sim.rapid_hits[0].depth), (1, 1, 5.0));
+    // Along one axis at a time the path is the line itself: across under the block's row, then
+    // up beside it, the tool's edge 55 from the block.
+    let mut sim = stock();
+    cleared(&mut sim);
+    let square = path(p(10.0, 10.0, 5.0), vec![rapid(10.0, 10.0, -5.0), rapid(90.0, 10.0, -5.0), rapid(90.0, 50.0, -5.0), rapid(90.0, 50.0, 5.0)]);
+    assert_eq!(sim.cut(1, &square, &flat10()).unwrap().rapid_hits, 0);
+    // Coming down while going across, the tool is taken to be as low as it ends all the way:
+    // from Z 5 over the block to Z -5 beyond it.
+    let mut sim = stock();
+    cleared(&mut sim);
+    let slanting = path(p(10.0, 50.0, 5.0), vec![rapid(60.0, 50.0, -5.0), rapid(60.0, 50.0, 5.0)]);
+    assert_eq!(sim.cut(1, &slanting, &flat10()).unwrap().rapid_hits, 1);
 }
 
 #[test]
@@ -427,6 +562,13 @@ fn a_cut_deeper_than_the_flutes_puts_the_shank_in_material() {
     let mut sim = stock();
     let passes = vec![feed(20.0, 30.0, -7.5), feed(80.0, 30.0, -7.5), feed(80.0, 30.0, -15.0), feed(20.0, 30.0, -15.0)];
     assert_eq!(sim.cut(1, &path(p(20.0, 30.0, 5.0), passes), &short10()).unwrap().body_hits, 0);
+    // Round an arc the same: a circle 15 deep in one pass has the stock above the flutes in the
+    // shank's way, 5 mm of it, in the plunge and in the turn.
+    let mut sim = stock();
+    let round =
+        Move::Arc { to: p(70.0, 30.0, -15.0), center: p(50.0, 30.0, -15.0), plane: Plane::Xy, direction: ArcDirection::Clockwise, feed: 500.0 };
+    let deep = sim.cut(1, &path(p(70.0, 30.0, 5.0), vec![feed(70.0, 30.0, -15.0), round]), &short10()).unwrap();
+    assert_eq!((deep.body_hits, sim.body_hits[1].part, sim.body_hits[1].depth), (2, BodyPart::Shank, 5.0));
     // With flutes to spare nothing is looked at, and nothing found: the 30 mm tool, 15 deep.
     let mut sim = stock();
     assert_eq!(sim.cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, -15.0), feed(80.0, 30.0, -15.0)]), &flat10()).unwrap().body_hits, 0);
