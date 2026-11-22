@@ -1,0 +1,667 @@
+{
+ "commands": [
+  {
+   "command": "solid.box",
+   "params": {
+    "body_name": "Plate",
+    "corner": [
+     -60.0,
+     -40.0,
+     0.0
+    ],
+    "height": 16.0,
+    "length": 120.0,
+    "width": 80.0
+   }
+  },
+  {
+   "command": "solid.box",
+   "params": {
+    "corner": [
+     -45.0,
+     -22.0,
+     8.0
+    ],
+    "height": 8.0,
+    "length": 70.0,
+    "operation": "cut",
+    "targets": [
+     "Plate"
+    ],
+    "width": 44.0
+   }
+  },
+  {
+   "command": "solid.cylinder",
+   "params": {
+    "base": [
+     -10.0,
+     0.0,
+     8.0
+    ],
+    "diameter": 18.0,
+    "height": 8.0,
+    "operation": "join",
+    "targets": [
+     "Plate"
+    ]
+   }
+  },
+  {
+   "command": "solid.cylinder",
+   "params": {
+    "base": [
+     -52.0,
+     -32.0,
+     -5.0
+    ],
+    "diameter": 6.0,
+    "height": 26.0,
+    "operation": "cut",
+    "targets": [
+     "Plate"
+    ]
+   }
+  },
+  {
+   "command": "solid.cylinder",
+   "params": {
+    "base": [
+     52.0,
+     -32.0,
+     -5.0
+    ],
+    "diameter": 6.0,
+    "height": 26.0,
+    "operation": "cut",
+    "targets": [
+     "Plate"
+    ]
+   }
+  },
+  {
+   "command": "solid.cylinder",
+   "params": {
+    "base": [
+     52.0,
+     32.0,
+     -5.0
+    ],
+    "diameter": 6.0,
+    "height": 26.0,
+    "operation": "cut",
+    "targets": [
+     "Plate"
+    ]
+   }
+  },
+  {
+   "command": "solid.cylinder",
+   "params": {
+    "base": [
+     -52.0,
+     32.0,
+     -5.0
+    ],
+    "diameter": 6.0,
+    "height": 26.0,
+    "operation": "cut",
+    "targets": [
+     "Plate"
+    ]
+   }
+  },
+  {
+   "command": "solid.cylinder",
+   "params": {
+    "base": [
+     42.5,
+     -15.0,
+     -5.0
+    ],
+    "diameter": 5.0,
+    "height": 26.0,
+    "operation": "cut",
+    "targets": [
+     "Plate"
+    ]
+   }
+  },
+  {
+   "command": "solid.cylinder",
+   "params": {
+    "base": [
+     42.5,
+     15.0,
+     -5.0
+    ],
+    "diameter": 5.0,
+    "height": 26.0,
+    "operation": "cut",
+    "targets": [
+     "Plate"
+    ]
+   }
+  },
+  {
+   "command": "cam.tool.create",
+   "params": {
+    "tool": {
+     "coolant": "flood",
+     "cutting_data": [
+      {
+       "chip_load": 0.06,
+       "material": "aluminium",
+       "plunge_factor": 0.5,
+       "ramp_factor": 0.5,
+       "surface_speed": 300.0
+      }
+     ],
+     "diameter_offset": 1,
+     "flutes": 4,
+     "geometry": {
+      "corner_radius": 0.0,
+      "diameter": 20.0,
+      "flute_length": 30.0,
+      "overall_length": 85.0,
+      "shank_diameter": 20.0,
+      "shoulder_length": 0.0,
+      "thread_pitch": 0.0,
+      "tip_angle": 0.0,
+      "tip_diameter": 0.0
+     },
+     "holder": {
+      "segments": [
+       {
+        "length": 35.0,
+        "lower_diameter": 32.0,
+        "upper_diameter": 32.0
+       }
+      ],
+      "stick_out": 45.0
+     },
+     "kind": "flat_end_mill",
+     "length_offset": 1,
+     "name": "20 mm flat end mill",
+     "number": 1,
+     "overrides": {
+      "feed": null,
+      "rpm": null
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.tool.create",
+   "params": {
+    "tool": {
+     "coolant": "flood",
+     "cutting_data": [
+      {
+       "chip_load": 0.04,
+       "material": "aluminium",
+       "plunge_factor": 0.5,
+       "ramp_factor": 0.5,
+       "surface_speed": 250.0
+      }
+     ],
+     "diameter_offset": 2,
+     "flutes": 3,
+     "geometry": {
+      "corner_radius": 0.0,
+      "diameter": 8.0,
+      "flute_length": 20.0,
+      "overall_length": 70.0,
+      "shank_diameter": 8.0,
+      "shoulder_length": 0.0,
+      "thread_pitch": 0.0,
+      "tip_angle": 0.0,
+      "tip_diameter": 0.0
+     },
+     "holder": {
+      "segments": [
+       {
+        "length": 35.0,
+        "lower_diameter": 32.0,
+        "upper_diameter": 32.0
+       }
+      ],
+      "stick_out": 30.0
+     },
+     "kind": "flat_end_mill",
+     "length_offset": 2,
+     "name": "8 mm flat end mill",
+     "number": 2,
+     "overrides": {
+      "feed": null,
+      "rpm": null
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.tool.create",
+   "params": {
+    "tool": {
+     "coolant": "flood",
+     "cutting_data": [
+      {
+       "chip_load": 0.05,
+       "material": "aluminium",
+       "plunge_factor": 0.5,
+       "ramp_factor": 0.5,
+       "surface_speed": 250.0
+      }
+     ],
+     "diameter_offset": 3,
+     "flutes": 3,
+     "geometry": {
+      "corner_radius": 0.0,
+      "diameter": 10.0,
+      "flute_length": 25.0,
+      "overall_length": 75.0,
+      "shank_diameter": 10.0,
+      "shoulder_length": 0.0,
+      "thread_pitch": 0.0,
+      "tip_angle": 0.0,
+      "tip_diameter": 0.0
+     },
+     "holder": {
+      "segments": [
+       {
+        "length": 35.0,
+        "lower_diameter": 32.0,
+        "upper_diameter": 32.0
+       }
+      ],
+      "stick_out": 35.0
+     },
+     "kind": "flat_end_mill",
+     "length_offset": 3,
+     "name": "10 mm flat end mill",
+     "number": 3,
+     "overrides": {
+      "feed": null,
+      "rpm": null
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.tool.create",
+   "params": {
+    "tool": {
+     "coolant": "flood",
+     "cutting_data": [
+      {
+       "chip_load": 0.08,
+       "material": "aluminium",
+       "plunge_factor": 0.5,
+       "ramp_factor": 0.5,
+       "surface_speed": 80.0
+      }
+     ],
+     "diameter_offset": 4,
+     "flutes": 2,
+     "geometry": {
+      "corner_radius": 0.0,
+      "diameter": 6.0,
+      "flute_length": 40.0,
+      "overall_length": 90.0,
+      "shank_diameter": 6.0,
+      "shoulder_length": 0.0,
+      "thread_pitch": 0.0,
+      "tip_angle": 2.059488517353309,
+      "tip_diameter": 0.0
+     },
+     "holder": {
+      "segments": [
+       {
+        "length": 35.0,
+        "lower_diameter": 32.0,
+        "upper_diameter": 32.0
+       }
+      ],
+      "stick_out": 50.0
+     },
+     "kind": "drill",
+     "length_offset": 4,
+     "name": "6 mm drill",
+     "number": 4,
+     "overrides": {
+      "feed": null,
+      "rpm": null
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.tool.create",
+   "params": {
+    "tool": {
+     "coolant": "flood",
+     "cutting_data": [
+      {
+       "chip_load": 0.07,
+       "material": "aluminium",
+       "plunge_factor": 0.5,
+       "ramp_factor": 0.5,
+       "surface_speed": 80.0
+      }
+     ],
+     "diameter_offset": 5,
+     "flutes": 2,
+     "geometry": {
+      "corner_radius": 0.0,
+      "diameter": 5.0,
+      "flute_length": 40.0,
+      "overall_length": 90.0,
+      "shank_diameter": 5.0,
+      "shoulder_length": 0.0,
+      "thread_pitch": 0.0,
+      "tip_angle": 2.059488517353309,
+      "tip_diameter": 0.0
+     },
+     "holder": {
+      "segments": [
+       {
+        "length": 35.0,
+        "lower_diameter": 32.0,
+        "upper_diameter": 32.0
+       }
+      ],
+      "stick_out": 50.0
+     },
+     "kind": "drill",
+     "length_offset": 5,
+     "name": "5 mm drill (M6 tap drill)",
+     "number": 5,
+     "overrides": {
+      "feed": null,
+      "rpm": null
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.tool.create",
+   "params": {
+    "tool": {
+     "coolant": "flood",
+     "cutting_data": [
+      {
+       "chip_load": 0.1,
+       "material": "aluminium",
+       "plunge_factor": 0.5,
+       "ramp_factor": 0.5,
+       "surface_speed": 15.0
+      }
+     ],
+     "diameter_offset": 6,
+     "flutes": 3,
+     "geometry": {
+      "corner_radius": 0.0,
+      "diameter": 6.0,
+      "flute_length": 20.0,
+      "overall_length": 80.0,
+      "shank_diameter": 6.0,
+      "shoulder_length": 0.0,
+      "thread_pitch": 1.0,
+      "tip_angle": 0.0,
+      "tip_diameter": 0.0
+     },
+     "holder": {
+      "segments": [
+       {
+        "length": 35.0,
+        "lower_diameter": 32.0,
+        "upper_diameter": 32.0
+       }
+      ],
+      "stick_out": 40.0
+     },
+     "kind": "tap",
+     "length_offset": 6,
+     "name": "M6 x 1 tap",
+     "number": 6,
+     "overrides": {
+      "feed": null,
+      "rpm": null
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.tool.create",
+   "params": {
+    "tool": {
+     "coolant": "flood",
+     "cutting_data": [
+      {
+       "chip_load": 0.03,
+       "material": "aluminium",
+       "plunge_factor": 0.5,
+       "ramp_factor": 0.5,
+       "surface_speed": 150.0
+      }
+     ],
+     "diameter_offset": 7,
+     "flutes": 4,
+     "geometry": {
+      "corner_radius": 0.0,
+      "diameter": 10.0,
+      "flute_length": 10.0,
+      "overall_length": 70.0,
+      "shank_diameter": 10.0,
+      "shoulder_length": 0.0,
+      "thread_pitch": 0.0,
+      "tip_angle": 1.5707963267948966,
+      "tip_diameter": 0.0
+     },
+     "holder": {
+      "segments": [
+       {
+        "length": 35.0,
+        "lower_diameter": 32.0,
+        "upper_diameter": 32.0
+       }
+      ],
+      "stick_out": 30.0
+     },
+     "kind": "chamfer_mill",
+     "length_offset": 7,
+     "name": "10 mm 90 degree chamfer mill",
+     "number": 7,
+     "overrides": {
+      "feed": null,
+      "rpm": null
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.setup.create",
+   "params": {
+    "material": "aluminium",
+    "name": "Op 1 (top)",
+    "stock": {
+     "kind": "relative_box",
+     "offsets": {
+      "x_max": 12.0,
+      "x_min": 12.0,
+      "y_max": 12.0,
+      "y_min": 12.0,
+      "z_max": 1.0,
+      "z_min": 0.0
+     }
+    }
+   }
+  },
+  {
+   "command": "cam.op.face",
+   "params": {
+    "setup": "setup-1",
+    "tool": 1
+   }
+  },
+  {
+   "command": "cam.op.pocket",
+   "params": {
+    "pocket": {
+     "pockets": [
+      [
+       -39.0,
+       0.0
+      ]
+     ]
+    },
+    "setup": "setup-1",
+    "tool": 2
+   }
+  },
+  {
+   "command": "cam.op.drill",
+   "params": {
+    "drill": {
+     "cycle": {
+      "peck": 3.0,
+      "type": "peck"
+     },
+     "depth": 17.0,
+     "depth_to": "full_diameter",
+     "holes": [
+      [
+       -52.0,
+       -32.0
+      ],
+      [
+       52.0,
+       -32.0
+      ],
+      [
+       52.0,
+       32.0
+      ],
+      [
+       -52.0,
+       32.0
+      ]
+     ]
+    },
+    "name": "Drill 6 through",
+    "setup": "setup-1",
+    "tool": 4
+   }
+  },
+  {
+   "command": "cam.op.drill",
+   "params": {
+    "drill": {
+     "cycle": {
+      "peck": 3.0,
+      "type": "peck"
+     },
+     "depth": 17.0,
+     "depth_to": "full_diameter",
+     "holes": [
+      [
+       42.5,
+       -15.0
+      ],
+      [
+       42.5,
+       15.0
+      ]
+     ]
+    },
+    "name": "Drill 5 for M6",
+    "setup": "setup-1",
+    "tool": 5
+   }
+  },
+  {
+   "command": "cam.op.drill",
+   "params": {
+    "drill": {
+     "cycle": {
+      "pitch": 1.0,
+      "type": "tap"
+     },
+     "depth": 19.0,
+     "holes": [
+      [
+       42.5,
+       -15.0
+      ],
+      [
+       42.5,
+       15.0
+      ]
+     ]
+    },
+    "name": "Tap M6",
+    "setup": "setup-1",
+    "tool": 6
+   }
+  },
+  {
+   "command": "cam.op.contour",
+   "params": {
+    "contour": {
+     "tabs": {
+      "count": 4
+     }
+    },
+    "setup": "setup-1",
+    "tool": 3
+   }
+  },
+  {
+   "command": "cam.op.chamfer",
+   "params": {
+    "chamfer": {
+     "width": 0.5
+    },
+    "setup": "setup-1",
+    "tool": 7
+   }
+  },
+  {
+   "command": "cam.simulate",
+   "params": {
+    "cell": 0.2,
+    "setup": "setup-1"
+   }
+  },
+  {
+   "command": "cam.post",
+   "params": {
+    "post": "haas_mill",
+    "program_number": 1101,
+    "setup": "setup-1"
+   }
+  },
+  {
+   "command": "cam.post",
+   "params": {
+    "post": "rs274",
+    "setup": "setup-1"
+   }
+  },
+  {
+   "command": "cam.post",
+   "params": {
+    "post": "haas_mill",
+    "program_number": 1102,
+    "setup": "setup-1",
+    "units": "inch"
+   }
+  },
+  {
+   "command": "cam.setup.sheet",
+   "params": {
+    "setup": "setup-1"
+   }
+  }
+ ]
+}
