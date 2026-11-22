@@ -57,6 +57,8 @@ pub struct ReadBack {
     /// How many retracts to machine Z home (`G91 G28 Z0`, `G53 G0 Z…`) the program made. They
     /// are not moves of the toolpath: where the tool ends up depends on the machine.
     pub machine_retracts: usize,
+    /// Whether the program ended by sending the table home in Y (`G91 G28 Y0`, after Z).
+    pub table_home: bool,
 }
 
 /// Reads `program`. Errors name the 1-based line.
@@ -84,7 +86,7 @@ pub fn read(program: &str, settings: &ReadSettings) -> Result<ReadBack> {
         }
     }
     m.toolpath.validate()?;
-    Ok(ReadBack { toolpath: m.toolpath, units: m.units, notes: m.notes, machine_retracts: m.machine_retracts })
+    Ok(ReadBack { toolpath: m.toolpath, units: m.units, notes: m.notes, machine_retracts: m.machine_retracts, table_home: m.table_home })
 }
 
 fn is_tape_mark(raw: &str) -> bool {
@@ -300,6 +302,8 @@ struct Machine {
     /// absolute Z word sets it.
     z_unknown: bool,
     machine_retracts: usize,
+    /// The table was sent home in Y: only the program's end may follow.
+    table_home: bool,
     retract_mode: Option<RetractMode>,
     cycle: Option<CycleState>,
     g98: G98Rule,
@@ -322,6 +326,7 @@ impl Machine {
             notes: Vec::new(),
             z_unknown: false,
             machine_retracts: 0,
+            table_home: false,
             retract_mode: None,
             cycle: None,
             g98,
@@ -504,13 +509,19 @@ impl Machine {
             self.retract_mode = Some(RetractMode::RPlane);
         }
         // 19. Retract to machine Z home: exactly `G91 G28 Z0` or `G53 G0 Z…`, the forms tool-change
-        // sequences use (decision 0005). Anything else in machine coordinates is refused.
+        // sequences use (decision 0005); and after it `G91 G28 Y0`, the table home, as Haas's
+        // examples end a program (decision 0020). Anything else in machine coordinates is refused.
         let retract = has_g(280) || has_g(530);
         if retract {
             let only_z = word('X').is_none() && word('Y').is_none() && word('Z').is_some();
+            // With Z at machine home already, the table may be sent home too, to end a program.
+            let table = has_g(280) && self.z_unknown && self.incremental && word('X').is_none() && word('Z').is_none() && word('Y') == Some(0.0);
             if has_g(280) {
-                if !(only_z && self.incremental && word('Z') == Some(0.0)) {
-                    return Err("G28: only `G91 G28 Z0` (retract Z to machine home) is supported".into());
+                if !(table || only_z && self.incremental && word('Z') == Some(0.0)) {
+                    return Err(
+                        "G28: only `G91 G28 Z0` (retract Z to machine home) is supported, and `G91 G28 Y0` after it (the table home, to end a program)"
+                            .into(),
+                    );
                 }
                 if gs.iter().any(|&g| g_group(g) == Some(1)) {
                     return Err("G28 and a motion code on one line".into());
@@ -521,8 +532,12 @@ impl Machine {
                 }
                 self.motion = Motion::Rapid;
             }
-            self.z_unknown = true;
-            self.machine_retracts += 1;
+            if table {
+                self.table_home = true;
+            } else {
+                self.z_unknown = true;
+                self.machine_retracts += 1;
+            }
         }
         // 20. Motion. G80 first: on a line with G80 and a move (as Haas writes `G80 G0 Z1.`) the
         // cycle ends, then the tool moves.
@@ -545,6 +560,9 @@ impl Machine {
             }
         }
         let axes = [word('X'), word('Y'), word('Z')];
+        if self.table_home && !retract && (cycle_code.is_some() || axes.iter().any(Option::is_some)) {
+            return Err("the table was sent home (G28 Y0): only the program's end may follow".into());
+        }
         if retract {
             // The retract was this line's motion.
         } else if self.motion == Motion::Cycle && (cycle_code.is_some() || axes.iter().any(Option::is_some) || word('R').is_some()) {
@@ -552,10 +570,19 @@ impl Machine {
                 return Err("G4 and a drilling cycle on one line".into());
             }
             self.cycle_line(cycle_code, axes, [word('R'), word('Q'), word('P'), word('L')], &len)?;
+        } else if self.z_unknown && word('Z').is_none() && !self.incremental && self.motion == Motion::Rapid && axes.iter().any(Option::is_some) {
+            // At machine home the tool goes across to where it will come down: a rapid in X and
+            // Y alone. It is the first part of the move that then gives Z, not a move of its
+            // own, and Z stays unknown until that one.
+            let target = self.target(axes, &len)?;
+            self.at = Vec3 { x: target.x, y: target.y, z: self.at.z };
         } else if axes.iter().any(Option::is_some) {
             if self.z_unknown {
                 if word('Z').is_none() || self.incremental {
-                    return Err("Z is unknown after a machine retract: the next move must give an absolute Z".into());
+                    return Err(
+                        "Z is unknown after a machine retract: the next move must give an absolute Z (a rapid in X and Y alone may come first)"
+                            .into(),
+                    );
                 }
                 if matches!(self.motion, Motion::Arc(_)) {
                     return Err("an arc may not start right after a machine retract".into());

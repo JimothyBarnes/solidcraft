@@ -90,13 +90,14 @@ fn a_setup_posts_on_every_built_in_post_and_reads_back() {
     let text = fanuc["text"].as_str().unwrap();
     assert!(text.starts_with("%\nO0001 (SETUP 1)\nN10 (UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)\n"), "{text}");
     assert!(
-        text.contains("\nN90 G43 H1 G0 X10. Y0. Z5.\n") && text.contains(" G3 X0. Y10. I-10. J0. F400.\n") && text.ends_with("M30\n%\n"),
+        text.contains("\nN90 G0 X10. Y0.\nN100 G43 H1 Z5.\n") && text.contains(" G3 X0. Y10. I-10. J0. F400.\n") && text.ends_with("M30\n%\n"),
         "{text}"
     );
     assert_eq!((fanuc["moves"].as_u64(), fanuc["machine_retracts"].as_u64()), (Some(7), Some(2)));
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "program_number": 42, "units": "inch"}));
     let text = haas["text"].as_str().unwrap();
-    assert!(text.starts_with("%\nO00042 (SETUP 1)\n") && text.contains("G20") && text.contains("X0.3937 Y0. Z0.1969"), "{text}");
+    assert!(text.starts_with("%\nO00042 (SETUP 1)\n") && text.contains("G20") && text.contains("\nG0 X0.3937 Y0.\nG43 H1 Z0.1969\n"), "{text}");
+    assert!(text.ends_with("\nG28 G91 Z0.\nG28 Y0.\nG90\nM30\n%\n"), "the table comes home after Z: {text}");
     let rs = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274", "program_name": "bracket"}));
     assert!(rs["text"].as_str().unwrap().starts_with("(bracket)\n(UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)\n"));
     // Posting reads the design; it never changes it.
@@ -230,7 +231,7 @@ fn a_drill_operation_works_out_its_toolpath_from_the_setup_and_the_tool() {
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = haas["text"].as_str().unwrap();
     let expected =
-        "\nS3183 M3\nM8\nG43 H3 G0 X-20. Y-10. Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\nX20. Y-10.\nX20. Y10.\nG80\nG0 Z25.\nM9\nM5\n";
+        "\nS3183 M3\nM8\nG0 X-20. Y-10.\nG43 H3 Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\nX20. Y-10.\nX20. Y10.\nG80\nG0 Z25.\nM9\nM5\n";
     assert!(text.contains(expected), "{text}");
     // The design keeps the parameters, never the toolpath.
     let data = run(&mut s, "cam.data", json!({}));
@@ -302,7 +303,7 @@ fn a_faced_and_drilled_part_posts_as_one_program() {
     // from the clearance height.
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = haas["text"].as_str().unwrap();
-    let join = "\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\nG28 G91 Z0.\nG90\nT3 M6\nS3183 M3\nM8\nG43 H3 G0 X-20. Y-10. Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\n";
+    let join = "\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\nG28 G91 Z0.\nG90\nT3 M6\nS3183 M3\nM8\nG0 X-20. Y-10.\nG43 H3 Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\n";
     assert!(text.contains(join), "{text}");
     assert!(haas["notes"].as_array().unwrap().is_empty(), "{haas}");
     for post in ["rs274", "fanuc_mill"] {
@@ -358,7 +359,7 @@ fn a_facing_operation_takes_the_stock_top_down_to_the_part() {
     assert!(near(&t["min"], [-43.0, -17.0, -1.0]) && near(&t["max"], [43.0, 17.0, 25.0]), "{t}");
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = haas["text"].as_str().unwrap();
-    let expected = "\nT4 M6\nS3183 M3\nM8\nG43 H4 G0 X-43. Y17. Z25.\nZ5.\nG1 Z-1. F318.3\nX43. F636.6\nY5.667\nX-43.\nY-5.667\nX43.\nY-17.\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\n";
+    let expected = "\nT4 M6\nS3183 M3\nM8\nG0 X-43. Y17.\nG43 H4 Z25.\nZ5.\nG1 Z-1. F318.3\nX43. F636.6\nY5.667\nX-43.\nY-5.667\nX43.\nY-17.\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\n";
     assert!(text.contains(expected), "{text}");
     // Changed like any parameter: one way, in two levels to 2 mm below the stock top.
     run(

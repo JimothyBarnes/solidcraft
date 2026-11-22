@@ -25,7 +25,7 @@ fn the_p0_outline_posts_on_every_post_and_reads_back() {
     assert!(posted[2]["text"].as_str().unwrap().starts_with("%\nO01001 "));
     // In inches the Haas post writes 4 places and G20, and reads back within 0.00127 mm.
     let inch = posted[3]["text"].as_str().unwrap();
-    assert!(inch.contains("G20") && inch.contains("X-1.2992 Y-0.9055 Z0.1969"), "{inch}");
+    assert!(inch.contains("G20") && inch.contains("\nG0 X-1.2992 Y-0.9055\nG43 H1 Z0.1969\n"), "{inch}");
     assert!((posted[3]["tolerance_mm"].as_f64().unwrap() - 0.00127).abs() < 1e-12);
 
     // The design keeps the setup, tool and operation, not the toolpaths' G-code.

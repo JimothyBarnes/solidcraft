@@ -2,7 +2,7 @@
   "format": 1,
   "id": "haas_mill",
   "name": "Haas-style mill (VF series)",
-  "description": "Haas 3-axis vertical mill, from Haas's mill Programming Workbook (2005): % tape marks, O and a five-digit program number, G28 G91 Z0. to machine home before tool changes and at the end, G43 H on the first move after each tool change (G28 cancels it), one M code per line, a decimal point on every length and feed, dwells in seconds with their decimals (a Haas G04 P without a fraction is milliseconds). G20/G21 only check units on Haas: Setting 9 must match the program or the control alarms. Arcs are limited to half a turn per block until full circles are proven. Not yet checked on the owner's machine, whose control is newer than the workbook: prove out every program (air cut, single block). Holes use G81, G82, G83 and G73 as the workbook describes them: G98 returns to the Z the cycle started at, and G83 rapids to R between pecks. How far above the last depth G83 comes back down to, and how far G73 backs off, are the control's Setting 22, and the height above R between G83 pecks is Setting 52. They are not in the program; the 1 mm and 0 mm here are assumptions that only draw and simulate the pecks, so set them to the machine's values. Tapped holes use G84, cut in step with the spindle as the workbook describes it: F is the pitch times S (written with two more decimals than other feeds), and the control reverses the spindle at the bottom. The workbook's G84 starts the spindle itself; the M3 written before it is the toolpath's own.",
+  "description": "Haas 3-axis vertical mill, from Haas's mill Programming Workbook (2005): % tape marks, O and a five-digit program number, G28 G91 Z0. to machine home before tool changes and at the end, where G28 Y0. then brings the table home too (the workbook's examples end so), the first move after each tool change in X and Y first and then down in Z with G43 H (G28 cancels it; a rapid is not a straight line on this control), one M code per line, a decimal point on every length and feed, dwells in seconds with their decimals (a Haas G04 P without a fraction is milliseconds). G20/G21 only check units on Haas: Setting 9 must match the program or the control alarms. Arcs are limited to half a turn per block until full circles are proven. Not yet checked on the owner's machine, whose control is newer than the workbook: prove out every program (air cut, single block). Holes use G81, G82, G83 and G73 as the workbook describes them: G98 returns to the Z the cycle started at, and G83 rapids to R between pecks. How far above the last depth G83 comes back down to, and how far G73 backs off, are the control's Setting 22, and the height above R between G83 pecks is Setting 52. They are not in the program; the 1 mm and 0 mm here are assumptions that only draw and simulate the pecks, so set them to the machine's values. Tapped holes use G84, cut in step with the spindle as the workbook describes it: F is the pitch times S (written with two more decimals than other feeds), and the control reverses the spindle at the bottom. The workbook's G84 starts the spindle itself; the M3 written before it is the toolpath's own.",
   "machine_kind": "mill",
   "numbers": { "length_mm": 3, "length_inch": 4, "feed_mm": 1, "feed_inch": 2, "speed": 0, "dwell": 3, "strip_trailing_zeros": true },
   "line_numbers": null,
@@ -13,12 +13,13 @@
   "dwell": true,
   "cycles": { "drill": true, "dwell": true, "peck": true, "chip_break": true, "tap": true, "g98": "cycle_start", "motion": { "peck_clearance": 1.0, "chip_break_back_off": 1.0, "peck_retract": "r_plane", "above_r": 0.0 } },
   "tool_length_offset": "G43 H{tool}",
+  "xy_before_z": true,
   "sequences": {
     "program_start": ["%", "O{program_number} ({program_name})"],
     "safe_start": ["G17 G40 G49 G80 G90 G94 {units_code}"],
     "tool_change_before": ["G28 G91 Z0.", "G90"],
     "tool_change_after": [],
     "operation_start": ["{work_offset}"],
-    "program_end": ["G28 G91 Z0.", "G90", "M30", "%"]
+    "program_end": ["G28 G91 Z0.", "G28 Y0.", "G90", "M30", "%"]
   }
 }

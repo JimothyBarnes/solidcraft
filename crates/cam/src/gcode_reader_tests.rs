@@ -144,10 +144,17 @@ fn hostile_programs_are_refused_with_their_line_and_reason() {
         ("G91 G28 X0 Z0", "G91 G28 Z0"),
         ("G91 G28 Z1", "G91 G28 Z0"),
         ("G91 G0 G28 Z0", "G28 and a motion code"),
+        ("G91 G28 Y0", "G91 G28 Z0"),
+        ("G91 G28 Z0\nG28 X0", "G91 G28 Z0"),
+        ("G91 G28 Z0\nG28 Y5", "G91 G28 Z0"),
+        ("G91 G28 Z0\nG28 Y0\nG90\nG0 X1 Y1 Z1", "the table was sent home"),
+        ("F1\nG91 G28 Z0\nG28 Y0\nG90\nG81 X1 Y1 Z-1 R1", "the table was sent home"),
         ("G53 G1 Z0 F1", "G53 G0 Z"),
         ("G91 G53 G0 Z0", "G53 G0 Z"),
         ("G30 Z0", "machine coordinates"),
-        ("G53 G0 Z0\nG0 X1 Y1", "Z is unknown"),
+        ("F1\nG53 G0 Z0\nG1 X1 Y1", "Z is unknown"),
+        ("G91 G28 Z0\nG0 X1 Y1", "Z is unknown"),
+        ("F1\nG53 G0 Z0\nG0 X1 Y1\nG1 X2", "Z is unknown"),
         ("G91 G28 Z0\nG0 Z-5", "Z is unknown"),
         ("F1\nG53 G0 Z0\nG2 X1 Y0 Z0 I0.5", "right after a machine retract"),
         ("G93 G1 X1 F1", "inverse-time"),
@@ -217,6 +224,15 @@ fn machine_z_retracts_are_counted_not_moved_and_need_a_full_next_move() {
     let r = read("G0 X1 Y2 Z3\nG91 G28 Z0\nG90\nT1 M6\nG53 G0 Z0\nG0 G43 H1 X4 Y5 Z50", &ReadSettings::default()).unwrap();
     assert_eq!(r.machine_retracts, 2);
     assert_eq!(r.toolpath.moves, vec![Move::Rapid { to: p(1.0, 2.0, 3.0) }, Move::ToolChange { tool: 1 }, Move::Rapid { to: p(4.0, 5.0, 50.0) }]);
+    // From machine home the tool may go across first, in X and Y alone, and then come down: the
+    // one move, on two lines (or more: it comes down where the last of them left it).
+    let two = read("G0 X1 Y2 Z3\nG91 G28 Z0\nG90\nT1 M6\nG0 X4 Y5\nG43 H1 Z50", &ReadSettings::default()).unwrap();
+    assert_eq!(two.toolpath.moves, r.toolpath.moves);
+    let more = read("G0 X1 Y2 Z3\nG91 G28 Z0\nG90\nT1 M6\nG0 X9\nX4 Y5\nG43 H1 Z50", &ReadSettings::default()).unwrap();
+    assert_eq!(more.toolpath.moves, r.toolpath.moves);
+    // A program may end with the table sent home after Z: no move, and not another Z retract.
+    let ended = read("G0 X1 Y2 Z3\nM5\nG91 G28 Z0\nG28 Y0\nG90\nM30", &ReadSettings::default()).unwrap();
+    assert_eq!((ended.toolpath.moves.len(), ended.machine_retracts, ended.table_home, r.table_home), (2, 1, true, false));
 }
 
 fn drill(x: f64, y: f64, bottom: f64, r: f64, retract: f64, cycle: DrillCycle, feed: f64) -> Move {

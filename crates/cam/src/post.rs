@@ -157,6 +157,12 @@ pub struct Post {
     pub cycles: Cycles,
     /// Words put before the first move after a tool change (e.g. `G43 H{tool}`).
     pub tool_length_offset: Option<String>,
+    /// Whether the first move after a tool change goes to its X and Y first and only then down
+    /// to its Z, on a line of its own with the length offset's words: for a post whose tool
+    /// change leaves the tool at machine home, far above the work, where one move in all three
+    /// axes comes down on its way across (whatever stands beside the work is in its way).
+    #[serde(default)]
+    pub xy_before_z: bool,
     pub sequences: Sequences,
 }
 
@@ -257,6 +263,12 @@ impl Post {
         }
         if self.cycles.dwell && !self.dwell {
             return bad("cycles.dwell needs dwell: G82's P is written as a dwell's is".into());
+        }
+        if self.xy_before_z && !self.sequences.tool_change_before.iter().any(|line| line.contains("G28") || line.contains("G53")) {
+            return bad(
+                "xy_before_z needs tool_change_before to take the tool to machine home (G28 or G53): only from there is Z left for a line of its own"
+                    .into(),
+            );
         }
         let s = &self.sequences;
         let sample =
@@ -546,11 +558,13 @@ impl<'a> Writer<'a> {
         }
         match *m {
             Move::Rapid { to } => {
-                let mut words: Vec<String> = Vec::new();
+                // A tool change came before this move: the tool is where that left it.
+                let changed = self.pending_offset.is_some();
+                let mut offset: Vec<String> = Vec::new();
                 if let Some(tool) = self.pending_offset.take()
                     && let Some(tlo) = self.post.tool_length_offset.clone()
                 {
-                    words.push(render(&tlo, &self.fill(Some(tool))).map_err(|e| Error::BadPost(format!("{}: {e}", self.post.id)))?);
+                    offset.push(render(&tlo, &self.fill(Some(tool))).map_err(|e| Error::BadPost(format!("{}: {e}", self.post.id)))?);
                 }
                 let axes = self.axis_words(to, first_after_change);
                 if axes.is_empty() {
@@ -561,9 +575,23 @@ impl<'a> Writer<'a> {
                 if first_after_change {
                     self.motion = None;
                 }
-                words.extend(self.motion_word("G0"));
-                words.extend(axes);
-                self.emit(words.join(" "));
+                // From machine home: across first, at the height the tool change left the tool,
+                // then down with the length offset. One move, on two lines.
+                let (across, down): (Vec<String>, Vec<String>) =
+                    if changed && self.post.xy_before_z { axes.into_iter().partition(|word| !word.starts_with('Z')) } else { (axes, Vec::new()) };
+                if !across.is_empty() && !down.is_empty() {
+                    let mut first: Vec<String> = self.motion_word("G0").into_iter().collect();
+                    first.extend(across);
+                    self.emit(first.join(" "));
+                    offset.extend(self.motion_word("G0"));
+                    offset.extend(down);
+                    self.emit(offset.join(" "));
+                } else {
+                    offset.extend(self.motion_word("G0"));
+                    offset.extend(across);
+                    offset.extend(down);
+                    self.emit(offset.join(" "));
+                }
                 self.written.push(Move::Rapid { to });
                 self.at = to;
                 self.position_known = true;

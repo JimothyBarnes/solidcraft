@@ -58,8 +58,9 @@ fn every_built_in_post_loads() {
 #[test]
 fn the_fanuc_style_post_writes_this_program_exactly() {
     // Derived by hand from the post file: tape marks and the O line unnumbered, the safety lines
-    // first, a machine-home retract before the tool change, the length offset on the first rapid,
-    // the plane before the first arc, modal words left out when unchanged.
+    // first, a machine-home retract before the tool change, the first move across in X and Y
+    // and then down in Z with the length offset, the plane before the first arc, modal words
+    // left out when unchanged.
     let expected = "\
 %
 O0001 (BRACKET OP1)
@@ -72,16 +73,17 @@ N60 G90
 N70 T1 M6
 N80 S1200 M3
 N90 M8
-N100 G43 H1 G0 X10. Y0. Z5.
-N110 G1 Z-1. F200.
-N120 G17
-N130 G3 X0. Y10. I-10. J0. F400.
-N140 G0 Z5.
-N150 M5
-N160 M9
-N170 G91 G28 Z0.
-N180 G90
-N190 M30
+N100 G0 X10. Y0.
+N110 G43 H1 Z5.
+N120 G1 Z-1. F200.
+N130 G17
+N140 G3 X0. Y10. I-10. J0. F400.
+N150 G0 Z5.
+N160 M5
+N170 M9
+N180 G91 G28 Z0.
+N190 G90
+N200 M30
 %
 ";
     let posted = Post::builtin("fanuc_mill").unwrap().write(&bracket(), &ctx()).unwrap();
@@ -145,7 +147,8 @@ fn inch_output_reads_back_within_half_its_last_digit() {
     let ctx = ProgramContext { units: LengthUnit::Inch, ..ctx() };
     let posted = Post::builtin("fanuc_mill").unwrap().write(&bracket(), &ctx).unwrap();
     assert!(posted.text.contains("G20"));
-    assert!(posted.text.contains("X0.3937 Y0. Z0.1969")); // 10 mm, 5 mm in inches to 4 places
+    // 10 mm and 5 mm in inches to 4 places: across, then down with the length offset.
+    assert!(posted.text.contains(" G0 X0.3937 Y0.\n") && posted.text.contains(" G43 H1 Z0.1969\n"), "{}", posted.text);
     assert!((posted.tolerance - 0.00127).abs() < 1e-12);
     assert!(max_difference(&posted.written, &posted.read_back.toolpath) <= posted.tolerance + 1e-9);
 }
@@ -262,7 +265,9 @@ fn bad_post_files_are_refused_when_read() {
 #[test]
 fn the_haas_post_writes_this_program_exactly() {
     // Derived by hand from haas_mill.json and research/gcode-haas.md: five-digit O number, no line
-    // numbers, G28 G91 Z0. before the tool change and at the end, G90 back after each.
+    // numbers, G28 G91 Z0. before the tool change and at the end, G90 back after each, and from
+    // machine home the tool across to X and Y before it comes down with G43 (the workbook's own
+    // tool change, p. 23).
     let expected = "\
 %
 O00001 (BRACKET OP1)
@@ -275,7 +280,8 @@ G90
 T1 M6
 S1200 M3
 M8
-G43 H1 G0 X10. Y0. Z5.
+G0 X10. Y0.
+G43 H1 Z5.
 G1 Z-1. F200.
 G17
 G3 X0. Y10. I-10. J0. F400.
@@ -283,12 +289,16 @@ G0 Z5.
 M5
 M9
 G28 G91 Z0.
+G28 Y0.
 G90
 M30
 %
 ";
     let posted = Post::builtin("haas_mill").unwrap().write(&bracket(), &ctx()).unwrap();
     assert_eq!(posted.text, expected);
+    // The last retract takes Z home and then the table: read back as that, and as no move.
+    assert!(posted.read_back.table_home && posted.read_back.machine_retracts == 2);
+    assert!(!Post::builtin("fanuc_mill").unwrap().write(&bracket(), &ctx()).unwrap().read_back.table_home);
 }
 
 #[test]
@@ -306,7 +316,7 @@ fn haas_output_keeps_one_m_code_per_line_and_explicit_dwell_seconds() {
     }
     // Inch: 4 places, G20 to check Setting 9.
     let inch = post.write(&bracket(), &ProgramContext { units: LengthUnit::Inch, ..ctx() }).unwrap();
-    assert!(inch.text.contains("G20") && inch.text.contains("X0.3937 Y0. Z0.1969"));
+    assert!(inch.text.contains("G20") && inch.text.contains("\nG0 X0.3937 Y0.\nG43 H1 Z0.1969\n"), "{}", inch.text);
 }
 
 #[test]
@@ -354,7 +364,8 @@ G28 G91 Z0.
 G90
 T3 M6
 S1500 M3
-G43 H3 G0 X10. Y10. Z25.
+G0 X10. Y10.
+G43 H3 Z25.
 G99 G83 X10. Y10. Z-12. R2. Q4. F200.
 X20. Y10.
 G80
@@ -365,6 +376,7 @@ G80
 G0 Z50.
 M5
 G28 G91 Z0.
+G28 Y0.
 G90
 M30
 %
@@ -548,4 +560,30 @@ fn a_tapped_hole_is_g84_where_the_post_has_it_and_refused_where_it_has_not() {
     // A post file from before tapping has none.
     let old = include_str!("../posts/haas_mill.json").replace(r#""tap": true, "#, "");
     assert!(!old.contains("\"tap\"") && !Post::from_json(&old).unwrap().cycles.tap);
+}
+
+#[test]
+fn from_machine_home_the_tool_goes_across_before_it_comes_down() {
+    // A tool change takes the tool to machine home, far above the work. From there the first
+    // move is written on two lines: X and Y, then Z with the length offset. It is still the one
+    // move, and reads back as one.
+    for (id, across, down) in [("haas_mill", "\nG0 X10. Y0.\n", "\nG43 H1 Z5.\n"), ("fanuc_mill", " G0 X10. Y0.\n", " G43 H1 Z5.\n")] {
+        let posted = Post::builtin(id).unwrap().write(&bracket(), &ctx()).unwrap();
+        let (a, b) = (posted.text.find(across).unwrap(), posted.text.find(down).unwrap());
+        assert!(a < b && !posted.text.contains("X10. Y0. Z5."), "{id}: {}", posted.text);
+        assert_eq!(posted.written.moves, bracket().moves, "{id}");
+        assert_eq!(posted.read_back.toolpath.moves.iter().filter(|m| matches!(m, Move::Rapid { .. })).count(), 2, "{id}");
+    }
+    // Where the tool change does not go to machine home, the move is one line, as the reference
+    // post writes it; and a post may not ask for two lines without going home.
+    let posted = Post::builtin("rs274").unwrap().write(&bracket(), &ctx()).unwrap();
+    assert!(posted.text.contains("\nG43 H1 G0 X10. Y0. Z5.\n"), "{}", posted.text);
+    let mut file: serde_json::Value = serde_json::from_str(BUILTIN_POSTS.iter().find(|(id, _)| *id == "rs274").unwrap().1).unwrap();
+    file["xy_before_z"] = serde_json::json!(true);
+    assert!(Post::from_json(&file.to_string()).unwrap_err().to_string().contains("xy_before_z needs tool_change_before"));
+    // With no tool change before it, a program's first move is one line on every post: nothing
+    // says the tool is at machine home.
+    let plain = Toolpath { start: p(0.0, 0.0, 50.0), moves: vec![Move::Rapid { to: p(10.0, 0.0, 5.0) }, Move::Rapid { to: p(10.0, 0.0, 50.0) }] };
+    let posted = Post::builtin("haas_mill").unwrap().write(&plain, &ctx()).unwrap();
+    assert!(posted.text.contains("\nG0 X10. Y0. Z5.\n"), "{}", posted.text);
 }
