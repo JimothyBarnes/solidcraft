@@ -14,7 +14,7 @@ use crate::SolveApp;
 use crate::ui_kit;
 
 /// Which way round the cut goes: the command's word and the label.
-const DIRECTIONS: [(&str, &str); 2] = [("climb", "manufacture.direction_climb"), ("conventional", "manufacture.direction_conventional")];
+pub(super) const DIRECTIONS: [(&str, &str); 2] = [("climb", "manufacture.direction_climb"), ("conventional", "manufacture.direction_conventional")];
 /// The stepdown a contour takes when none is typed, as a share of the tool's diameter (the
 /// engine's own default, shown in the field).
 const STEPDOWN_SHARE: f64 = 0.5;

@@ -24,6 +24,7 @@ mod gcode_reader;
 mod manufacture;
 mod offset;
 mod placement;
+mod pocket;
 mod post;
 mod tool;
 mod toolpath;
@@ -42,6 +43,10 @@ pub use manufacture::{
 };
 pub use offset::{JOINT_TOLERANCE, MAX_OFFSET_SEGMENTS, offset_region, offset_regions};
 pub use placement::{Bounds, Placement};
+pub use pocket::{
+    DEFAULT_POCKET_STEPDOWN, DEFAULT_POCKET_STEPOVER, DEFAULT_RAMP_ANGLE, MAX_POCKET_LEVELS, MAX_POCKET_RINGS, MAX_POCKET_STEPOVER, MAX_POCKETS,
+    PocketOp, PocketShape, Pocketed,
+};
 pub use post::{
     Arcs, BUILTIN_POSTS, Comments, Cycles, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences,
 };

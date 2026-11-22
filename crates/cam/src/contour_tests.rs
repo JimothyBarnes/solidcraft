@@ -414,6 +414,30 @@ fn what_is_worth_knowing_is_noted() {
 }
 
 #[test]
+fn a_slot_as_wide_as_the_tool_is_cut_or_passed_by_and_never_cut_into() {
+    // A U, 60 x 60, with a slot 40 deep in its top, about the 20 mm tool's width. A hair wider
+    // and the tool goes down one side and back up the other; a hair narrower and the round
+    // passes its mouth. Exactly as wide is a question of the last bit of a number: the path may
+    // run down the middle or pass by (when the offsetter can't verify the first, the outline is
+    // taken a micron bigger), and either way the tool keeps its radius from every wall.
+    let u: [(f64, f64); 8] = [(-30.0, -30.0), (30.0, -30.0), (30.0, 30.0), (10.0, 30.0), (10.0, -10.0), (-10.0, -10.0), (-10.0, 30.0), (-30.0, 30.0)];
+    let placement = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(60.0, 60.0, 20.0) }, 1.0);
+    for width in [20.0, 19.999, 20.001, 12.0] {
+        let slot: Vec<(f64, f64)> = u.iter().map(|&(x, y)| (if x.abs() == 10.0 { 0.5 * width * x.signum() } else { x }, y)).collect();
+        let d = ContourOp::default()
+            .toolpath(None, &mill20(), &placement, Some("aluminium"), &[polygon(&slot)])
+            .unwrap_or_else(|e| panic!("a slot {width} wide: {e}"));
+        let nearest = cutting_points(&d.toolpath).iter().map(|at| distance(q(at.x, at.y), &slot)).fold(f64::INFINITY, f64::min);
+        assert!((10.0 - 1e-4..=10.0 + 2e-3).contains(&nearest), "a slot {width} wide: the tool's centre comes within {nearest} mm of the part");
+        // Into a slot a hair wider than the tool it does go, down one side and back up the other.
+        let deep = cutting_points(&d.toolpath).iter().filter(|at| at.x.abs() < 5.0 && at.y < 20.0 && at.y > -20.0).count();
+        if width != 20.0 {
+            assert_eq!(deep > 0, width > 20.0, "a slot {width} wide: {deep} points of the path are inside it");
+        }
+    }
+}
+
+#[test]
 fn what_cannot_be_contoured_is_refused_with_the_reason() {
     let drill = {
         let mut t = mill20();

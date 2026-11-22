@@ -1,9 +1,9 @@
-//! Manufacture's forms: Add Tool, Import Tools, New Setup, Face, Contour, Drill and Post Process. Each is a front end that
+//! Manufacture's forms: Add Tool, Import Tools, New Setup, Face, Contour, Pocket, Drill and Post Process. Each is a front end that
 //! builds the parameters of one `cam.*` command and runs it: every change is a command, and a
 //! script calls the command directly and sees no window. They are standalone windows, opened
 //! when the ribbon starts one of those commands ([`start`]) and drawn once a frame ([`show`]).
 //!
-//! New Setup, Face, Contour and Drill show what they would make before OK: the engine works it out from the
+//! New Setup, Face, Contour, Pocket and Drill show what they would make before OK: the engine works it out from the
 //! parameters as they are typed (`manufacture_setup_preview`, `manufacture_preview`), the viewport
 //! draws it (`super::scene`), and the form says why when there would be nothing to make. A form
 //! also stays open with the command's own words when the command refuses, so the reason is
@@ -25,7 +25,9 @@ use crate::SolveApp;
 use crate::ui_kit;
 
 mod contour;
+mod pocket;
 pub(crate) use contour::ContourForm;
+pub(crate) use pocket::PocketForm;
 
 /// The open form.
 pub(crate) enum Dialog {
@@ -34,6 +36,7 @@ pub(crate) enum Dialog {
     Setup(SetupForm),
     Face(FaceForm),
     Contour(ContourForm),
+    Pocket(PocketForm),
     Drill(DrillForm),
     Post(PostForm),
     Posted(Posted),
@@ -70,6 +73,7 @@ impl Dialog {
         match self {
             Dialog::Face(FaceForm { editing: Some(edited), .. })
             | Dialog::Contour(ContourForm { editing: Some(edited), .. })
+            | Dialog::Pocket(PocketForm { editing: Some(edited), .. })
             | Dialog::Drill(DrillForm { editing: Some(edited), .. }) => edited.id.as_str(),
             _ => None,
         }
@@ -81,6 +85,7 @@ impl Dialog {
             Dialog::Setup(form) => form.placed.get().map(|(key, placement)| (key, Shown::Setup(placement))),
             Dialog::Face(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Contour(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
+            Dialog::Pocket(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Drill(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             _ => None,
         }
@@ -927,7 +932,7 @@ pub(crate) struct FaceForm {
 }
 
 /// The setup an operation is in and the operation, as the design keeps them: `(setup, name, tool,
-/// kind, parameters)`, the parameters being the `drill`, `face`, `contour` or `toolpath` object.
+/// kind, parameters)`, the parameters being the `drill`, `face`, `contour`, `pocket` or `toolpath` object.
 fn kept_operation(app: &SolveApp, id: &str) -> Result<(SetupChoice, String, u32, String, Value), String> {
     let data = manufacture_data(&app.session.doc)?;
     let (setup, op) = data
@@ -1630,6 +1635,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
             | "cam.setup.create"
             | "cam.op.face"
             | "cam.op.contour"
+            | "cam.op.pocket"
             | "cam.op.drill"
             | "cam.post"
     ) {
@@ -1652,6 +1658,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         "cam.setup.create" => Dialog::Setup(SetupForm::new(app)),
         "cam.op.face" => Dialog::Face(FaceForm::new(app)),
         "cam.op.contour" => Dialog::Contour(ContourForm::new(app)),
+        "cam.op.pocket" => Dialog::Pocket(PocketForm::new(app)),
         "cam.op.drill" => Dialog::Drill(DrillForm::new(app)),
         _ => Dialog::Post(PostForm::new(app)),
     });
@@ -1668,6 +1675,7 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
         Target::Operation(id) => kept_operation(app, id).and_then(|(.., kind, _)| match kind.as_str() {
             "face" => FaceForm::edit(app, id).map(Dialog::Face),
             "contour" => ContourForm::edit(app, id).map(Dialog::Contour),
+            "pocket" => PocketForm::edit(app, id).map(Dialog::Pocket),
             "drill" => DrillForm::edit(app, id).map(Dialog::Drill),
             _ => Err(tr("manufacture.edit_unsupported_operation").to_string()),
         }),
@@ -1692,6 +1700,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Setup(form) => form.show(app, ctx, &units, decimals).map(Dialog::Setup),
         Dialog::Face(form) => form.show(app, ctx, &units, decimals).map(Dialog::Face),
         Dialog::Contour(form) => form.show(app, ctx, &units, decimals).map(Dialog::Contour),
+        Dialog::Pocket(form) => form.show(app, ctx, &units, decimals).map(Dialog::Pocket),
         Dialog::Drill(form) => form.show(app, ctx, &units, decimals).map(Dialog::Drill),
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),

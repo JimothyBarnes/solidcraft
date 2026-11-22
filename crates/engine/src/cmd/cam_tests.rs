@@ -498,7 +498,7 @@ fn a_form_previews_an_operation_before_it_is_made() {
         ("cam.op.face", json!({"setup": 5}), "parameters:"),
         ("cam.op.face", json!(null), "parameters:"),
         ("cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": {"holes": []}}), "drill:"),
-        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill, face or contour operation"),
+        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill, face, contour or pocket operation"),
     ] {
         let said = why(&s, command, params.clone());
         assert!(said.contains(expect), "{command} {params}: {said:?} does not say {expect:?}");
@@ -575,7 +575,8 @@ fn commands_that_measure_the_model_bring_it_up_to_date_first() {
     // posting read the evaluated model: the engine finishes a stale model (one left behind by a
     // live drag) before they run. The others read and write only the design's Manufacture data.
     for spec in super::COMMANDS {
-        let measures = matches!(spec.id, "cam.setup.measure" | "cam.setup.holes" | "cam.setup.outline" | "cam.op.toolpath" | "cam.post");
+        let measures =
+            matches!(spec.id, "cam.setup.measure" | "cam.setup.holes" | "cam.setup.outline" | "cam.setup.pockets" | "cam.op.toolpath" | "cam.post");
         assert_eq!(spec.reads_model, measures, "{}", spec.id);
     }
 }
@@ -1087,4 +1088,189 @@ fn an_outline_with_free_form_edges_is_fitted_with_arcs() {
     assert_eq!(grown.len(), 1);
     assert!((length(&grown[0].outer) - (length(oval) + 20.0 * std::f64::consts::PI)).abs() < 1e-3, "{} {}", length(&grown[0].outer), length(oval));
     assert!((length(oval) - 96.884).abs() < 0.01, "{}", length(oval));
+}
+
+/// Tool 2: a 10 mm, 3-flute flat end mill with 22 mm of flutes and data for aluminium (150 m/min,
+/// 0.05 mm a tooth, plunging and ramping at half): 4774.6 rev/min, 716.2 mm/min.
+fn mill10() -> Value {
+    json!({
+        "number": 2, "name": "10 mm flat end mill", "kind": "flat_end_mill",
+        "geometry": {"diameter": 10.0, "corner_radius": 0.0, "flute_length": 22.0, "shoulder_length": 0.0, "overall_length": 72.0,
+                     "shank_diameter": 10.0, "tip_angle": 0.0, "tip_diameter": 0.0, "thread_pitch": 0.0},
+        "flutes": 3, "holder": {"stick_out": 32.0, "segments": []}, "length_offset": 2, "diameter_offset": 2, "coolant": "flood",
+        "cutting_data": [{"material": "aluminium", "surface_speed": 150.0, "chip_load": 0.05, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+        "overrides": {"rpm": null, "feed": null}
+    })
+}
+
+/// A 100 x 80 x 20 plate in the vise setup (1 mm of stock on top and all round, the WCS over its
+/// middle at the stock's top) with the 10 mm end mill: in the WCS the plate is X -50 to 50,
+/// Y -40 to 40, its top at Z -1.
+fn plate() -> Session {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"}));
+    run(&mut s, "cam.tool.create", json!({"tool": mill10()}));
+    run(&mut s, "cam.setup.create", json!({"material": "aluminium"}));
+    s
+}
+
+/// A box cut from (or, with `join`, added to) the plate: its corner and size in the plate's own
+/// coordinates.
+fn boxed(s: &mut Session, corner: [f64; 3], size: [f64; 3], operation: &str) {
+    run(
+        s,
+        "solid.box",
+        json!({"length": size[0], "width": size[1], "height": size[2], "corner": corner, "operation": operation, "targets": ["Plate"]}),
+    );
+}
+
+#[test]
+fn a_pocket_is_found_on_the_model_and_cleared_in_rings() {
+    // A pocket 60 x 40, 6 deep, in the middle of the plate's top: its floor at Z -7 in the WCS.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}));
+    assert_eq!(found["pockets"].as_array().map(Vec::len), Some(1), "{found:#}");
+    let pocket = &found["pockets"][0];
+    assert_eq!(
+        (pocket["floor"].as_f64(), pocket["depth"].as_f64(), pocket["size"].clone(), pocket["islands"].as_u64()),
+        (Some(-7.0), Some(6.0), json!([60.0, 40.0]), Some(0))
+    );
+    assert!(about(&pocket["area"], 2400.0) && about(&pocket["widest"], 40.0), "{pocket:#}");
+    // Nothing narrows it: a tool passes everywhere for as long as it fits.
+    assert!((39.5..=40.0).contains(&pocket["passes"].as_f64().unwrap()), "{pocket:#}");
+    let at = pocket["at"].clone();
+    assert!(at[0].as_f64().unwrap().abs() < 30.0 && at[1].as_f64().unwrap().abs() < 20.0, "{at}");
+    // The form reads the same list, and finding pockets changes nothing.
+    assert_eq!(serde_json::to_value(crate::cmd::manufacture_pockets(&s, "setup-1").unwrap()).unwrap(), found["pockets"]);
+    // The 10 mm tool's centre keeps 5 from the walls: rings of 26 x 6, 34 x 14, 42 x 22 and
+    // 50 x 30, in two levels of 3.5 (see the strategy's own test for every length).
+    assert_eq!(run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [at]}}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert_eq!(
+        (n["levels"].clone(), n["rings"].clone(), n["stepover"].as_f64(), n["offset"].as_f64()),
+        (json!([[-3.5, -7.0]]), json!([4]), Some(4.0), Some(5.0))
+    );
+    let level = 128.0_f64.hypot(3.5) + 64.0 + 3.0 * 4.0 + 96.0 + 128.0 + 160.0;
+    assert!(about(&t["feed_length"], 2.0 * level + 13.5), "{t}");
+    assert_eq!((t["min"][2].as_f64(), t["max"][2].as_f64()), (Some(-7.0), Some(25.0)));
+    assert!(t["min"][0].as_f64().unwrap() >= -25.0 - 1e-9 && t["max"][0].as_f64().unwrap() <= 25.0 + 1e-9, "{t}");
+    // It posts, ramps and all, and the program read back is the toolpath.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    assert!(posted["text"].as_str().unwrap().contains("T2 M6"), "{posted}");
+    // The pocket follows the model: 4 mm deeper, and the same operation goes down to Z -11.
+    boxed(&mut s, [20.0, 20.0, 10.0], [60.0, 40.0, 6.0], "cut");
+    let deeper = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let levels: Vec<f64> = deeper["numbers"]["levels"][0].as_array().unwrap().iter().map(|z| z.as_f64().unwrap()).collect();
+    assert!(levels.len() == 3 && levels.iter().zip([-11.0 / 3.0, -22.0 / 3.0, -11.0]).all(|(z, want)| (z - want).abs() < 1e-9), "{levels:?}");
+    // Changed in place; another kind's parameters are refused, and so is a tool that can't.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"pockets": [[0, 0]], "stepover": 5, "leave": 0.5}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!((t["numbers"]["stepover"].as_f64(), t["numbers"]["offset"].as_f64()), (Some(5.0), Some(5.5)));
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {}})).contains("is a pocket operation: it takes `pocket`, not `contour`"));
+    assert!(refused(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2})).contains("pocket"));
+    // A stepover of more than half the tool is refused when the operation is made, with the reason.
+    let wide = refused(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]], "stepover": 6}}));
+    assert!(wide.contains("half of tool 2's diameter"), "{wide}");
+    assert!(refused(&mut s, "cam.setup.pockets", json!({"id": "setup-9"})).contains("no setup 'setup-9'"));
+}
+
+#[test]
+fn islands_holes_and_steps_are_told_apart() {
+    // A pocket 80 x 60, 6 deep, with a 20 x 20 island left standing in its middle and a hole of
+    // 8 through its floor beside the island.
+    let mut s = plate();
+    boxed(&mut s, [10.0, 10.0, 14.0], [80.0, 60.0, 6.0], "cut");
+    boxed(&mut s, [40.0, 30.0, 14.0], [20.0, 20.0, 6.0], "join");
+    run(&mut s, "solid.cylinder", json!({"diameter": 8, "height": 30, "base": [25, 40, -5], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}));
+    assert_eq!(found["pockets"].as_array().map(Vec::len), Some(1), "{found:#}");
+    let pocket = &found["pockets"][0];
+    // The island is one; the hole is air, not an island, and the tool passes over it.
+    assert_eq!((pocket["floor"].as_f64(), pocket["size"].clone(), pocket["islands"].as_u64()), (Some(-7.0), json!([80.0, 60.0]), Some(1)));
+    assert!(about(&pocket["area"], 4800.0 - 400.0), "{pocket:#}");
+    // The widest circle that fits is not the 30 between the island's side and an end wall but a
+    // little more, in a corner, touching two walls and the island's corner: its radius r has
+    // (30 - r)^2 + (20 - r)^2 = r^2, so r = 50 - sqrt(1200) and it is 30.72 across. The number
+    // given is from a search and never more than what fits.
+    let widest = pocket["widest"].as_f64().unwrap();
+    assert!((30.6..=2.0 * (50.0 - 1200.0_f64.sqrt()) + 1e-9).contains(&widest), "{pocket:#}");
+    // A tool passes everywhere while it is narrower than the 20 mm between the island and the
+    // long walls; a wider one that fits clears the two ends only.
+    assert!((19.5..=20.0).contains(&pocket["passes"].as_f64().unwrap()), "{pocket:#}");
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [pocket["at"]]}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!(t["numbers"]["rings"], json!([6]), "{}", t["numbers"]);
+    // A point on the island's top, on the plate's top or off the part is no pocket's floor.
+    let at = |s: &mut Session, x: f64, y: f64| {
+        run(s, "cam.op.edit", json!({"id": "op-1", "pocket": {"pockets": [[x, y]]}}));
+        refused(s, "cam.op.toolpath", json!({"id": "op-1"}))
+    };
+    assert!(at(&mut s, 0.0, 0.0).contains("on top of the part"), "the island's top is the part's top");
+    assert!(at(&mut s, 45.0, 35.0).contains("on top of the part"));
+    assert!(at(&mut s, 80.0, 0.0).contains("nothing of the part under"));
+    // Over the hole there is no floor: the ray goes through.
+    assert!(at(&mut s, -25.0, 0.0).contains("nothing of the part under"));
+    // A step cut into the plate's edge is open to the outside: not offered, and said so when asked for.
+    let mut s = plate();
+    boxed(&mut s, [70.0, 20.0, 14.0], [30.0, 40.0, 6.0], "cut");
+    assert_eq!(run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}))["pockets"], json!([]));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[35, 0]]}}));
+    let said = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(said.contains("operation op-1 (Pocket 1)") && said.contains("open to the outside of the part"), "{said}");
+    let previewed = crate::cmd::manufacture_preview(&s, "cam.op.pocket", &json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[35, 0]]}}))
+        .err()
+        .unwrap();
+    assert!(previewed.contains("open to the outside") && !previewed.contains("operation"), "{previewed}");
+}
+
+#[test]
+fn a_pocket_the_tool_cannot_cut_straight_down_is_refused() {
+    // A pocket 40 x 40 at the top that widens to 60 x 60 lower down (a T-slot's shape): the floor
+    // is seen through the opening, but the opening's rim hangs over it.
+    let mut s = plate();
+    boxed(&mut s, [30.0, 20.0, 17.0], [40.0, 40.0, 3.0], "cut");
+    boxed(&mut s, [20.0, 10.0, 11.0], [60.0, 60.0, 6.0], "cut");
+    assert_eq!(run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}))["pockets"], json!([]));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}}));
+    let said = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(said.contains("in the way above the floor") && said.contains("'Plate'"), "{said}");
+    // A pocket inside a pocket: both are found, the larger first. The upper one's region runs
+    // over the lower one (air), so it has no island.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 16.0], [60.0, 40.0, 4.0], "cut");
+    boxed(&mut s, [30.0, 30.0, 10.0], [20.0, 20.0, 6.0], "cut");
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}));
+    let floors: Vec<(f64, Value, u64)> = found["pockets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["floor"].as_f64().unwrap(), p["size"].clone(), p["islands"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(floors, vec![(-5.0, json!([60.0, 40.0]), 0), (-11.0, json!([20.0, 20.0]), 0)], "the larger first: {found:#}");
+    // A round blind hole is a round pocket; the hole through the plate is not one.
+    let mut s = plate();
+    run(&mut s, "solid.cylinder", json!({"diameter": 30, "height": 10, "base": [30, 40, 12], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    run(&mut s, "solid.cylinder", json!({"diameter": 12, "height": 30, "base": [75, 40, -5], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}));
+    assert_eq!(found["pockets"].as_array().map(Vec::len), Some(1), "{found:#}");
+    let round = &found["pockets"][0];
+    assert_eq!((round["floor"].as_f64(), round["size"].clone()), (Some(-9.0), json!([30.0, 30.0])));
+    assert!((round["widest"].as_f64().unwrap() - 30.0).abs() <= 0.02 && about(&round["area"], 225.0 * std::f64::consts::PI), "{round:#}");
+    // Cleared in circles of 10, 6 and 2 (the centre's own 10, then 4 apart), down a helix.
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [round["at"]]}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!(t["numbers"]["rings"], json!([3]), "{}", t["numbers"]);
+    let moves = t["toolpath"]["moves"].as_array().unwrap();
+    assert!(
+        moves.iter().filter(|m| m["kind"] == "arc").count() >= 12
+            && moves.iter().all(|m| m["kind"] != "arc" || m["direction"] == "counter_clockwise")
+    );
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    assert!(
+        posted["text"].as_str().unwrap().lines().any(|line| line.starts_with("G3") && line.contains('Z')),
+        "a helix is posted as arcs that go down: {}",
+        posted["text"]
+    );
 }

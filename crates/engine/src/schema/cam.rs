@@ -220,6 +220,46 @@ pub struct CamSetupOutline {
     pub loops: Vec<OutlineLoop>,
 }
 
+/// Find the closed pockets a setup can cut.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupPocketsParams {
+    pub id: String,
+}
+
+/// A closed pocket of a setup's bodies, in the setup's WCS, mm.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct FoundPocket {
+    /// A point on its floor, `[x, y]`: what a pocket operation names it by.
+    pub at: [f64; 2],
+    /// The Z of its floor.
+    pub floor: f64,
+    /// How far its floor is below the part's top.
+    pub depth: f64,
+    /// About how far across the widest circle that fits in it is (from a search, never more than
+    /// what fits): a tool must be narrower.
+    pub widest: f64,
+    /// About how wide a tool can be and still pass everywhere in it: through its necks, and
+    /// between its islands and its walls. A wider tool that fits clears only part of it.
+    pub passes: f64,
+    /// The sizes along X and Y of the box round its wall.
+    pub size: [f64; 2],
+    /// How many islands stand in it.
+    pub islands: usize,
+    /// The area of the air above its floor, the islands taken out.
+    pub area: f64,
+}
+
+/// The closed pockets of a setup's bodies, found on their exact faces (never a display mesh): a
+/// flat floor facing up, walls all round, and nothing seen over it from places along its wall
+/// (a pocket is checked exactly, for a fillet at the foot of its walls too, when it is cut).
+/// The largest first.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupPockets {
+    pub id: String,
+    pub pockets: Vec<FoundPocket>,
+}
+
 /// What a setup command left.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CamSetupWritten {
@@ -276,6 +316,9 @@ pub struct CamOpEditParams {
     /// A contour operation's parameters, whole, as `cam.op.contour` takes them.
     #[serde(default)]
     pub contour: Option<Value>,
+    /// A pocket operation's parameters, whole, as `cam.op.pocket` takes them.
+    #[serde(default)]
+    pub pocket: Option<Value>,
     /// A hand-made operation's toolpath, whole, as `cam.op.manual` takes it.
     #[serde(default)]
     pub toolpath: Option<Value>,
@@ -333,6 +376,24 @@ pub struct CamOpContourParams {
     pub contour: Option<Value>,
 }
 
+/// Add a pocket operation to a setup (decision 0014 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpPocketParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: a flat or bull-nose end mill that fits the pockets.
+    pub tool: u32,
+    /// `{pockets: [[x, y], …] a point on the floor of each pocket, in the WCS (as
+    /// `cam.setup.pockets` gives them), top?: Z (default the stock top), stepdown?: mm (default
+    /// half the tool's diameter), stepover?: mm (default 40% of the tool's diameter, at most
+    /// half), leave?: mm of stock left on the walls (default 0), direction?: climb | conventional,
+    /// ramp_angle?: radians (default 3 degrees), rpm?, feed?}`.
+    pub pocket: Value,
+}
+
 /// Work out one operation's toolpath.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -358,7 +419,8 @@ pub struct CamOpToolpath {
     pub max: [f64; 3],
     /// What the strategy worked out (a drill: rpm, feed, bottom, r, clearance; a facing: rpm, feed,
     /// plunge_feed, levels, passes, stepover; a contour: rpm, feed, plunge_feed, top, levels,
-    /// stepdown, offset, round, entries); empty for a hand-made toolpath.
+    /// stepdown, offset, round, entries; a pocket: rpm, feed, plunge_feed, ramp_feed, top, levels
+    /// and rings for each pocket, stepdown, stepover, offset); empty for a hand-made toolpath.
     pub numbers: Value,
     pub notes: Vec<String>,
 }

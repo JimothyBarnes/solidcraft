@@ -16,6 +16,7 @@ use solidcore_record::Vec3;
 use crate::contour::ContourOp;
 use crate::drill::DrillOp;
 use crate::face::FaceOp;
+use crate::pocket::PocketOp;
 use crate::tool::Tool;
 use crate::toolpath::Toolpath;
 use crate::units::MAX_COORDINATE;
@@ -136,6 +137,8 @@ pub enum OperationKind {
     Face { face: FaceOp },
     /// Round the outside of the part, its outline taken from the model (decision 0013).
     Contour { contour: ContourOp },
+    /// Closed pockets cleared in rings, each named by a point on its floor (decision 0014).
+    Pocket { pocket: PocketOp },
 }
 
 /// One operation of a setup.
@@ -338,6 +341,7 @@ impl ManufactureData {
                 OperationKind::Drill { drill } => drill.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Face { face } => face.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Contour { contour } => contour.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Pocket { pocket } => pocket.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())

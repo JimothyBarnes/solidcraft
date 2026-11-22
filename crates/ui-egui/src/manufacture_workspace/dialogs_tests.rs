@@ -44,6 +44,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Setup(_)) => "setup",
         Some(Dialog::Face(_)) => "face",
         Some(Dialog::Contour(_)) => "contour",
+        Some(Dialog::Pocket(_)) => "pocket",
         Some(Dialog::Drill(_)) => "drill",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
@@ -75,6 +76,13 @@ fn contour_form(h: &mut Harness) -> &mut ContourForm {
     match h.app.manufacture_workspace.dialog.as_mut() {
         Some(Dialog::Contour(form)) => form,
         _ => panic!("Contour is not open"),
+    }
+}
+
+fn pocket_form(h: &mut Harness) -> &mut PocketForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Pocket(form)) => form,
+        _ => panic!("Pocket is not open"),
     }
 }
 
@@ -473,6 +481,7 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
         ("cam.setup.create", "SETUP"),
         ("cam.op.face", "MILLING"),
         ("cam.op.contour", "MILLING"),
+        ("cam.op.pocket", "MILLING"),
         ("cam.op.drill", "DRILLING"),
         ("cam.post", "ACTIONS"),
         ("cam.tool.create", "MANAGE"),
@@ -1103,4 +1112,101 @@ fn contour_says_why_it_would_cut_into_the_part_and_its_form_changes_only_what_it
     h.frames(3);
     assert_eq!(open(&h), "contour");
     press(&mut h, "Cancel");
+}
+
+/// A 100 x 80 x 20 plate with a pocket 60 x 40, 6 deep, in the middle of its top, and a round
+/// one of 16, 4 deep, near a corner.
+fn pocketed_plate(h: &mut Harness) {
+    h.app.run("solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"})).unwrap();
+    h.app
+        .run("solid.box", json!({"length": 60, "width": 40, "height": 6, "corner": [20, 20, 14], "operation": "cut", "targets": ["Plate"]}))
+        .unwrap();
+    h.app.run("solid.cylinder", json!({"diameter": 16, "height": 10, "base": [10, 70, 16], "operation": "cut", "targets": ["Plate"]})).unwrap();
+}
+
+#[test]
+fn pocket_offers_the_pockets_found_and_the_widest_tool_that_fits() {
+    let mut h = harness();
+    // No pockets to find in a plain block: the form says what a pocket is.
+    block(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.pocket");
+    assert_eq!(open(&h), "pocket");
+    assert!(h.widget(tr("manufacture.pocket_none")).is_some());
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("pocket", json!([])));
+    press(&mut h, "Cancel");
+
+    // The plate's two pockets, the larger first. T1 is the 10 mm end mill, T2 a 20 mm one.
+    let mut h = harness();
+    pocketed_plate(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.pocket");
+    let form = pocket_form(&mut h);
+    let found: Vec<(f64, [f64; 2])> = form.pockets().iter().map(|p| (p.floor, p.size)).collect();
+    assert_eq!(found, vec![(-7.0, [60.0, 40.0]), (-5.0, [16.0, 16.0])]);
+    // The big one first: the 20 mm tool fits and is the widest that does. Its centre's 40 x 20
+    // and one ring 8 in; 7 mm deep in one level of at most 10.
+    assert_eq!((form.pocket, form.tool, form.picked_tool, form.stepover, form.stepdown), (0, 1, false, 8.0, 10.0));
+    assert!(h.widget("60.00 × 40.00 × 6.00 mm").is_some(), "the pocket by its size and its depth below the part's top");
+    assert!(h.widget("1 × 7.00 mm").is_some() && !pocket_form(&mut h).tool_too_wide());
+    assert!(scene::counts(&h.app).2 > 0 && h.widget(tr("manufacture.preview_note")).is_some());
+    // The round one: only the 10 mm tool fits it. 5 mm deep under the stock's top, one level;
+    // the centre's circle of radius 3 is the one ring.
+    pocket_form(&mut h).pocket = 1;
+    h.frames(3);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.tool, form.stepover, form.stepdown), (0, 4.0, 5.0));
+    assert!(h.widget("1 × 5.00 mm").is_some(), "one level of 5");
+    // A tool picked by hand stays picked; one too wide for the pocket is pointed out and the
+    // engine says how wide the pocket is.
+    let form = pocket_form(&mut h);
+    (form.tool, form.picked_tool) = (1, true);
+    h.frames(3);
+    let form = pocket_form(&mut h);
+    assert!(form.tool_too_wide());
+    let why = form.worked.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("does not fit") && why.contains("16.0"), "{why:?}");
+    assert!(h.widget(tr("manufacture.pocket_tool_wide")).is_some() && h.widget(&why).is_some());
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("pocket", json!([])));
+    // The 10 mm tool in the big pocket, by hand: four rings in two levels of 3.5.
+    let form = pocket_form(&mut h);
+    (form.pocket, form.tool) = (0, 0);
+    h.frames(3);
+    assert!(h.widget("2 × 3.50 mm").is_some() && h.widget("4").is_some());
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    // Only the pocket's point and the direction are kept: the rest follows the tool.
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["name"].as_str(), kept["tool"].as_u64(), kept["operation"]["kind"].as_str()), (Some("Pocket 1"), Some(1), Some("pocket")));
+    let pocket = &kept["operation"]["pocket"];
+    assert_eq!(
+        (pocket["pockets"].as_array().map(Vec::len), pocket["direction"].as_str(), pocket["stepover"].clone(), pocket["stepdown"].clone()),
+        (Some(1), Some("climb"), Value::Null, Value::Null)
+    );
+    let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
+    assert_eq!((made["numbers"]["rings"].clone(), made["numbers"]["levels"].clone()), (json!([4]), json!([[-3.5, -7.0]])));
+
+    // Its row's Edit opens the form on the pocket it has; a change is one edit of the operation.
+    h.frames(3);
+    row_menu(&mut h, "Pocket 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "pocket");
+    assert!(h.widget("1, as made").is_some() && h.widget("OK").is_some() && h.widget("Create").is_none());
+    let form = pocket_form(&mut h);
+    assert_eq!((form.tool, form.picked_tool, form.typed_stepover), (0, true, false));
+    (form.stepover, form.typed_stepover) = (5.0, true);
+    form.leave = 0.25;
+    form.direction = 1;
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let after = data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"].clone();
+    assert_eq!(
+        (after["pockets"].clone(), after["stepover"].as_f64(), after["leave"].as_f64(), after["direction"].as_str()),
+        (pocket["pockets"].clone(), Some(5.0), Some(0.25), Some("conventional"))
+    );
+    assert!(PocketForm::edit(&h.app, "op-9").is_err());
 }

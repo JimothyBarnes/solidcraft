@@ -16,6 +16,7 @@ pub const DOCUMENTED: &[&str] = &[
     "cam.op.contour",
     "cam.op.drill",
     "cam.op.face",
+    "cam.op.pocket",
     "cam.post",
     "cam.setup.create",
     "cam.tool.create",

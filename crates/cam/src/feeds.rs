@@ -19,6 +19,8 @@ pub(crate) struct OpFeeds {
     pub feed: f64,
     /// Feed straight down, mm/min.
     pub plunge_feed: f64,
+    /// Feed down a ramp, mm/min.
+    pub ramp_feed: f64,
     /// Things worth showing beside the numbers (a capped spindle speed, a thin chip).
     pub notes: Vec<String>,
 }
@@ -28,7 +30,7 @@ pub(crate) struct OpFeeds {
 /// the tool's chip: the feeds scale with it.
 pub(crate) fn op_feeds(tool: &Tool, engagement: Engagement, material: Option<&str>, rpm: Option<f64>, feed: Option<f64>) -> Result<OpFeeds> {
     if let (Some(rpm), Some(feed)) = (rpm, feed) {
-        return Ok(OpFeeds { rpm, feed, plunge_feed: feed * TYPED_PLUNGE_FACTOR, notes: Vec::new() });
+        return Ok(OpFeeds { rpm, feed, plunge_feed: feed * TYPED_PLUNGE_FACTOR, ramp_feed: feed * TYPED_PLUNGE_FACTOR, notes: Vec::new() });
     }
     let sf = tool.speeds_feeds(material.unwrap_or(""), engagement, GENERIC_MAX_RPM).map_err(|e| {
         if material.is_none() { Error::BadValue(format!("{e}: give the setup its stock material, or the operation its rpm and feed")) } else { e }
@@ -42,10 +44,11 @@ pub(crate) fn op_feeds(tool: &Tool, engagement: Engagement, material: Option<&st
     let rpm = rpm.unwrap_or(sf.rpm);
     let cutting = feed.unwrap_or(sf.feed * rpm / sf.rpm);
     let plunge_feed = cutting * sf.plunge_feed / sf.feed;
-    if !(cutting > 0.0 && cutting <= MAX_FEED && plunge_feed > 0.0) {
+    let ramp_feed = cutting * sf.ramp_feed / sf.feed;
+    if !(cutting > 0.0 && cutting <= MAX_FEED && plunge_feed > 0.0 && ramp_feed > 0.0) {
         return Err(Error::BadValue(format!("the feed {cutting} mm/min is out of range")));
     }
-    Ok(OpFeeds { rpm, feed: cutting, plunge_feed, notes })
+    Ok(OpFeeds { rpm, feed: cutting, plunge_feed, ramp_feed, notes })
 }
 
 fn describe(w: &FeedWarning) -> String {

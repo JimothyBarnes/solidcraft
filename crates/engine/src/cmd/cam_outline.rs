@@ -13,14 +13,19 @@ use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 use solidcraft_kernel::{Body, BoolOp, PlanarPiece, PlanarSpline};
 
-/// How near to opposite a face's normal must be to the plane's for the face to be a cut face.
-const FACING: f64 = 1.0 - 1e-9;
+/// How near to along (or opposite) a plane's normal a face's must be for the face to lie in it.
+pub(super) const FACING: f64 = 1.0 - 1e-9;
 /// How much a loop is grown before it is checked to hold what is above it, mm at least and as a
 /// share of the bodies' size: a wall standing on the outline is inside the grown loop by this
 /// much, well clear of the kernel's own tolerances, so the check never meets faces lying on one
 /// another. An overhang smaller than this is not seen.
 const HAIR: f64 = 0.01;
 const HAIR_OF_SIZE: f64 = 1e-4;
+
+/// The hair for bodies of the size `size` (their characteristic size, mm).
+pub(super) fn hair_of(size: f64) -> f64 {
+    HAIR.max(HAIR_OF_SIZE * size)
+}
 /// How near the arcs fitted to a free-form edge stay to it, mm: well inside [`HAIR`], so the
 /// fitted outline grown by a hair still holds the part.
 const FIT: f64 = 0.002;
@@ -28,6 +33,50 @@ const FIT: f64 = 0.002;
 const MAX_SPLINE_POINTS: usize = 10_000;
 /// The most loops an outline may have.
 pub(super) const MAX_OUTLINE_LOOPS: usize = 1_000;
+
+/// What a body has above a plane.
+pub(super) struct Above {
+    /// The part of the body above the plane (the body itself when it stands on the plane).
+    pub kept: Body,
+    /// How far above the plane it reaches.
+    pub reach: f64,
+    /// Its faces that lie in the plane facing down, the section there: each face's rings in the
+    /// plane's coordinates, the outer one first.
+    pub faces: Vec<Vec<Loop2>>,
+}
+
+/// What `body` has above `plane` and its section there; `None` when it does not reach above the
+/// plane. An error for a mesh body, or when an edge of the section can't be read as lines and
+/// arcs.
+pub(super) fn cut_faces(body: &Body, plane: &Plane) -> Result<Option<Above>, String> {
+    if body.is_mesh() {
+        return Err("it is a mesh and has no exact outline: convert it to a solid first".into());
+    }
+    let said = |e: solidcraft_kernel::KernelError| e.to_string();
+    // How far the body reaches below and above the plane, by its exact box.
+    let tol = body.planar_edges_tolerance();
+    let bounds = body.exact_bounds().map_err(said)?;
+    let (n, half) = (plane.normal(), bounds.size() * 0.5);
+    let (middle, spread) = (plane.height(bounds.center()), n.x.abs() * half.x + n.y.abs() * half.y + n.z.abs() * half.z);
+    if middle + spread <= tol {
+        return Ok(None);
+    }
+    // A body standing on the plane is its own upper part, and its faces there are the section:
+    // nothing is cut (a cut along a face it already has is not one to ask for).
+    let kept = if middle - spread >= -tol {
+        body.clone()
+    } else {
+        let Some(kept) = solidcraft_kernel::half_space(body, plane, true).map_err(said)?.0 else { return Ok(None) };
+        kept
+    };
+    let mut faces = Vec::new();
+    for face in 0..kept.face_count() {
+        if kept.planar_face(face).is_some_and(|on| on.normal().dot(n) <= -FACING && plane.height(on.origin).abs() <= tol) {
+            faces.push(face_rings(&kept, face, plane)?);
+        }
+    }
+    Ok(Some(Above { kept, reach: middle + spread, faces }))
+}
 
 /// The outline of `bodies` (each with its name, for errors) in `plane`: the outer loop of every
 /// piece of their sections there, counter-clockwise, in the plane's own coordinates
@@ -40,42 +89,25 @@ pub(super) fn outline(bodies: &[(&str, &Body)], plane: &Plane) -> Result<Vec<Loo
     let mut above: Vec<(&str, Body)> = Vec::new();
     let (mut top, mut size) = (0.0_f64, 0.0_f64);
     for &(name, body) in bodies {
-        if body.is_mesh() {
-            return Err(format!("body '{name}' is a mesh and has no exact outline: convert it to a solid first"));
-        }
-        let said = |e: solidcraft_kernel::KernelError| format!("body '{name}': {e}");
-        // How far the body reaches below and above the plane, by its exact box.
-        let tol = body.planar_edges_tolerance();
-        let bounds = body.exact_bounds().map_err(said)?;
-        let (n, half) = (plane.normal(), bounds.size() * 0.5);
-        let (middle, spread) = (plane.height(bounds.center()), n.x.abs() * half.x + n.y.abs() * half.y + n.z.abs() * half.z);
-        if middle + spread <= tol {
-            continue;
-        }
-        // A body standing on the plane is its own upper part, and its faces there are the
-        // section: nothing is cut (a cut along a face it already has is not one to ask for).
-        let kept = if middle - spread >= -tol {
-            body.clone()
-        } else {
-            let Some(kept) = solidcraft_kernel::half_space(body, plane, true).map_err(said)?.0 else { continue };
-            kept
-        };
-        for outer in section(&kept, plane).map_err(|e| format!("body '{name}': {e}"))? {
+        let Some(part) = cut_faces(body, plane).map_err(|e| format!("body '{name}': {e}"))? else { continue };
+        // The ring round the others is a face's outline; the rest are openings through the part,
+        // which a cut round the outside does not go into.
+        for outer in part.faces.iter().filter_map(|rings| rings.first()) {
             if loops.len() >= MAX_OUTLINE_LOOPS {
                 return Err(format!("the outline has more than {MAX_OUTLINE_LOOPS} loops"));
             }
-            loops.push(outer);
+            loops.push(outer.ccw());
         }
-        top = top.max(middle + spread);
+        top = top.max(part.reach);
         size = size.max(body.size());
-        above.push((name, kept));
+        above.push((name, part.kept));
     }
     if loops.is_empty() {
         return Ok(loops);
     }
     // Nothing above the plane may stick out past the outline: each loop, grown by a hair, as a
     // prism from just below the plane to just above the highest body.
-    let hair = HAIR.max(HAIR_OF_SIZE * size);
+    let hair = hair_of(size);
     let mut grown = Vec::with_capacity(loops.len());
     for l in &loops {
         let region = Region2 { outer: l.clone(), holes: Vec::new() };
@@ -98,54 +130,39 @@ pub(super) fn outline(bodies: &[(&str, &Body)], plane: &Plane) -> Result<Vec<Loo
     Ok(loops)
 }
 
-/// The outer loops of `kept`'s faces that lie in `plane` and face down out of it: its section
-/// there, each loop counter-clockwise in the plane's coordinates.
-fn section(kept: &Body, plane: &Plane) -> Result<Vec<Loop2>, String> {
-    let tol = kept.planar_edges_tolerance();
-    let mut out = Vec::new();
-    for (index, face) in kept.record().faces.iter().enumerate() {
-        let cut = kept.planar_face(index).is_some_and(|on| on.normal().dot(plane.normal()) <= -FACING && plane.height(on.origin).abs() <= tol);
-        if !cut {
-            continue;
-        }
-        let rings: Vec<&[OrientedEdge]> = face
-            .loops
-            .iter()
-            .filter_map(|l| match l {
-                Loop::Edges { edges } => Some(edges.as_slice()),
-                Loop::Vertex { .. } => None,
-            })
-            .collect();
-        // The ring round the others is the face's outline; the rest are openings through the
-        // part, which a cut round the outside does not go into.
-        let mut outer: Option<Loop2> = None;
-        for ring in rings {
-            let edges: Vec<usize> = ring.iter().map(|used| used.edge as usize).collect();
-            let mut segs = Vec::new();
-            for (used, read) in ring.iter().zip(kept.planar_edges(plane, &edges)) {
-                let Some(pieces) = read else { return Err("an edge of its outline could not be read in the cut's plane".into()) };
-                let mut along = Vec::with_capacity(pieces.len());
-                for piece in &pieces {
-                    match piece {
-                        PlanarPiece::Seg(s) => along.extend(fitted(s)?),
-                        PlanarPiece::Spline(s) => along.extend(spline_arcs(s)?),
-                    }
+/// The rings of `body`'s face `face` read in `plane`'s coordinates (the face lies in a plane
+/// parallel to it), as lines and arcs, each the way the face runs it: the ring round the others
+/// first. An error when an edge can't be read there.
+pub(super) fn face_rings(body: &Body, face: usize, plane: &Plane) -> Result<Vec<Loop2>, String> {
+    let Some(record) = body.record().faces.get(face) else { return Err("it has no such face".into()) };
+    let mut rings = Vec::new();
+    for ring in record.loops.iter().filter_map(|l| match l {
+        Loop::Edges { edges } => Some(edges.as_slice()),
+        Loop::Vertex { .. } => None,
+    }) {
+        let edges: Vec<usize> = ring.iter().map(|used: &OrientedEdge| used.edge as usize).collect();
+        let mut segs = Vec::new();
+        for (used, read) in ring.iter().zip(body.planar_edges(plane, &edges)) {
+            let Some(pieces) = read else { return Err("an edge of its outline could not be read in the cut's plane".into()) };
+            let mut along = Vec::with_capacity(pieces.len());
+            for piece in &pieces {
+                match piece {
+                    PlanarPiece::Seg(s) => along.extend(fitted(s)?),
+                    PlanarPiece::Spline(s) => along.extend(spline_arcs(s)?),
                 }
-                if !used.forward {
-                    along = along.iter().rev().map(|s| s.reversed()).collect();
-                }
-                segs.extend(along);
             }
-            let ring = Loop2 { segs };
-            if outer.as_ref().is_none_or(|kept| ring.signed_area().abs() > kept.signed_area().abs()) {
-                outer = Some(ring);
+            if !used.forward {
+                along = along.iter().rev().map(|s| s.reversed()).collect();
             }
+            segs.extend(along);
         }
-        if let Some(outer) = outer {
-            out.push(outer.ccw());
-        }
+        rings.push(Loop2 { segs });
     }
-    Ok(out)
+    let around = rings.iter().enumerate().max_by(|a, b| a.1.signed_area().abs().total_cmp(&b.1.signed_area().abs())).map(|(at, _)| at);
+    if let Some(at) = around {
+        rings.swap(0, at);
+    }
+    Ok(rings)
 }
 
 /// A piece of an edge as the lines and arcs a machine cuts: itself, or a free-form one fitted

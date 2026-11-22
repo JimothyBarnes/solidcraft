@@ -25,17 +25,19 @@ pub const DEFAULT_CONTOUR_CLEAR: f64 = 2.0;
 /// diameter: the cut is as wide as the tool.
 pub const DEFAULT_CONTOUR_STEPDOWN: f64 = 0.5;
 /// The most stock a contour may leave on the wall, and the most it may clear the stock by, mm.
-const MAX_LEAVE: f64 = 1_000.0;
+pub(crate) const MAX_LEAVE: f64 = 1_000.0;
 /// The smallest stepdown, mm.
-const MIN_STEP: f64 = 1e-3;
+pub(crate) const MIN_STEP: f64 = 1e-3;
 /// Heights closer than this are the same height, mm.
-const SAME_HEIGHT: f64 = 1e-6;
+pub(crate) const SAME_HEIGHT: f64 = 1e-6;
 /// The most places tried for the way in to one loop.
 const MAX_WAYS_IN: usize = 64;
 /// An arc whose middle is nearer its chord than this is cut as a line, mm.
 const FLAT_ARC: f64 = 1e-7;
 /// A way in longer than this many tool diameters is worth a note.
 const LONG_WAY_IN: f64 = 2.0;
+/// How much further than asked a boundary is moved when exactly as far can't be verified, mm.
+const HAIR_MORE: f64 = 1e-3;
 
 /// Which way round the cut goes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +113,7 @@ struct Round {
     segs: Vec<Seg2>,
 }
 
-fn bad<T>(message: String) -> Result<T> {
+pub(crate) fn bad<T>(message: String) -> Result<T> {
     Err(Error::BadValue(message))
 }
 
@@ -200,7 +202,7 @@ impl ContourOp {
         let radius = 0.5 * g.diameter;
         let offset = radius + self.leave.unwrap_or(0.0);
         let regions: Vec<Region2> = outline.iter().map(|l| Region2 { outer: l.clone(), holes: Vec::new() }).collect();
-        let moved = offset_regions(&regions, -offset).map_err(|e| Error::BadValue(format!("the part's outline: {e}")))?;
+        let moved = moved_at_least(&regions, -offset).map_err(|e| Error::BadValue(format!("the part's outline: {e}")))?;
         if moved.is_empty() {
             return bad("the outline left nothing to cut round".into());
         }
@@ -231,7 +233,7 @@ impl ContourOp {
                 for (k, seg) in r.segs.iter().enumerate() {
                     // The last one ends where the first began, to the last bit.
                     let to = if k + 1 == r.segs.len() { r.start } else { seg.end() };
-                    cut(&mut moves, seg, from, to, z, f.feed);
+                    cut(&mut moves, seg, from, to, (z, z), f.feed);
                     from = to;
                 }
                 if led {
@@ -276,18 +278,29 @@ impl ContourOp {
     }
 }
 
-fn apart(a: Vec2, b: Vec2) -> f64 {
+/// `regions` with their boundaries moved `distance` mm (as [`offset_regions`]), or a micron
+/// further when exactly that far can't be verified. A gap exactly as wide as the tool is one
+/// the offsetter can call neither open nor shut, and refuses; a micron more shuts it, and keeps
+/// the tool that much further from the wall.
+pub(crate) fn moved_at_least(regions: &[Region2], distance: f64) -> Result<Vec<Region2>> {
+    offset_regions(regions, distance).or_else(|exactly| offset_regions(regions, distance + HAIR_MORE.copysign(distance)).map_err(|_| exactly))
+}
+
+pub(crate) fn apart(a: Vec2, b: Vec2) -> f64 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 
-/// The cutting moves along `seg` at height `z`, from `from` (where the tool is) to `to` (the
-/// segment's end): a line, or an arc in at most half-turns. An arc too flat or too small to be
-/// one on a machine is cut as a line, which is nearer the arc than any machine resolves.
-fn cut(moves: &mut Vec<Move>, seg: &Seg2, from: Vec2, to: Vec2, z: f64, feed: f64) {
-    let at = |p: Vec2| Vec3 { x: p.x, y: p.y, z };
+/// The cutting moves along `seg` from `from` (where the tool is) to `to` (the segment's end),
+/// going from the height `heights.0` at its start to `heights.1` at its end (the same for a level
+/// cut, falling for a ramp): a line, or an arc (a helix when the heights differ) in at most
+/// half-turns. An arc too flat or too small to be one on a machine is cut as a line, which is
+/// nearer the arc than any machine resolves.
+pub(crate) fn cut(moves: &mut Vec<Move>, seg: &Seg2, from: Vec2, to: Vec2, heights: (f64, f64), feed: f64) {
+    let (z0, z1) = heights;
+    let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
     let Seg2::Arc { center, radius, start, sweep } = *seg else {
-        if apart(from, to) > 0.0 {
-            moves.push(Move::Linear { to: at(to), feed });
+        if apart(from, to) > 0.0 || z0 != z1 {
+            moves.push(Move::Linear { to: at(to, z1), feed });
         }
         return;
     };
@@ -297,11 +310,12 @@ fn cut(moves: &mut Vec<Move>, seg: &Seg2, from: Vec2, to: Vec2, z: f64, feed: f6
     for k in 1..=pieces {
         let angle = start + step * f64::from(k);
         let end = if k == pieces { to } else { Vec2 { x: center.x + radius * angle.cos(), y: center.y + radius * angle.sin() } };
+        let z = if k == pieces { z1 } else { z0 + (z1 - z0) * f64::from(k) / f64::from(pieces) };
         if flat {
-            moves.push(Move::Linear { to: at(end), feed });
+            moves.push(Move::Linear { to: at(end, z), feed });
         } else {
             let direction = if sweep > 0.0 { ArcDirection::CounterClockwise } else { ArcDirection::Clockwise };
-            moves.push(Move::Arc { to: at(end), center: at(center), plane: Plane::Xy, direction, feed });
+            moves.push(Move::Arc { to: at(end, z), center: at(center, z), plane: Plane::Xy, direction, feed });
         }
     }
 }
@@ -362,7 +376,7 @@ fn round(path: &Loop2, all: &[Region2], direction: CutDirection, beside: (Vec2, 
 
 /// Whether the straight way from `from` along the unit direction `way` for `far` mm meets no
 /// segment of `regions`' loops past its first [`JOINT_TOLERANCE`] (it starts on one of them).
-fn way_is_clear(from: Vec2, way: Vec2, far: f64, regions: &[Region2]) -> bool {
+pub(crate) fn way_is_clear(from: Vec2, way: Vec2, far: f64, regions: &[Region2]) -> bool {
     let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
     let dot = |a: Vec2, b: Vec2| a.x * b.x + a.y * b.y;
     let on_the_way = |t: f64| t > JOINT_TOLERANCE && t <= far;

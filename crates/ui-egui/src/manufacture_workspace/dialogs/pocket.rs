@@ -1,0 +1,350 @@
+//! Pocket's form (decision 0014 of the CAM work): a closed pocket found on the model, cleared in
+//! rings. It builds the parameters of `cam.op.pocket` (of `cam.op.edit` for a pocket operation
+//! being changed) and shows what they would cut before OK, as the other operations' forms do.
+use serde_json::{Value, json};
+use solidcraft_engine::cmd::{FoundPocket, OperationPreview, ToolChoice, manufacture_pockets, manufacture_preview, manufacture_tools};
+use solidcraft_engine::doc::display_units::{format_length, length_number};
+use solidcraft_ui_text::tr;
+
+use super::contour::DIRECTIONS;
+use super::{
+    Edited, SetupChoice, Worked, kept_operation, labels, minutes_seconds, preview_note, refusal, set_or_clear, setups, speed_and_feed, window_words,
+    word,
+};
+use crate::SolveApp;
+use crate::ui_kit;
+
+/// The stepover and the stepdown a pocket takes when none is typed, as shares of the tool's
+/// diameter (the engine's own defaults, shown in the fields).
+const STEPOVER_SHARE: f64 = 0.4;
+const STEPDOWN_SHARE: f64 = 0.5;
+
+/// Pocket: a closed pocket found on the model.
+pub(crate) struct PocketForm {
+    setups: Vec<SetupChoice>,
+    tools: Vec<ToolChoice>,
+    pub setup: usize,
+    /// The closed pockets the setup picked can cut, as the engine found them.
+    found: Worked<Vec<FoundPocket>>,
+    pub pocket: usize,
+    /// The pocket the tool was last suited to.
+    suited_to: Option<usize>,
+    pub tool: usize,
+    /// Whether the tool was picked by hand: until then it is the widest that passes everywhere
+    /// in the pocket.
+    pub picked_tool: bool,
+    pub direction: usize,
+    /// mm: 40% of the tool's diameter until it is typed.
+    pub stepover: f64,
+    pub typed_stepover: bool,
+    /// mm: half the tool's diameter until it is typed.
+    pub stepdown: f64,
+    pub typed_stepdown: bool,
+    /// Stock left on the walls, mm.
+    pub leave: f64,
+    /// Spindle speed, rev/min, and cutting feed, mm/min: what the tool's cutting data gives for
+    /// the setup's stock material, until typed.
+    pub rpm: f64,
+    pub feed: f64,
+    pub typed_rpm: bool,
+    pub typed_feed: bool,
+    /// The pocketing these parameters would make.
+    pub(super) worked: Worked<OperationPreview>,
+    /// The setup of the list the viewport was last told to draw.
+    drawn_setup: Option<usize>,
+    /// The pocket operation being changed, when the form changes one: its `pocket` parameters as
+    /// kept. Its pockets stay the ones it has.
+    pub(super) editing: Option<Edited>,
+    pub error: Option<String>,
+}
+
+impl PocketForm {
+    /// For the setup the viewport draws, its largest pocket and the widest tool that clears it.
+    pub fn new(app: &SolveApp) -> PocketForm {
+        let (setups, setup) = setups(app);
+        PocketForm {
+            setups,
+            tools: manufacture_tools(&app.session.doc, "pocket"),
+            setup,
+            found: Worked::new(),
+            pocket: 0,
+            suited_to: None,
+            tool: 0,
+            picked_tool: false,
+            direction: 0,
+            stepover: 0.0,
+            typed_stepover: false,
+            stepdown: 0.0,
+            typed_stepdown: false,
+            leave: 0.0,
+            rpm: 0.0,
+            feed: 0.0,
+            typed_rpm: false,
+            typed_feed: false,
+            worked: Worked::new(),
+            drawn_setup: None,
+            editing: None,
+            error: None,
+        }
+    }
+
+    /// The form for changing the pocket operation `id`, on the pockets it has; why not, when the
+    /// design has no such pocket operation.
+    pub fn edit(app: &SolveApp, id: &str) -> Result<PocketForm, String> {
+        let (setup, name, tool, kind, base) = kept_operation(app, id)?;
+        if kind != "pocket" {
+            return Err(format!("operation {id} is not a pocket operation"));
+        }
+        let number = |key: &str| base[key].as_f64();
+        let mut form = PocketForm::new(app);
+        form.setups = vec![setup];
+        form.setup = 0;
+        (form.tool, form.picked_tool) = (form.tools.iter().position(|t| t.number == tool).unwrap_or(0), true);
+        form.direction = DIRECTIONS.iter().position(|d| Some(d.0) == base["direction"].as_str()).unwrap_or(0);
+        (form.stepover, form.typed_stepover) = number("stepover").map_or((0.0, false), |v| (v, true));
+        (form.stepdown, form.typed_stepdown) = number("stepdown").map_or((0.0, false), |v| (v, true));
+        form.leave = number("leave").unwrap_or(0.0);
+        (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
+        (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.editing = Some(Edited { id: json!(id), title: name, base });
+        Ok(form)
+    }
+
+    /// The pockets found, none while they could not be.
+    pub fn pockets(&self) -> &[FoundPocket] {
+        self.found.get().map_or(&[], |(_, found)| found.as_slice())
+    }
+
+    fn picked(&self) -> Option<&FoundPocket> {
+        self.pockets().get(self.pocket)
+    }
+
+    /// What is missing before a pocket can be cut, if anything.
+    pub fn missing(&self) -> Option<&'static str> {
+        if self.setups.is_empty() {
+            Some(tr("manufacture.no_setup"))
+        } else if self.tools.is_empty() {
+            Some(tr("manufacture.no_tool_for_contour"))
+        } else if self.editing.is_none() && self.found.result.as_ref().is_ok_and(Vec::is_empty) {
+            Some(tr("manufacture.pocket_none"))
+        } else {
+            None
+        }
+    }
+
+    /// The tool that suits a pocket: the widest that passes everywhere in it (through its necks,
+    /// round its islands), so the whole pocket is cleared; when none does, the widest that fits
+    /// in it at all; else the narrowest there is.
+    fn fitting_tool(&self, found: &FoundPocket) -> usize {
+        let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
+        let narrower = |than: f64| self.tools.iter().enumerate().filter(move |(_, tool)| tool.diameter < than - 1e-6).max_by(by_width);
+        narrower(found.passes).or(narrower(found.widest)).or(self.tools.iter().enumerate().min_by(by_width)).map_or(0, |(at, _)| at)
+    }
+
+    /// Whether the tool picked is too wide for the pocket picked.
+    pub fn tool_too_wide(&self) -> bool {
+        self.editing.is_none() && self.picked().zip(self.tools.get(self.tool)).is_some_and(|(pocket, tool)| tool.diameter >= pocket.widest - 1e-6)
+    }
+
+    /// The `cam.op.pocket` parameters: the point on the floor of the pocket picked, and what was
+    /// typed. What was not typed is left to the command, so it keeps following the tool. A pocket
+    /// operation being changed keeps its own pockets and the rest as kept.
+    pub fn params(&self) -> Value {
+        let mut pocket = match (&self.editing, self.picked()) {
+            (Some(edited), _) => edited.base.clone(),
+            (None, Some(found)) => json!({"pockets": [found.at]}),
+            (None, None) => json!({"pockets": []}),
+        };
+        pocket["direction"] = json!(word(&DIRECTIONS, self.direction));
+        set_or_clear(&mut pocket, "stepover", self.typed_stepover.then_some(self.stepover));
+        set_or_clear(&mut pocket, "stepdown", self.typed_stepdown.then_some(self.stepdown));
+        set_or_clear(&mut pocket, "leave", (self.leave > 0.0).then_some(self.leave));
+        set_or_clear(&mut pocket, "rpm", self.typed_rpm.then_some(self.rpm));
+        set_or_clear(&mut pocket, "feed", self.typed_feed.then_some(self.feed));
+        json!({
+            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+            "pocket": pocket,
+        })
+    }
+
+    /// Finds the setup's pockets and works the pocketing out, when the design or a field
+    /// changed, and shows what was not typed as the pocket and the tool give it.
+    fn refresh(&mut self, app: &SolveApp) {
+        // An operation being changed keeps its pockets: nothing is looked for or suited to them.
+        if self.editing.is_none() {
+            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            if self.found.refresh(app, &json!({"id": setup}), || manufacture_pockets(&app.session, &setup)) {
+                self.suited_to = None;
+            }
+            self.pocket = self.pocket.min(self.pockets().len().saturating_sub(1));
+            if self.suited_to != Some(self.pocket)
+                && let Some(suits) = self.picked().map(|found| self.fitting_tool(found))
+            {
+                if !self.picked_tool {
+                    self.tool = suits;
+                }
+                self.suited_to = Some(self.pocket);
+            }
+        }
+        let diameter = self.tools.get(self.tool).map(|t| t.diameter);
+        if !self.typed_stepover {
+            self.stepover = diameter.map_or(self.stepover, |d| STEPOVER_SHARE * d);
+        }
+        if !self.typed_stepdown {
+            self.stepdown = diameter.map_or(self.stepdown, |d| STEPDOWN_SHARE * d);
+        }
+        self.leave = self.leave.max(0.0);
+        let params = self.params();
+        if !self.worked.refresh(app, &params, || manufacture_preview(&app.session, "cam.op.pocket", &params)) {
+            return;
+        }
+        self.error = None;
+        if let Ok(preview) = &self.worked.result {
+            if !self.typed_rpm {
+                self.rpm = preview.rpm.round();
+            }
+            if !self.typed_feed {
+                self.feed = preview.feed;
+            }
+        }
+    }
+
+    /// A pocket found, as the form offers it: its size across and its depth below the part's
+    /// top, and its islands when it has any ("70.00 × 44.00 × 8.00 mm, islands: 1").
+    fn label(found: &FoundPocket, units: &str, decimals: u8) -> String {
+        let (width, height, depth) = (
+            length_number(found.size[0], units, decimals),
+            length_number(found.size[1], units, decimals),
+            format_length(found.depth, units, decimals),
+        );
+        let islands = found.islands.to_string();
+        let key = if found.islands > 0 { "manufacture.pocket_label_islands" } else { "manufacture.pocket_label" };
+        solidcraft_ui_text::format(key, &[("width", &width), ("height", &height), ("depth", &depth), ("islands", &islands)])
+    }
+
+    /// The levels and the rings the first pocket would be cut in, as the form says them.
+    fn worked_out(&self, units: &str, decimals: u8) -> Option<(String, String)> {
+        let (_, preview) = self.worked.get()?;
+        let levels = preview.numbers.get("levels")?.as_array()?.first()?.as_array()?;
+        let (top, floor) = (preview.numbers.get("top")?.as_f64()?, levels.last()?.as_f64()?);
+        let each = format_length((top - floor) / levels.len().max(1) as f64, units, decimals);
+        let levels = solidcraft_ui_text::format("manufacture.contour_levels_value", &[("count", &levels.len().to_string()), ("depth", &each)]);
+        let rings = preview.numbers.get("rings")?.as_array()?.first()?.as_u64()?.to_string();
+        Some((levels, rings))
+    }
+
+    /// Runs the command: the form again, with the reason, when the pocketing can't be worked out
+    /// or the command refuses.
+    pub fn accept(mut self, app: &mut SolveApp) -> Option<PocketForm> {
+        self.refresh(app);
+        if self.missing().is_some() || self.worked.result.is_err() {
+            return Some(self);
+        }
+        let mut params = self.params();
+        let made = match &self.editing {
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "pocket": params["pocket"].take()})),
+            None => app.run("cam.op.pocket", params),
+        };
+        match made {
+            Ok(_) => None,
+            Err(why) => {
+                self.error = Some(why);
+                Some(self)
+            }
+        }
+    }
+
+    pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<PocketForm> {
+        self.refresh(app);
+        let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
+        let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
+        let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
+        let pocket_labels: Vec<String> = self.pockets().iter().map(|found| Self::label(found, units, decimals)).collect();
+        let pocket_labels: Vec<&str> = pocket_labels.iter().map(String::as_str).collect();
+        let kept = self.editing.as_ref().map(|edited| {
+            let count = edited.base["pockets"].as_array().map_or(0, Vec::len).to_string();
+            solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count)])
+        });
+        let directions = labels(&DIRECTIONS);
+        let missing = self.missing();
+        let ready = missing.is_none() && self.worked.result.is_ok();
+        let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
+        let worked_out = self.worked_out(units, decimals);
+        let too_wide = self.tool_too_wide();
+        // The setup picked is the one the viewport draws, so the pocket is seen on its own stock.
+        if self.drawn_setup != Some(self.setup)
+            && let Some(picked) = self.setups.get(self.setup)
+        {
+            app.manufacture_workspace.active_setup = Some(picked.id.clone());
+            self.drawn_setup = Some(self.setup);
+        }
+        let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
+        let (title, ok) = window_words(&self.editing, "cmd.cam_op_pocket");
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_pocket"), "edit", &title)
+            .placed(pivot, at)
+            .fields()
+            .actions(ok, tr("ui.cancel"), None)
+            .show(ctx, ready, |ui| {
+                // An operation stays in its setup: the row is a choice only for a new one.
+                match (&self.editing, setup_labels.first()) {
+                    (Some(_), Some(label)) => {
+                        ui_kit::value_row(ui, tr("manufacture.field_setup"), label);
+                    }
+                    _ if !setup_labels.is_empty() => {
+                        ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_pocket_setup", &mut self.setup, &setup_labels);
+                    }
+                    _ => {}
+                }
+                if let Some(missing) = missing {
+                    ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_pocket_missing"));
+                    return;
+                }
+                match &kept {
+                    Some(kept) => {
+                        ui_kit::value_row(ui, tr("manufacture.pocket_choice"), kept);
+                    }
+                    None => {
+                        ui_kit::choice_row(ui, tr("manufacture.pocket_choice"), "manufacture_pocket_choice", &mut self.pocket, &pocket_labels);
+                    }
+                }
+                if ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_pocket_tool", &mut self.tool, &tool_labels).changed() {
+                    self.picked_tool = true;
+                }
+                if too_wide {
+                    ui_kit::text(ui, tr("manufacture.pocket_tool_wide"), ui_kit::Text::Note("manufacture_pocket_tool_wide"));
+                }
+                ui_kit::choice_row(ui, tr("manufacture.contour_direction"), "manufacture_pocket_direction", &mut self.direction, &directions);
+                if ui_kit::row(ui, tr("manufacture.face_stepover"), |ui| ui_kit::length_field(ui, &mut self.stepover, units, decimals)).changed() {
+                    self.typed_stepover = true;
+                }
+                if ui_kit::row(ui, tr("manufacture.face_stepdown"), |ui| ui_kit::length_field(ui, &mut self.stepdown, units, decimals)).changed() {
+                    self.typed_stepdown = true;
+                }
+                ui_kit::row(ui, tr("manufacture.contour_leave"), |ui| ui_kit::length_field(ui, &mut self.leave, units, decimals));
+                let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
+                self.typed_rpm |= rpm;
+                self.typed_feed |= feed;
+                if let Some((levels, rings)) = &worked_out {
+                    ui_kit::value_row(ui, tr("manufacture.contour_levels"), levels);
+                    ui_kit::value_row(ui, tr("manufacture.pocket_rings"), rings);
+                }
+                if let Some(time) = &time {
+                    ui_kit::value_row(ui, tr("manufacture.face_time"), time);
+                }
+                for note in self.worked.get().map(|(_, preview)| preview.notes.as_slice()).unwrap_or_default() {
+                    ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_pocket_engine_note"));
+                }
+                ui_kit::text(ui, tr("manufacture.pocket_note"), ui_kit::Text::Note("manufacture_pocket_note"));
+                if ready {
+                    ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_pocket_preview_note"));
+                }
+                refusal(ui, self.error.as_deref().or(self.found.trouble()).or(self.worked.trouble()));
+            });
+        match action {
+            ui_kit::Action::Ok => self.accept(app),
+            ui_kit::Action::None if !closed => Some(self),
+            _ => None,
+        }
+    }
+}

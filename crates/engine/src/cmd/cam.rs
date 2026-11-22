@@ -7,19 +7,20 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
     BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ContourOp, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT,
-    ManufactureData, Operation, OperationKind, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation,
-    WcsOrigin,
+    ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath,
+    Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
-use solidcraft_geom::{Loop2Geom as _, Seg2Geom as _};
+use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
 
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
     CamData, CamDataParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams, CamOpManualParams,
-    CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams,
-    CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupOutline, CamSetupOutlineParams, CamSetupWritten,
-    CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, HoleBottom, HoleGroup, OutlineLoop,
+    CamOpPocketParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams,
+    CamSetupEditParams, CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupOutline, CamSetupOutlineParams,
+    CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
+    FoundPocket, HoleBottom, HoleGroup, OutlineLoop,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -55,6 +56,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup.outline", "Find Outline", crate::checked!("cam.setup.outline", setup_outline)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSetupOutlineParams>::new()).output(output_schema_for::<CamSetupOutline>)
         .params("id: the setup, z?: a height in its WCS (default the model's bottom) → z, loops: [{segments, length, area, min, max}] in the setup's WCS (mm): the outer loop of every piece of its bodies' section at that height, lines and arcs from the bodies' exact faces, counter-clockwise; refused when a body is wider above that height than at it"),
+    CommandSpec::new("cam.setup.pockets", "Find Pockets", crate::checked!("cam.setup.pockets", setup_pockets)).icon("inspect").noundo().read_only()
+        .contract(&TypedContract::<CamSetupPocketsParams>::new()).output(output_schema_for::<CamSetupPockets>)
+        .params("id: the setup → pockets: [{at: [x, y], floor, depth, widest, passes, size: [x, y], islands, area}] in the setup's WCS (mm): the closed pockets of its bodies, from their exact faces, the largest first: a flat floor facing up, walls all round and nothing seen over it; `at` is a point on the floor, which is what cam.op.pocket names a pocket by, `widest` how far across the widest circle that fits is, and `passes` how wide a tool can be and still pass everywhere in it"),
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
@@ -67,12 +71,15 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.contour", "Contour", crate::checked!("cam.op.contour", op_contour)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock"),
+    CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("edit").doc_only()
+        .contract(&TypedContract::<CamOpPocketParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring"),
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
     CommandSpec::new("cam.op.edit", "Edit Operation", crate::checked!("cam.op.edit", op_edit)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpEditParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("id, then any of name, tool, suppressed, and the operation's own parameters whole: drill (a drill operation), face (a facing), contour (a contour) or toolpath (a hand-made one) → replaces those; parameters of another kind of operation are refused"),
+        .params("id, then any of name, tool, suppressed, and the operation's own parameters whole: drill (a drill operation), face (a facing), contour (a contour), pocket (a pocket operation) or toolpath (a hand-made one) → replaces those; parameters of another kind of operation are refused"),
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
@@ -497,6 +504,135 @@ fn setup_outline(s: &mut Session, p: &Value) -> Result<Value> {
     reply(CMD, CamSetupOutline { id: p.id, z, loops })
 }
 
+/// The pockets read lately ([`pockets_of`]), each list under a number made of its bodies'
+/// geometry, the plane and the points asked for. Only pockets that were read are kept.
+static POCKETS: std::sync::Mutex<Vec<(u64, Vec<(solidcore_record::Vec2, super::cam_pockets::Pocket)>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Pockets of the setup's bodies (decision 0014 of the CAM work), in its WCS, each with the point
+/// on its floor it was found at: the pockets at `points` in their order, or every closed pocket
+/// when `None`.
+fn pockets_of(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    points: Option<&[[f64; 2]]>,
+) -> std::result::Result<Vec<(solidcore_record::Vec2, super::cam_pockets::Pocket)>, String> {
+    // The WCS itself: floors are heights above its XY plane, regions are in its X and Y.
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    with_bodies(s, cmd, setup, |bodies| {
+        let key = bodies.iter().map(|b| b.geometry_key()).collect::<Option<Vec<u64>>>().map(|geometry| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            geometry.hash(&mut h);
+            bodies.iter().for_each(|b| b.name.hash(&mut h));
+            [plane.origin, plane.x, plane.y].iter().flat_map(|v| [v.x, v.y, v.z]).for_each(|v| v.to_bits().hash(&mut h));
+            p.model.max.z.to_bits().hash(&mut h);
+            points.map(|points| points.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u64>>()).hash(&mut h);
+            h.finish()
+        });
+        let known = key.and_then(|k| POCKETS.lock().ok().and_then(|kept| kept.iter().find(|(at, _)| *at == k).map(|(_, found)| found.clone())));
+        if let Some(found) = known {
+            return Ok(found);
+        }
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
+        let found = match points {
+            None => finder.pockets().map_err(|e| bad(cmd, e))?,
+            Some(points) => {
+                let mut found = Vec::with_capacity(points.len());
+                for at in points {
+                    let at = solidcore_record::Vec2 { x: at[0], y: at[1] };
+                    found.push((at, finder.pocket_at(at).map_err(|e| bad(cmd, e))?));
+                }
+                found
+            }
+        };
+        if let Some(key) = key
+            && let Ok(mut kept) = POCKETS.lock()
+        {
+            kept.retain(|(at, _)| *at != key);
+            kept.insert(0, (key, found.clone()));
+            kept.truncate(OUTLINES_KEPT);
+        }
+        Ok(found)
+    })
+    .map_err(said)
+}
+
+/// About how wide a tool can be and still pass everywhere in `region`, whose widest circle is
+/// `widest` across: twice how far its walls can move in before it comes apart or an island's
+/// room meets a wall's or another island's. Looked for from the walls inwards (a part that
+/// comes apart and then vanishes would look whole again), in sixteen steps and then six halvings.
+fn passes_everywhere(region: &solidcore_record::Region2, widest: f64) -> f64 {
+    let whole = |moved: f64| {
+        solidcraft_cam::offset_region(region, moved)
+            .is_ok_and(|left| left.len() == 1 && left.first().is_some_and(|one| one.holes.len() == region.holes.len()))
+    };
+    let (mut passes, mut fails) = (0.0, None);
+    for step in 1..=16 {
+        // Just short of the widest circle itself, where nothing is left to be whole.
+        let moved = 0.5 * widest * (f64::from(step) / 16.0).min(0.999);
+        if whole(moved) {
+            passes = moved;
+        } else {
+            fails = Some(moved);
+            break;
+        }
+    }
+    let Some(mut fails) = fails else { return widest };
+    for _ in 0..6 {
+        let between = 0.5 * (passes + fails);
+        if whole(between) {
+            passes = between;
+        } else {
+            fails = between;
+        }
+    }
+    (2.0 * passes * 100.0).floor() / 100.0
+}
+
+/// The closed pockets the setup `setup` can cut, as a form or a script reads them.
+fn found_pockets(s: &Session, cmd: &str, setup: &Setup) -> std::result::Result<Vec<FoundPocket>, String> {
+    let (model, _) = model_box(s, cmd, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let round = |v: f64| (v * 1e9).round() / 1e9;
+    let mut out = Vec::new();
+    for (at, pocket) in pockets_of(s, cmd, setup, &p, None)? {
+        let around = pocket.region.outer.segs.iter().fold(solidcraft_geom::Aabb2::EMPTY, |b, seg| b.union(&seg.bounds()));
+        let widest = (2.0 * pocket.region.inradius(1e-4) * 100.0).round() / 100.0;
+        out.push(FoundPocket {
+            at: [round(at.x), round(at.y)],
+            floor: round(pocket.floor),
+            depth: round(p.model.max.z - pocket.floor),
+            widest,
+            passes: passes_everywhere(&pocket.region, widest),
+            size: [round(around.max.x - around.min.x), round(around.max.y - around.min.y)],
+            islands: pocket.region.holes.len(),
+            area: pocket.region.area(),
+        });
+    }
+    Ok(out)
+}
+
+fn setup_pockets(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.pockets";
+    let p: CamSetupPocketsParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let setup = d.setups.iter().find(|x| x.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.id)))?;
+    let pockets = found_pockets(s, CMD, setup).map_err(|e| bad(CMD, e))?;
+    reply(CMD, CamSetupPockets { id: p.id, pockets })
+}
+
+/// The closed pockets the setup `id` can cut, for a form to offer; why not, when the setup can't
+/// be placed or a body can't be read. It reads the design and changes nothing.
+pub fn manufacture_pockets(s: &Session, id: &str) -> std::result::Result<Vec<FoundPocket>, String> {
+    const CMD: &str = "cam.setup.pockets";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    found_pockets(s, CMD, setup)
+}
+
 fn setup_measure(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "cam.setup.measure";
     let p: CamSetupMeasureParams = parse(CMD, "parameters", p)?;
@@ -541,8 +677,12 @@ fn op_contour(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.contour", "Contour", p)
 }
 
-/// What the parameters of `cmd` (`cam.op.drill`, `cam.op.face` or `cam.op.contour`) describe: the
-/// setup's id, the name given, the tool's number and the operation.
+fn op_pocket(s: &mut Session, p: &Value) -> Result<Value> {
+    add_operation(s, "cam.op.pocket", "Pocket", p)
+}
+
+/// What the parameters of `cmd` (`cam.op.drill`, `cam.op.face`, `cam.op.contour` or `cam.op.pocket`)
+/// describe: the setup's id, the name given, the tool's number and the operation.
 fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, OperationKind)> {
     match cmd {
         "cam.op.drill" => {
@@ -566,7 +706,12 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             };
             Ok((p.setup, p.name, p.tool, OperationKind::Contour { contour }))
         }
-        other => Err(bad(other, "not a command that adds a drill, face or contour operation")),
+        "cam.op.pocket" => {
+            let p: CamOpPocketParams = parse(cmd, "parameters", p)?;
+            let pocket: PocketOp = parse(cmd, "pocket", &p.pocket)?;
+            Ok((p.setup, p.name, p.tool, OperationKind::Pocket { pocket }))
+        }
+        other => Err(bad(other, "not a command that adds a drill, face, contour or pocket operation")),
     }
 }
 
@@ -663,6 +808,20 @@ fn work(
             });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
         }
+        OperationKind::Pocket { pocket } => {
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            // Its numbers and tool first: what is wrong with them is said before the model is cut.
+            pocket.validate(tool).map_err(failed)?;
+            let found = pockets_of(s, cmd, setup, &placement, Some(&pocket.pockets)).map_err(|e| bad(cmd, of(op, e)))?;
+            let shapes: Vec<PocketShape> = found.into_iter().map(|(_, found)| PocketShape { floor: found.floor, region: found.region }).collect();
+            let done = pocket.toolpath(start, tool, &placement, material, &shapes).map_err(failed)?;
+            let numbers = serde_json::json!({
+                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "ramp_feed": done.ramp_feed, "top": done.top,
+                "levels": done.levels, "rings": done.rings.iter().map(Vec::len).collect::<Vec<_>>(), "stepdown": done.stepdown,
+                "stepover": done.stepover, "offset": done.offset
+            });
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+        }
     }
 }
 
@@ -705,7 +864,7 @@ pub struct ToolChoice {
     pub diameter: f64,
 }
 
-/// The design's tools that can do `operation` (`face`, `drill` or `contour`), for a form to offer; every
+/// The design's tools that can do `operation` (`face`, `drill`, `contour` or `pocket`), for a form to offer; every
 /// tool for any other word. The operations' own checks decide, so a form never offers a tool its
 /// command would refuse.
 pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec<ToolChoice> {
@@ -726,6 +885,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
         "face" => FaceOp::default().validate(tool).is_ok(),
         "drill" => drill.validate(tool).is_ok(),
         "contour" => ContourOp::default().validate(tool).is_ok(),
+        "pocket" => PocketOp { pockets: vec![[0.0, 0.0]], ..PocketOp::default() }.validate(tool).is_ok(),
         _ => true,
     };
     data.tools.iter().filter(|t| can(t)).map(|t| ToolChoice { number: t.number, name: t.name.clone(), diameter: t.geometry.diameter }).collect()
@@ -814,7 +974,7 @@ pub struct OperationPreview {
     pub notes: Vec<String>,
 }
 
-/// What `command` (`cam.op.face`, `cam.op.drill` or `cam.op.contour`) would make from `params`, without making it:
+/// What `command` (`cam.op.face`, `cam.op.drill`, `cam.op.contour` or `cam.op.pocket`) would make from `params`, without making it:
 /// for a form to draw the toolpath and show the speed and feed it works out before OK, or to say
 /// why there would be no toolpath. It reads the design and changes nothing.
 pub fn manufacture_preview(s: &Session, command: &str, params: &Value) -> std::result::Result<OperationPreview, String> {
@@ -921,8 +1081,9 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Drill { .. } => ("a drill operation", "drill"),
         OperationKind::Face { .. } => ("a facing", "face"),
         OperationKind::Contour { .. } => ("a contour", "contour"),
+        OperationKind::Pocket { .. } => ("a pocket operation", "pocket"),
     };
-    for (given, name) in [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face"), (&p.contour, "contour")] {
+    for (given, name) in [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face"), (&p.contour, "contour"), (&p.pocket, "pocket")] {
         if given.is_some() && name != takes {
             return Err(bad(CMD, format!("operation {} is {kind}: it takes `{takes}`, not `{name}`", op.id)));
         }
@@ -946,6 +1107,11 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Contour { contour } => {
             if let Some(v) = &p.contour {
                 *contour = parse(CMD, "contour", v)?;
+            }
+        }
+        OperationKind::Pocket { pocket } => {
+            if let Some(v) = &p.pocket {
+                *pocket = parse(CMD, "pocket", v)?;
             }
         }
     }
