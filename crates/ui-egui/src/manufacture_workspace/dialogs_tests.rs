@@ -42,6 +42,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Tool(_)) => "tool",
         Some(Dialog::Setup(_)) => "setup",
         Some(Dialog::Face(_)) => "face",
+        Some(Dialog::Drill(_)) => "drill",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
     }
@@ -65,6 +66,13 @@ fn face_form(h: &mut Harness) -> &mut FaceForm {
     match h.app.manufacture_workspace.dialog.as_mut() {
         Some(Dialog::Face(form)) => form,
         _ => panic!("Face is not open"),
+    }
+}
+
+fn drill_form(h: &mut Harness) -> &mut DrillForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Drill(form)) => form,
+        _ => panic!("Drill is not open"),
     }
 }
 
@@ -445,12 +453,19 @@ fn post_process_names_the_file_and_comes_back_when_nothing_is_saved() {
 #[test]
 fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
     let mut h = harness();
-    for (id, panel) in [("cam.setup.create", "SETUP"), ("cam.op.face", "MILLING"), ("cam.post", "ACTIONS"), ("cam.tool.create", "MANAGE")] {
+    let placed = [
+        ("cam.setup.create", "SETUP"),
+        ("cam.op.face", "MILLING"),
+        ("cam.op.drill", "DRILLING"),
+        ("cam.post", "ACTIONS"),
+        ("cam.tool.create", "MANAGE"),
+    ];
+    for (id, panel) in placed {
         assert_eq!(crate::workspace::destination(solidcraft_engine::find_command(id).unwrap()), Some(("MANUFACTURE", panel)), "{id}");
         assert!(crate::scenario::handle_at(&format!("toolbar:{id}")).is_some(), "{id} is on the ribbon");
     }
     // Other commands have no form here, and run as before.
-    assert!(!start(&mut h.app, "cam.op.drill") && !start(&mut h.app, "solid.box"));
+    assert!(!start(&mut h.app, "cam.op.manual") && !start(&mut h.app, "solid.box"));
     assert_eq!(open(&h), "none");
     // Another command's own dialog takes the form's place: the two are never open together.
     ribbon(&mut h, "cam.tool.create");
@@ -480,4 +495,177 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
     assert!(!crate::manufacture_workspace::active(&h.app));
     assert_eq!(open(&h), "none");
     assert_eq!(h.app.status.as_ref().map(|s| (s.0.as_str(), s.2)), Some((tr("manufacture.error_finish_operation"), true)));
+}
+
+/// The 60 x 40 x 20 block with the holes of the engine's hole tests: four of 6 through it, the
+/// first under a counterbore of 12 that is 4 deep, and two of 8 that are 10 deep with flat floors.
+/// Under the vise setup the block's top is at Z -1 and the origin is over its middle.
+fn holed(h: &mut Harness) {
+    block(h);
+    let mut cut = |diameter: f64, base: [f64; 3], height: f64| {
+        h.app.run("solid.cylinder", json!({"diameter": diameter, "height": height, "base": base, "operation": "cut"})).unwrap();
+    };
+    for (x, y) in [(10.0, 10.0), (50.0, 10.0), (50.0, 30.0), (10.0, 30.0)] {
+        cut(6.0, [x, y, -5.0], 30.0);
+    }
+    for y in [10.0, 30.0] {
+        cut(8.0, [30.0, y, 10.0], 15.0);
+    }
+    cut(12.0, [10.0, 10.0, 16.0], 10.0);
+}
+
+/// A tool of `kind` and `diameter` with 40 mm of flute and Add Tool's own cutting data for
+/// aluminium (200 m/min, 0.05 mm a tooth), at the next free number.
+fn add_tool(h: &mut Harness, kind: &str, diameter: f64) {
+    let mut form = ToolForm::new(&h.app);
+    form.kind = KINDS.iter().position(|k| k.0 == kind).unwrap();
+    form.diameter = diameter;
+    form.flutes = form.usual_flutes();
+    (form.flute_length, form.overall_length) = (40.0, 90.0);
+    form.material = "aluminium".into();
+    assert!(form.accept(&mut h.app).is_none(), "{:?}", h.app.status);
+}
+
+#[test]
+fn drill_offers_the_holes_found_on_the_model_and_suits_the_tool_and_depth_to_them() {
+    let mut h = harness();
+    holed(&mut h);
+    // T1 a 6 mm drill, T2 a 10 mm drill, T3 an 8 mm end mill.
+    add_tool(&mut h, "drill", 6.0);
+    add_tool(&mut h, "drill", 10.0);
+    add_tool(&mut h, "flat_end_mill", 8.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.drill");
+    // The largest group first: the three holes of 6 that go through 20 mm of part. The widest
+    // tool that is no wider is the 6 mm drill; the depth is the part's 20 and 1 more, to the
+    // drill's full diameter.
+    let form = drill_form(&mut h);
+    assert_eq!((form.groups().len(), form.group, form.tool, form.depth), (4, 0, 0, 21.0));
+    let three = json!([[20.0, -10.0], [-20.0, 10.0], [20.0, 10.0]]);
+    let plain = json!({"type": "drill", "dwell": 0.0});
+    assert_eq!(
+        form.params(),
+        json!({"setup": "setup-1", "tool": 1, "drill": {"holes": three, "top": -1.0, "depth": 21.0, "depth_to": "full_diameter", "cycle": plain}})
+    );
+    // 200 m/min on 6 mm asks 10610 rev/min: capped at the generic 10 000, and the form says so.
+    // 0.05 mm on two lips is 1000 mm/min there.
+    assert!(form.rpm == 10_000.0 && (form.feed - 1000.0).abs() < 1e-9, "{} rev/min, {} mm/min: {:?}", form.rpm, form.feed, form.worked.trouble());
+    let capped = form.worked.get().map(|(_, preview)| preview.notes.join(" ")).unwrap_or_default();
+    assert!(capped.contains("capped at 10000 rpm"), "{capped:?}");
+    assert!(h.widget(&capped).is_some());
+    assert!(h.widget("3 × Ø6.00 × 20.00 mm, through").is_some());
+    assert!(h.widget(&solidcraft_ui_text::format("manufacture.drill_depth_through", &[("past", "1.00 mm")])).is_some());
+    let drawn = scene::counts(&h.app);
+    assert!(drawn.2 > 0 && (drawn.0, drawn.1) == (12, 15), "the drilling is drawn before it exists: {drawn:?}");
+
+    // The two flat-floored holes of 8: the end mill of 8 suits them, and the depth is their 10 to
+    // the tool's tip, so nothing cuts below the floor.
+    drill_form(&mut h).group = 1;
+    h.frames(3);
+    let form = drill_form(&mut h);
+    assert_eq!((form.tool, form.depth, form.params()["tool"].as_u64(), form.params()["drill"]["depth_to"].as_str()), (2, 10.0, Some(3), Some("tip")));
+    assert_eq!(form.params()["drill"]["holes"], json!([[0.0, -10.0], [0.0, 10.0]]));
+    assert!(h.widget("2 × Ø8.00 × 10.00 mm, flat floor").is_some() && h.widget(tr("manufacture.drill_depth_flat")).is_some());
+    // The counterbore of 12 is 4 deep with a floor (the step to the hole of 6): the 10 mm drill is
+    // the widest that fits, to its tip.
+    drill_form(&mut h).group = 3;
+    h.frames(3);
+    let form = drill_form(&mut h);
+    assert_eq!(
+        (form.tool, form.depth, form.params()["drill"]["top"].as_f64(), form.params()["drill"]["depth_to"].as_str()),
+        (1, 4.0, Some(-1.0), Some("tip"))
+    );
+    // A tool picked by hand stays picked, and one wider than the holes is pointed out.
+    (form.tool, form.picked_tool) = (1, true);
+    form.group = 0;
+    h.frames(3);
+    assert_eq!(drill_form(&mut h).tool, 1);
+    assert!(h.widget(tr("manufacture.drill_tool_wider")).is_some());
+    // A depth typed is kept for these holes and is not carried to others.
+    let form = drill_form(&mut h);
+    (form.tool, form.picked_tool) = (0, false);
+    (form.depth, form.typed_depth) = (12.5, true);
+    h.frames(3);
+    assert_eq!(drill_form(&mut h).params()["drill"]["depth"], json!(12.5));
+    assert!(h.widget(tr("manufacture.drill_tool_wider")).is_none());
+    drill_form(&mut h).group = 2;
+    h.frames(3);
+    // The hole under the counterbore: from the counterbore's floor (Z -5), 16 of part and 1 more.
+    let form = drill_form(&mut h);
+    assert_eq!((form.depth, form.typed_depth, form.params()["drill"]["top"].as_f64()), (17.0, false, Some(-5.0)));
+    // Pecking takes the tool's diameter a peck until another is typed.
+    form.group = 0;
+    form.cycle = 1;
+    h.frames(3);
+    let form = drill_form(&mut h);
+    assert_eq!(form.params()["drill"]["cycle"], json!({"type": "peck", "peck": 6.0}));
+    (form.peck, form.typed_peck) = (2.0, true);
+    form.cycle = 2;
+    h.frames(3);
+    assert_eq!(drill_form(&mut h).params()["drill"]["cycle"], json!({"type": "chip_break", "peck": 2.0}));
+    drill_form(&mut h).cycle = 0;
+    assert_eq!(data(&mut h)["setups"][0]["operations"], json!([]));
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(scene::counts(&h.app), drawn, "the operation's own toolpath, where the preview was");
+
+    // The program: one canned cycle over the three holes, nearest next. A 118 degree point on
+    // 6 mm is 3 / tan 59 = 1.803 long, so the tip goes to -1 - 21 - 1.803; R is the setup's 5 mm
+    // above the stock.
+    let posted = h.app.run("cam.post", json!({"setup": "setup-1", "post": "haas_mill"})).unwrap();
+    let text = posted["text"].as_str().unwrap();
+    assert!(text.contains("\nT1 M6\nS10000 M3\n"), "{text}");
+    assert!(text.contains("G99 G81 X20. Y-10. Z-23.803 R5. F1000.\nX20. Y10.\nX-20. Y10.\nG80\n"), "{text}");
+}
+
+#[test]
+fn drill_says_what_is_missing_and_when_there_is_nothing_to_drill() {
+    let mut h = harness();
+    block(&mut h);
+    ribbon(&mut h, "cam.op.drill");
+    assert!(h.widget(tr("manufacture.no_setup")).is_some());
+    h.app.run("cam.setup.create", json!({})).unwrap();
+    ribbon(&mut h, "cam.op.drill");
+    assert!(h.widget(tr("manufacture.no_tool_for_drill")).is_some());
+    // A drill, but a block with no holes: nothing to pick, and Create does nothing.
+    add_tool(&mut h, "drill", 6.0);
+    ribbon(&mut h, "cam.op.drill");
+    assert!(drill_form(&mut h).groups().is_empty() && h.widget(tr("manufacture.drill_no_holes")).is_some());
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("drill", json!([])));
+    // A hole cut while the form is open is found: the design changed under it.
+    h.app.run("solid.cylinder", json!({"diameter": 6, "height": 30, "base": [30, 20, -5], "operation": "cut"})).unwrap();
+    h.frames(3);
+    let form = drill_form(&mut h);
+    assert_eq!((form.groups().len(), form.params()["drill"]["holes"].clone()), (1, json!([[0.0, 0.0]])));
+    // A setup that can't be placed says why, in the engine's words.
+    h.app.run("cam.setup.edit", json!({"id": "setup-1", "model_bodies": ["Gone"]})).unwrap();
+    h.frames(3);
+    let why = drill_form(&mut h).found.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("'Gone' is not in the design"), "{why:?}");
+    assert!(h.widget(&why).is_some());
+    // A hole deeper than the drill's flutes is refused before it is made: Add Tool's own drill
+    // has 22 mm of flute, and 28 mm to the full diameter needs the point's 1.8 mm more.
+    h.app.run("cam.setup.edit", json!({"id": "setup-1", "model_bodies": []})).unwrap();
+    add_tool(&mut h, "drill", 5.0);
+    let short = ToolForm::new(&h.app);
+    let number = short.number;
+    let mut short = short;
+    short.kind = 4;
+    short.diameter = 6.0;
+    assert!(short.accept(&mut h.app).is_none());
+    ribbon(&mut h, "cam.op.drill");
+    let form = drill_form(&mut h);
+    form.tool = form.tools.iter().position(|tool| tool.number == number).unwrap();
+    form.picked_tool = true;
+    (form.depth, form.typed_depth) = (28.0, true);
+    h.frames(3);
+    let why = drill_form(&mut h).worked.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("flute"), "{why:?}");
+    assert!(h.widget(&why).is_some());
+    // The depth each kind of bottom asks for.
+    let group = |bottom| HoleGroup { diameter: 6.0, top: -1.0, depth: 20.0, bottom, holes: vec![[0.0, 0.0]] };
+    assert_eq!(drill_depth(&group(HoleBottom::Through)), (21.0, "full_diameter"));
+    assert_eq!(drill_depth(&group(HoleBottom::Point)), (20.0, "full_diameter"));
+    assert_eq!(drill_depth(&group(HoleBottom::Flat)), (20.0, "tip"));
 }

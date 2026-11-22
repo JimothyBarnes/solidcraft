@@ -15,8 +15,9 @@ use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
     CamData, CamDataParams, CamOpDeleteParams, CamOpDrillParams, CamOpFaceParams, CamOpManualParams, CamOpToolpath, CamOpToolpathParams,
-    CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupMeasureParams, CamSetupMeasured,
-    CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
+    CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles, CamSetupHolesParams,
+    CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
+    HoleBottom, HoleGroup,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -46,6 +47,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup.measure", "Measure Setup", crate::checked!("cam.setup.measure", setup_measure)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSetupMeasureParams>::new()).output(output_schema_for::<CamSetupMeasured>)
         .params("id: the setup → bodies measured, model_box in model coordinates, placement: WCS origin and axes in model coordinates, model and stock boxes and clearance_z, retract_z in the WCS (mm), from the bodies' exact boxes"),
+    CommandSpec::new("cam.setup.holes", "Find Holes", crate::checked!("cam.setup.holes", setup_holes)).icon("inspect").noundo().read_only()
+        .contract(&TypedContract::<CamSetupHolesParams>::new()).output(output_schema_for::<CamSetupHoles>)
+        .params("id: the setup → groups: [{diameter, top, depth, bottom: through | flat | point, holes: [[x, y]]}] in the setup's WCS (mm): the whole cylinder walls of its bodies that run along its Z with nothing above them, from the bodies' exact faces; holes of one diameter, top and depth are a group, the group with the most holes first"),
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
@@ -295,9 +299,9 @@ fn setup_delete(s: &mut Session, p: &Value) -> Result<Value> {
     reply(CMD, CamSetupWritten { id: p.id, setups: d.setups.len() })
 }
 
-/// The exact box, in model coordinates, of the bodies a setup machines: its model bodies by name,
-/// or every visible body when it lists none. Returns the box and the bodies' names.
-pub(super) fn model_box(s: &Session, cmd: &str, setup: &Setup) -> Result<(Bounds, Vec<String>)> {
+/// Reads the bodies a setup machines, in model coordinates: its model bodies by name, or every
+/// visible body when it lists none.
+fn with_bodies<T>(s: &Session, cmd: &str, setup: &Setup, read: impl FnOnce(&[&solidcraft_doc::ModelBody]) -> Result<T>) -> Result<T> {
     let st = s.world_state()?;
     let bodies: Vec<&solidcraft_doc::ModelBody> = if setup.model_bodies.is_empty() {
         st.bodies.iter().filter(|b| s.body_visible(&b.name)).collect()
@@ -313,15 +317,88 @@ pub(super) fn model_box(s: &Session, cmd: &str, setup: &Setup) -> Result<(Bounds
         }
         named
     };
-    let mut boxes = bodies.iter().map(|b| b.body.exact_bounds().map_err(|e| bad(cmd, format!("measuring body '{}': {e}", b.name))));
-    let first = boxes
-        .next()
-        .ok_or_else(|| bad(cmd, format!("setup '{}' has no bodies to machine: show one, or list them in its model_bodies", setup.id)))??;
-    let mut b = first;
-    for next in boxes {
-        b = b.union(&next?);
+    read(&bodies)
+}
+
+/// The exact box, in model coordinates, of the bodies a setup machines. Returns the box and the
+/// bodies' names.
+pub(super) fn model_box(s: &Session, cmd: &str, setup: &Setup) -> Result<(Bounds, Vec<String>)> {
+    with_bodies(s, cmd, setup, |bodies| {
+        let mut boxes = bodies.iter().map(|b| b.body.exact_bounds().map_err(|e| bad(cmd, format!("measuring body '{}': {e}", b.name))));
+        let first = boxes
+            .next()
+            .ok_or_else(|| bad(cmd, format!("setup '{}' has no bodies to machine: show one, or list them in its model_bodies", setup.id)))??;
+        let mut b = first;
+        for next in boxes {
+            b = b.union(&next?);
+        }
+        Ok((Bounds { min: b.min, max: b.max }, bodies.iter().map(|b| b.name.clone()).collect()))
+    })
+}
+
+/// Sizes and heights this close are the same when holes are grouped, mm.
+const SAME_HOLE: f64 = 1e-6;
+
+/// The holes a setup can drill (decision 0012 of the CAM work): the whole cylinder walls of its
+/// bodies along its Z that are open above, in its WCS, grouped by diameter, top and depth.
+fn holes(s: &Session, cmd: &str, setup: &Setup) -> Result<Vec<HoleGroup>> {
+    let (model, _) = model_box(s, cmd, setup)?;
+    let p = setup.place(model).map_err(|e| bad(cmd, e.to_string()))?;
+    let found = with_bodies(s, cmd, setup, |bodies| {
+        let mut all = Vec::new();
+        for body in bodies {
+            let of_body = super::cam_holes::holes_along(&body.body, p.z_axis)
+                .map_err(|e| bad(cmd, format!("finding the holes of body '{}': {e}", body.name)))?;
+            all.extend(of_body);
+        }
+        Ok(all)
+    })?;
+    // A WCS coordinate without the last bits of rounding, so equal holes read equal.
+    let along = |v: solidcore_record::Vec3, a: solidcore_record::Vec3| ((v.x * a.x + v.y * a.y + v.z * a.z) * 1e9).round() / 1e9;
+    let mut groups: Vec<HoleGroup> = Vec::new();
+    for h in found {
+        let from = solidcore_record::Vec3 { x: h.top.x - p.origin.x, y: h.top.y - p.origin.y, z: h.top.z - p.origin.z };
+        let (x, y, top) = (along(from, p.x_axis), along(from, p.y_axis), along(from, p.z_axis));
+        let (diameter, depth) = ((2.0 * h.radius * 1e9).round() / 1e9, (h.depth * 1e9).round() / 1e9);
+        let bottom = match h.floor {
+            None => HoleBottom::Through,
+            Some(below) if below <= SAME_HOLE => HoleBottom::Flat,
+            Some(_) => HoleBottom::Point,
+        };
+        let same = |g: &&mut HoleGroup| {
+            (g.diameter - diameter).abs() <= SAME_HOLE
+                && (g.top - top).abs() <= SAME_HOLE
+                && (g.depth - depth).abs() <= SAME_HOLE
+                && g.bottom == bottom
+        };
+        match groups.iter_mut().find(same) {
+            Some(g) => g.holes.push([x, y]),
+            None => groups.push(HoleGroup { diameter, top, depth, bottom, holes: vec![[x, y]] }),
+        }
     }
-    Ok((Bounds { min: b.min, max: b.max }, bodies.iter().map(|b| b.name.clone()).collect()))
+    for g in &mut groups {
+        g.holes.sort_by(|a, b| a[1].total_cmp(&b[1]).then(a[0].total_cmp(&b[0])));
+    }
+    groups.sort_by(|a, b| b.holes.len().cmp(&a.holes.len()).then(a.diameter.total_cmp(&b.diameter)).then(b.top.total_cmp(&a.top)));
+    Ok(groups)
+}
+
+fn setup_holes(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.holes";
+    let p: CamSetupHolesParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let setup = d.setups.iter().find(|x| x.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.id)))?;
+    let groups = holes(s, CMD, setup)?;
+    reply(CMD, CamSetupHoles { id: p.id, holes: groups.iter().map(|g| g.holes.len()).sum(), groups })
+}
+
+/// The holes the setup `id` can drill, for a form to offer; why not, when the setup can't be
+/// placed or a body can't be read. It reads the design and changes nothing.
+pub fn manufacture_holes(s: &Session, id: &str) -> std::result::Result<Vec<HoleGroup>, String> {
+    const CMD: &str = "cam.setup.holes";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    holes(s, CMD, setup).map_err(said)
 }
 
 fn setup_measure(s: &mut Session, p: &Value) -> Result<Value> {

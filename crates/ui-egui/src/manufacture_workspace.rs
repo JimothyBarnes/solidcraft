@@ -42,7 +42,7 @@ pub struct State {
     pub(crate) active_setup: Option<String>,
     /// What the viewport draws of it, kept until the design changes.
     pub(crate) scene: std::sync::Mutex<scene::Cache>,
-    /// The open form (Add Tool, New Setup, Face, Post Process), if any.
+    /// The open form (Add Tool, New Setup, Face, Drill, Post Process), if any.
     pub(crate) dialog: Option<dialogs::Dialog>,
 }
 

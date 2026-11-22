@@ -1,9 +1,9 @@
-//! Manufacture's forms: Add Tool, New Setup, Face and Post Process. Each is a front end that
+//! Manufacture's forms: Add Tool, New Setup, Face, Drill and Post Process. Each is a front end that
 //! builds the parameters of one `cam.*` command and runs it: every change is a command, and a
 //! script calls the command directly and sees no window. They are standalone windows, opened
 //! when the ribbon starts one of those commands ([`start`]) and drawn once a frame ([`show`]).
 //!
-//! New Setup and Face show what they would make before OK: the engine works it out from the
+//! New Setup, Face and Drill show what they would make before OK: the engine works it out from the
 //! parameters as they are typed (`manufacture_setup_preview`, `manufacture_preview`), the viewport
 //! draws it (`super::scene`), and the form says why when there would be nothing to make. A form
 //! also stays open with the command's own words when the command refuses, so the reason is
@@ -15,9 +15,10 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    OperationPreview, Placement, ToolChoice, manufacture_data, manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_tools,
+    HoleBottom, HoleGroup, OperationPreview, Placement, ToolChoice, manufacture_data, manufacture_holes, manufacture_posts, manufacture_preview,
+    manufacture_setup_preview, manufacture_tools,
 };
-use solidcraft_engine::doc::display_units::{format_length, unit_scale};
+use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
 
 use crate::SolveApp;
@@ -28,6 +29,7 @@ pub(crate) enum Dialog {
     Tool(ToolForm),
     Setup(SetupForm),
     Face(FaceForm),
+    Drill(DrillForm),
     Post(PostForm),
     Posted(Posted),
 }
@@ -46,6 +48,7 @@ impl Dialog {
         match self {
             Dialog::Setup(form) => form.placed.get().map(|(key, placement)| (key, Shown::Setup(placement))),
             Dialog::Face(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
+            Dialog::Drill(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             _ => None,
         }
     }
@@ -71,6 +74,11 @@ const ORIGINS: [(&str, [&str; 3]); 5] = [
     ("manufacture.origin_top_back_left", ["min", "max", "max"]),
     ("manufacture.origin_top_back_right", ["max", "max", "max"]),
 ];
+/// The drilling cycles Drill offers: the command's word and the label.
+const CYCLES: [(&str, &str); 3] =
+    [("drill", "manufacture.cycle_drill"), ("peck", "manufacture.cycle_peck"), ("chip_break", "manufacture.cycle_chip_break")];
+/// How far past the part a through hole is drilled, at the drill's full diameter, mm.
+const BREAKTHROUGH: f64 = 1.0;
 const PATTERNS: [(&str, &str); 2] = [("zig_zag", "manufacture.pattern_zig_zag"), ("one_way", "manufacture.pattern_one_way")];
 const UNITS: [(&str, &str); 2] = [("mm", "manufacture.units_mm"), ("inch", "manufacture.units_inch")];
 const WORK_OFFSETS: [&str; 6] = ["G54", "G55", "G56", "G57", "G58", "G59"];
@@ -131,6 +139,13 @@ fn feed_field(ui: &mut egui::Ui, feed: &mut f64, units: &str) -> egui::Response 
 /// A surface speed held in m/min, typed in feet a minute where the design is in inches or feet.
 fn surface_speed_field(ui: &mut egui::Ui, speed: &mut f64, units: &str) -> egui::Response {
     if imperial(units) { scaled_field(ui, speed, 1.0 / 0.3048, 10_000.0, " ft/min") } else { scaled_field(ui, speed, 1.0, 10_000.0, " m/min") }
+}
+
+/// An operation's spindle speed and cutting feed rows; whether each was typed just now.
+fn speed_and_feed(ui: &mut egui::Ui, rpm: &mut f64, feed: &mut f64, units: &str) -> (bool, bool) {
+    let rpm = ui_kit::row(ui, tr("manufacture.face_spindle_speed"), |ui| ui_kit::number_field(ui, rpm, 0.0..=MAX_RPM, 10.0, " rpm")).changed();
+    let feed = ui_kit::row(ui, tr("manufacture.face_feed"), |ui| feed_field(ui, feed, units)).changed();
+    (rpm, feed)
 }
 
 /// A command's refusal, or why a preview has nothing to show, in the form.
@@ -663,14 +678,9 @@ impl FaceForm {
                 if self.multiple_depths {
                     ui_kit::row(ui, tr("manufacture.face_stepdown"), |ui| ui_kit::length_field(ui, &mut self.stepdown, units, decimals));
                 }
-                if ui_kit::row(ui, tr("manufacture.face_spindle_speed"), |ui| ui_kit::number_field(ui, &mut self.rpm, 0.0..=MAX_RPM, 10.0, " rpm"))
-                    .changed()
-                {
-                    self.typed_rpm = true;
-                }
-                if ui_kit::row(ui, tr("manufacture.face_feed"), |ui| feed_field(ui, &mut self.feed, units)).changed() {
-                    self.typed_feed = true;
-                }
+                let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
+                self.typed_rpm |= rpm;
+                self.typed_feed |= feed;
                 if let Some(time) = &time {
                     ui_kit::value_row(ui, tr("manufacture.face_time"), time);
                 }
@@ -680,6 +690,288 @@ impl FaceForm {
                 ui_kit::text(ui, tr("manufacture.face_note"), ui_kit::Text::Note("manufacture_face_note"));
                 if ready {
                     ui_kit::text(ui, tr("manufacture.preview_note"), ui_kit::Text::Note("manufacture_face_preview_note"));
+                }
+                refusal(ui, self.error.as_deref().or(self.worked.trouble()));
+            });
+        match action {
+            ui_kit::Action::Ok => self.accept(app),
+            ui_kit::Action::None if !closed => Some(self),
+            _ => None,
+        }
+    }
+}
+
+/// The depth a group of holes is drilled to when none is typed, from their top, and what it is
+/// measured to (decision 0012 of the CAM work): a through hole to the drill's full diameter a
+/// little past the part, a pointed hole to the full diameter at the end of its wall, and a
+/// flat-floored hole to the drill's tip, so that a point never cuts below the floor.
+fn drill_depth(group: &HoleGroup) -> (f64, &'static str) {
+    match group.bottom {
+        HoleBottom::Through => (group.depth + BREAKTHROUGH, "full_diameter"),
+        HoleBottom::Point => (group.depth, "full_diameter"),
+        HoleBottom::Flat => (group.depth, "tip"),
+    }
+}
+
+/// A group of holes as Drill offers it, diameter by depth: "4 × Ø6.00 × 20.00 mm, through".
+fn group_label(group: &HoleGroup, units: &str, decimals: u8) -> String {
+    let bottom = tr(match group.bottom {
+        HoleBottom::Through => "manufacture.bottom_through",
+        HoleBottom::Flat => "manufacture.bottom_flat",
+        HoleBottom::Point => "manufacture.bottom_point",
+    });
+    let (count, diameter, depth) =
+        (group.holes.len().to_string(), length_number(group.diameter, units, decimals), format_length(group.depth, units, decimals));
+    solidcraft_ui_text::format("manufacture.drill_group", &[("count", &count), ("diameter", &diameter), ("depth", &depth), ("bottom", bottom)])
+}
+
+/// Drill: holes found on the model, a group at a time.
+pub(crate) struct DrillForm {
+    setups: Vec<SetupChoice>,
+    tools: Vec<ToolChoice>,
+    pub setup: usize,
+    /// The holes the setup picked can drill, in groups, as the engine found them.
+    found: Worked<Vec<HoleGroup>>,
+    pub group: usize,
+    /// The group the depth and the tool were last suited to.
+    suited_to: Option<usize>,
+    pub tool: usize,
+    /// Whether the tool was picked by hand: until then it follows the holes' diameter.
+    pub picked_tool: bool,
+    pub cycle: usize,
+    /// mm a peck, for the pecking cycles: the tool's diameter until it is typed.
+    pub peck: f64,
+    pub typed_peck: bool,
+    /// mm below the holes' top: what their own bottom asks for until it is typed.
+    pub depth: f64,
+    pub typed_depth: bool,
+    /// Spindle speed, rev/min, and feed, mm/min: what the tool's cutting data gives until typed.
+    pub rpm: f64,
+    pub feed: f64,
+    pub typed_rpm: bool,
+    pub typed_feed: bool,
+    /// The drilling these parameters would make.
+    worked: Worked<OperationPreview>,
+    /// The setup of the list the viewport was last told to draw.
+    drawn_setup: Option<usize>,
+    pub error: Option<String>,
+}
+
+impl DrillForm {
+    /// For the setup the viewport draws, its largest group of holes and the tool that suits them.
+    pub fn new(app: &SolveApp) -> DrillForm {
+        let (setups, setup) = setups(app);
+        DrillForm {
+            setups,
+            tools: manufacture_tools(&app.session.doc, "drill"),
+            setup,
+            found: Worked::new(),
+            group: 0,
+            suited_to: None,
+            tool: 0,
+            picked_tool: false,
+            cycle: 0,
+            peck: 0.0,
+            typed_peck: false,
+            depth: 0.0,
+            typed_depth: false,
+            rpm: 0.0,
+            feed: 0.0,
+            typed_rpm: false,
+            typed_feed: false,
+            worked: Worked::new(),
+            drawn_setup: None,
+            error: None,
+        }
+    }
+
+    /// What is missing before holes can be drilled, if anything.
+    pub fn missing(&self) -> Option<&'static str> {
+        if self.setups.is_empty() {
+            Some(tr("manufacture.no_setup"))
+        } else if self.tools.is_empty() {
+            Some(tr("manufacture.no_tool_for_drill"))
+        } else {
+            None
+        }
+    }
+
+    /// The groups of holes found, none while they could not be.
+    pub fn groups(&self) -> &[HoleGroup] {
+        self.found.get().map_or(&[], |(_, groups)| groups.as_slice())
+    }
+
+    fn picked(&self) -> Option<&HoleGroup> {
+        self.groups().get(self.group)
+    }
+
+    /// The tool that suits holes of `diameter`: the widest that is no wider, else the narrowest.
+    fn fitting_tool(&self, diameter: f64) -> usize {
+        let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
+        let fits = self.tools.iter().enumerate().filter(|(_, tool)| tool.diameter <= diameter + 1e-6).max_by(by_width);
+        fits.or(self.tools.iter().enumerate().min_by(by_width)).map_or(0, |(at, _)| at)
+    }
+
+    /// The `cam.op.drill` parameters: the group's centres and top, the depth its bottom asks for
+    /// or the one typed, and the cycle. A speed or feed that was not typed is left to the command.
+    pub fn params(&self) -> Value {
+        let (holes, top, depth, depth_to) = match self.picked() {
+            Some(group) => {
+                let (suited, to) = drill_depth(group);
+                (json!(group.holes), json!(group.top), if self.typed_depth { self.depth } else { suited }, to)
+            }
+            None => (json!([]), Value::Null, self.depth, "tip"),
+        };
+        let cycle = match word(&CYCLES, self.cycle) {
+            "drill" => json!({"type": "drill", "dwell": 0.0}),
+            pecking => json!({"type": pecking, "peck": self.peck}),
+        };
+        let mut drill = json!({"holes": holes, "top": top, "depth": depth, "depth_to": depth_to, "cycle": cycle});
+        if self.typed_rpm {
+            drill["rpm"] = json!(self.rpm);
+        }
+        if self.typed_feed {
+            drill["feed"] = json!(self.feed);
+        }
+        json!({
+            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+            "drill": drill,
+        })
+    }
+
+    /// Finds the setup's holes and works the drilling out, when the design or a field changed,
+    /// and shows what was not typed as the holes and the tool give it.
+    fn refresh(&mut self, app: &SolveApp) {
+        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+        if self.found.refresh(app, &json!(setup), || manufacture_holes(&app.session, &setup)) {
+            // Other holes: start from their largest group again.
+            (self.group, self.suited_to) = (0, None);
+        }
+        if self.group >= self.groups().len() {
+            self.group = 0;
+        }
+        if self.suited_to != Some(self.group) {
+            // Another group: its own depth, and the tool that suits it unless one was picked.
+            (self.suited_to, self.typed_depth) = (Some(self.group), false);
+            if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
+                self.tool = self.fitting_tool(diameter);
+            }
+        }
+        if let Some(suited) = self.picked().map(|group| drill_depth(group).0).filter(|_| !self.typed_depth) {
+            self.depth = suited;
+        }
+        if !self.typed_peck {
+            self.peck = self.tools.get(self.tool).map_or(self.peck, |tool| tool.diameter);
+        }
+        let params = self.params();
+        if !self.worked.refresh(app, &params, || manufacture_preview(&app.session, "cam.op.drill", &params)) {
+            return;
+        }
+        self.error = None;
+        if let Ok(preview) = &self.worked.result {
+            if !self.typed_rpm {
+                self.rpm = preview.rpm.round();
+            }
+            if !self.typed_feed {
+                self.feed = preview.feed;
+            }
+        }
+    }
+
+    /// Runs the command: the form again, with the reason, when the drilling can't be worked out
+    /// or the command refuses.
+    pub fn accept(mut self, app: &mut SolveApp) -> Option<DrillForm> {
+        self.refresh(app);
+        if self.missing().is_some() || self.picked().is_none() || self.worked.result.is_err() {
+            return Some(self);
+        }
+        match app.run("cam.op.drill", self.params()) {
+            Ok(_) => None,
+            Err(why) => {
+                self.error = Some(why);
+                Some(self)
+            }
+        }
+    }
+
+    fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<DrillForm> {
+        self.refresh(app);
+        let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
+        let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
+        let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
+        let group_labels: Vec<String> = self.groups().iter().map(|group| group_label(group, units, decimals)).collect();
+        let group_labels: Vec<&str> = group_labels.iter().map(String::as_str).collect();
+        let cycles = labels(&CYCLES);
+        // The widths the form compares while a tool is being picked.
+        let hole_widths: Vec<f64> = self.groups().iter().map(|group| group.diameter).collect();
+        let tool_widths: Vec<f64> = self.tools.iter().map(|tool| tool.diameter).collect();
+        let missing = self.missing();
+        let ready = missing.is_none() && self.picked().is_some() && self.worked.result.is_ok();
+        let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
+        // How the depth is measured, for the holes picked.
+        let past = format_length(BREAKTHROUGH, units, decimals);
+        let measured = self.picked().map(|group| match group.bottom {
+            HoleBottom::Through => solidcraft_ui_text::format("manufacture.drill_depth_through", &[("past", &past)]),
+            HoleBottom::Point => tr("manufacture.drill_depth_point").to_string(),
+            HoleBottom::Flat => tr("manufacture.drill_depth_flat").to_string(),
+        });
+        // The setup picked is the one the viewport draws, so the holes are seen on its own stock.
+        if self.drawn_setup != Some(self.setup)
+            && let Some(picked) = self.setups.get(self.setup)
+        {
+            app.manufacture_workspace.active_setup = Some(picked.id.clone());
+            self.drawn_setup = Some(self.setup);
+        }
+        let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_drill"), "hole", tr("cmd.cam_op_drill"))
+            .placed(pivot, at)
+            .fields()
+            .actions(tr("ui.create"), tr("ui.cancel"), None)
+            .show(ctx, ready, |ui| {
+                if let Some(missing) = missing {
+                    ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_drill_missing"));
+                    return;
+                }
+                ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_drill_setup", &mut self.setup, &setup_labels);
+                if group_labels.is_empty() {
+                    // Why no holes could be looked for, or that there are none to drill from here.
+                    match self.found.trouble().filter(|why| !why.is_empty()) {
+                        Some(why) => refusal(ui, Some(why)),
+                        None => {
+                            ui_kit::text(ui, tr("manufacture.drill_no_holes"), ui_kit::Text::Note("manufacture_drill_no_holes"));
+                        }
+                    }
+                    return;
+                }
+                ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_drill_holes", &mut self.group, &group_labels);
+                let tool = self.tool;
+                ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_drill_tool", &mut self.tool, &tool_labels);
+                self.picked_tool |= self.tool != tool;
+                if hole_widths.get(self.group).zip(tool_widths.get(self.tool)).is_some_and(|(hole, tool)| *tool > hole + 1e-6) {
+                    ui_kit::status_line(ui, tr("manufacture.drill_tool_wider"), ui_kit::StatusTone::Warning);
+                }
+                ui_kit::choice_row(ui, tr("manufacture.drill_cycle"), "manufacture_drill_cycle", &mut self.cycle, &cycles);
+                if word(&CYCLES, self.cycle) != "drill" {
+                    self.typed_peck |=
+                        ui_kit::row(ui, tr("manufacture.drill_peck"), |ui| ui_kit::length_field(ui, &mut self.peck, units, decimals)).changed();
+                }
+                self.typed_depth |=
+                    ui_kit::row(ui, tr("manufacture.drill_depth"), |ui| ui_kit::length_field(ui, &mut self.depth, units, decimals)).changed();
+                if let Some(measured) = &measured {
+                    ui_kit::text(ui, measured, ui_kit::Text::Note("manufacture_drill_measured"));
+                }
+                let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
+                self.typed_rpm |= rpm;
+                self.typed_feed |= feed;
+                if let Some(time) = &time {
+                    ui_kit::value_row(ui, tr("manufacture.face_time"), time);
+                }
+                for note in self.worked.get().map(|(_, preview)| preview.notes.as_slice()).unwrap_or_default() {
+                    ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_drill_engine_note"));
+                }
+                if ready {
+                    ui_kit::text(ui, tr("manufacture.preview_note"), ui_kit::Text::Note("manufacture_drill_preview_note"));
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });
@@ -841,7 +1133,7 @@ impl Posted {
 /// shortcut): whether `id` has one. Started outside Manufacture, the form opens there; when
 /// Manufacture can't be entered now, the reason goes to the status line and nothing opens.
 pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
-    if !matches!(id, "cam.tool.create" | "cam.setup.create" | "cam.op.face" | "cam.post") {
+    if !matches!(id, "cam.tool.create" | "cam.setup.create" | "cam.op.face" | "cam.op.drill" | "cam.post") {
         return false;
     }
     if !super::active(app)
@@ -854,6 +1146,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         "cam.tool.create" => Dialog::Tool(ToolForm::new(app)),
         "cam.setup.create" => Dialog::Setup(SetupForm::new(app)),
         "cam.op.face" => Dialog::Face(FaceForm::new(app)),
+        "cam.op.drill" => Dialog::Drill(DrillForm::new(app)),
         _ => Dialog::Post(PostForm::new(app)),
     });
     true
@@ -871,6 +1164,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Tool(form) => form.show(app, ctx, &units, decimals).map(Dialog::Tool),
         Dialog::Setup(form) => form.show(app, ctx, &units, decimals).map(Dialog::Setup),
         Dialog::Face(form) => form.show(app, ctx, &units, decimals).map(Dialog::Face),
+        Dialog::Drill(form) => form.show(app, ctx, &units, decimals).map(Dialog::Drill),
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),
     };

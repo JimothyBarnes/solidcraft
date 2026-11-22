@@ -575,9 +575,90 @@ fn commands_that_measure_the_model_bring_it_up_to_date_first() {
     // posting read the evaluated model: the engine finishes a stale model (one left behind by a
     // live drag) before they run. The others read and write only the design's Manufacture data.
     for spec in super::COMMANDS {
-        let measures = matches!(spec.id, "cam.setup.measure" | "cam.op.toolpath" | "cam.post");
+        let measures = matches!(spec.id, "cam.setup.measure" | "cam.setup.holes" | "cam.op.toolpath" | "cam.post");
         assert_eq!(spec.reads_model, measures, "{}", spec.id);
     }
+}
+
+/// The block of `drilling()` (60 x 40 x 20, its top at Z -1 in the WCS under 1 mm of stock, the
+/// origin over its middle) with holes cut in it: four of 6 through it, two of 8 that are 10 deep
+/// with flat floors, and a counterbore of 12, 4 deep, on the first of the four. And four things
+/// that are not holes from above: a quarter round down one corner, a hole of 5 from below that
+/// stops half way up, a hole of 4 along X, and a slot's rounded end is left for the offsetter.
+fn holed() -> Session {
+    let mut s = drilling();
+    let mut cut = |diameter: f64, base: [f64; 3], height: f64, axis: &str| {
+        run(
+            &mut s,
+            "solid.cylinder",
+            json!({"diameter": diameter, "height": height, "base": base, "axis": axis, "operation": "cut", "targets": ["Block"]}),
+        );
+    };
+    for (x, y) in [(10.0, 10.0), (50.0, 10.0), (50.0, 30.0), (10.0, 30.0)] {
+        cut(6.0, [x, y, -5.0], 30.0, "Z");
+    }
+    for y in [10.0, 30.0] {
+        cut(8.0, [30.0, y, 10.0], 15.0, "Z");
+    }
+    cut(12.0, [10.0, 10.0, 16.0], 10.0, "Z");
+    cut(10.0, [60.0, 40.0, -5.0], 30.0, "Z");
+    cut(5.0, [45.0, 20.0, -5.0], 15.0, "Z");
+    cut(4.0, [-5.0, 20.0, 15.0], 70.0, "X");
+    s
+}
+
+#[test]
+fn a_setups_holes_are_found_on_the_model_and_grouped() {
+    let mut s = holed();
+    let before = run(&mut s, "cam.data", json!({}));
+    let found = run(&mut s, "cam.setup.holes", json!({"id": "setup-1"}));
+    // The most holes first; among the single ones the smaller first.
+    //  - Three of the four through holes: the fourth is shorter under its counterbore.
+    //  - The two flat-floored holes.
+    //  - The fourth through hole, from the counterbore's floor (Z -5) down 16.
+    //  - The counterbore: 4 deep, and what is under it is a floor (the step down to the hole of 6),
+    //    though its axis runs out of the part.
+    let expected = json!([
+        {"diameter": 6.0, "top": -1.0, "depth": 20.0, "bottom": "through", "holes": [[20.0, -10.0], [-20.0, 10.0], [20.0, 10.0]]},
+        {"diameter": 8.0, "top": -1.0, "depth": 10.0, "bottom": "flat", "holes": [[0.0, -10.0], [0.0, 10.0]]},
+        {"diameter": 6.0, "top": -5.0, "depth": 16.0, "bottom": "through", "holes": [[-20.0, -10.0]]},
+        {"diameter": 12.0, "top": -1.0, "depth": 4.0, "bottom": "flat", "holes": [[-20.0, -10.0]]},
+    ]);
+    assert_eq!(found["groups"], expected, "{found:#}");
+    assert_eq!((found["id"].as_str(), found["holes"].as_u64()), (Some("setup-1"), Some(7)));
+    // The form reads the same list, and finding holes changes nothing.
+    let groups = crate::cmd::manufacture_holes(&s, "setup-1").unwrap();
+    assert_eq!(serde_json::to_value(&groups).unwrap(), expected);
+    assert_eq!(run(&mut s, "cam.data", json!({})), before);
+    // More stock on top moves the origin up with it: the holes keep their place on the part.
+    run(
+        &mut s,
+        "cam.setup.edit",
+        json!({"id": "setup-1", "stock": {"kind": "relative_box", "offsets": {"x_min": 1, "x_max": 1, "y_min": 1, "y_max": 1, "z_min": 0, "z_max": 5}}}),
+    );
+    let higher = run(&mut s, "cam.setup.holes", json!({"id": "setup-1"}));
+    assert_eq!(
+        (higher["groups"][0]["top"].as_f64(), higher["groups"][0]["depth"].as_f64(), higher["groups"][0]["holes"].clone()),
+        (Some(-5.0), Some(20.0), expected[0]["holes"].clone())
+    );
+    // The origin at a corner of the stock moves every centre by half the stock: 31 and 21.
+    run(
+        &mut s,
+        "cam.setup.edit",
+        json!({"id": "setup-1", "wcs": {"origin": {"kind": "stock_box", "anchor": {"x": "min", "y": "min", "z": "max"}}, "orientation": {"kind": "model"}}}),
+    );
+    let corner = run(&mut s, "cam.setup.holes", json!({"id": "setup-1"}));
+    assert_eq!(corner["groups"][0]["holes"], json!([[51.0, 11.0], [11.0, 31.0], [51.0, 31.0]]));
+    // A boss is no hole, a setup with nothing to machine says so, and so does a missing setup.
+    let mut boss = Session::default();
+    run(&mut boss, "solid.cylinder", json!({"diameter": 20, "height": 10, "body_name": "Boss"}));
+    run(&mut boss, "cam.setup.create", json!({}));
+    assert_eq!(run(&mut boss, "cam.setup.holes", json!({"id": "setup-1"}))["groups"], json!([]));
+    let mut empty = Session::default();
+    run(&mut empty, "cam.setup.create", json!({}));
+    assert!(refused(&mut empty, "cam.setup.holes", json!({"id": "setup-1"})).contains("has no bodies to machine"));
+    assert!(refused(&mut s, "cam.setup.holes", json!({"id": "setup-9"})).contains("no setup 'setup-9'"));
+    assert!(crate::cmd::manufacture_holes(&s, "setup-9").unwrap_err().contains("no setup 'setup-9'"));
 }
 
 #[test]

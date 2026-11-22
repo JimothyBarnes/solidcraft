@@ -143,6 +143,48 @@ pub struct CamSetupMeasured {
     pub placement: Value,
 }
 
+/// Find the holes a setup can drill.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupHolesParams {
+    pub id: String,
+}
+
+/// How a hole ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HoleBottom {
+    /// It comes out of the part.
+    Through,
+    /// A flat floor at the end of its wall.
+    Flat,
+    /// A drill's point below the end of its wall.
+    Point,
+}
+
+/// Holes of one diameter, one top and one depth, in a setup's WCS, mm.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct HoleGroup {
+    pub diameter: f64,
+    /// The Z of the upper end of the holes' walls.
+    pub top: f64,
+    /// The length of the walls down from there.
+    pub depth: f64,
+    pub bottom: HoleBottom,
+    /// The holes' centres, `[x, y]`.
+    pub holes: Vec<[f64; 2]>,
+}
+
+/// The holes of a setup's bodies that open along its Z, found on their exact faces (never a
+/// display mesh) and grouped, the group with the most holes first.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupHoles {
+    pub id: String,
+    /// How many holes there are in all.
+    pub holes: usize,
+    pub groups: Vec<HoleGroup>,
+}
+
 /// What a setup command left.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CamSetupWritten {
