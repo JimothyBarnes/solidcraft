@@ -33,6 +33,9 @@ pub const MIN_CELL: f64 = 0.01;
 pub const MAX_LISTED: usize = 100;
 /// The most chords an arc is cut as.
 const MAX_CHORDS: usize = 10_000;
+/// The finest an arc's chords are made for a tool with a sloping side: how far inside the arc
+/// they may run, as a share of a cell.
+const FINEST_SAG: f64 = 0.001;
 /// How far inside the tool's edge a cell must be for a cut there to cut into the part, in
 /// cells: along a wall the part and the cut share a row of cells, and that row is the grid's
 /// own error. Nearer the edge than this the part's own height stands, and no gouge is counted.
@@ -217,6 +220,16 @@ impl Cutter {
         Ok(Cutter { radius, profile, body })
     }
 
+    /// How much its cutting surface rises for each millimetre out, where it slopes all the way
+    /// (a cone). 0 for the others: beside a wall their side is upright, which the slack at the
+    /// tool's edge covers, and no toolpath yet follows a surface with a rounded corner.
+    fn steepness(&self) -> f64 {
+        match self.profile {
+            Profile::Point(_, slope) => slope,
+            _ => 0.0,
+        }
+    }
+
     /// How far the cutting surface is above the tip at `out` mm from the axis (within the radius).
     fn rise(&self, out: f64) -> f64 {
         match self.profile {
@@ -297,6 +310,8 @@ struct Found {
     move_index: usize,
     /// How far into the part the toolpath is meant to cut ([`Simulation::cut_into`]).
     allowed: f64,
+    /// How much lower than the true move the piece being passed may cut: an arc's chords, mm.
+    slack: f64,
     /// Its deepest cut below the part, and where as a rapid it was furthest below the material.
     gouge: Option<Gouge>,
     hit: Option<RapidHit>,
@@ -326,6 +341,9 @@ pub struct Simulation {
     /// The part over the same cells: its highest point over each (below the floor where there is
     /// none), when it is checked against.
     part: Option<Vec<f64>>,
+    /// The part as the model has it, kept from the first toolpath that is meant to cut into it:
+    /// how far such a toolpath may go is measured from here, not from what one before it left.
+    model: Option<Vec<f64>>,
     /// How far below the part a cut may go before it is a gouge, and how far below the
     /// material's top a rapid may pass before it is a hit, mm.
     pub tolerance: f64,
@@ -359,6 +377,7 @@ impl Simulation {
             stock: field,
             floor: stock.min.z,
             part: None,
+            model: None,
             tolerance,
             removed: 0.0,
             gouge_count: 0,
@@ -380,12 +399,19 @@ impl Simulation {
             return bad(format!("the part's heights must be {} numbers, one a cell", self.stock.heights.len()));
         }
         self.part = Some(heights);
+        self.model = None;
         Ok(self)
     }
 
-    /// The part's heights, when the simulation has them.
+    /// The part's heights, when the simulation has them: the part as it is meant, which is
+    /// lower than the model where a toolpath was meant to cut into it ([`Simulation::cut_into`]).
     pub fn part(&self) -> Option<&[f64]> {
         self.part.as_deref()
+    }
+
+    /// The part's heights as the model has them, whatever was meant to be cut into it.
+    pub fn model(&self) -> Option<&[f64]> {
+        self.model.as_deref().or(self.part.as_deref())
     }
 
     /// The volume of material still standing above the part where there is a part under it, and
@@ -411,14 +437,18 @@ impl Simulation {
 
     /// As [`Simulation::cut`], for a toolpath that is meant to cut up to `into_part` mm into the
     /// part as the model has it: a chamfer on an edge the model leaves sharp. Such a cut is not
-    /// a gouge, and where it is made the part is taken to be what it leaves, so that the picture
-    /// and whatever is cut afterwards are judged against the part as it was meant.
+    /// a gouge, and where it is made the part is taken to be what it leaves, so that whatever
+    /// is cut afterwards is judged against the part as it was meant. How far is measured from
+    /// the model ([`Simulation::model`]), so passes that are each within it do not add up.
     pub fn cut_into(&mut self, operation: usize, toolpath: &Toolpath, tool: &Tool, into_part: f64) -> Result<CutReport> {
         if !(0.0..=MAX_COORDINATE).contains(&into_part) {
             return bad(format!("how far a toolpath may cut into the part must be 0 to {MAX_COORDINATE} mm, not {into_part}"));
         }
         toolpath.validate()?;
         let cutter = Cutter::of(tool)?;
+        if into_part > 0.0 && self.model.is_none() {
+            self.model.clone_from(&self.part);
+        }
         let motion = CycleMotion::default();
         let before = (self.removed, self.gouge_count, self.rapid_hit_count, self.body_hit_count);
         let mut plain: Vec<Move> = Vec::new();
@@ -429,23 +459,33 @@ impl Simulation {
                 other => plain.push(other),
             }
             let mut at = from;
-            let mut found = Found { operation, move_index: index, allowed: into_part, gouge: None, hit: None, body: None };
+            let mut found = Found { operation, move_index: index, allowed: into_part, slack: 0.0, gouge: None, hit: None, body: None };
             for step in &plain {
                 match *step {
                     Move::Rapid { to } => self.pass(at, to, &cutter, false, &mut found),
                     Move::Linear { to, .. } => self.pass(at, to, &cutter, true, &mut found),
                     Move::Arc { to, center, plane, direction, .. } => {
                         let arc = ArcGeom::new(at, to, center, plane, direction).map_err(|reason| Error::BadMove { index, reason })?;
-                        // Chords that stay within a quarter of a cell of the arc.
-                        let sag = 0.25 * self.stock.dx.min(self.stock.dy);
+                        // Chords that stay within a quarter of a cell of the arc. A chord runs
+                        // inside its arc, so a tool with a sloping side is nearer whatever the
+                        // arc goes round and cuts lower there, by its slope times how far
+                        // inside: for such a tool the chords are fine enough to keep that within
+                        // the tolerance, and what is left of it is the simulation's own error,
+                        // not a cut into the part.
+                        let cell = self.stock.dx.min(self.stock.dy);
+                        let steep = cutter.steepness();
+                        let sag = if steep > 0.0 { (self.tolerance / steep).clamp(FINEST_SAG * cell, 0.25 * cell) } else { 0.25 * cell };
                         let each = if sag >= arc.radius { 0.5 * PI } else { 2.0 * (1.0 - sag / arc.radius).acos() };
                         let chords = ((arc.sweep.abs() / each).ceil() as usize).clamp(1, MAX_CHORDS);
+                        let inside = arc.radius * (1.0 - (0.5 * arc.sweep.abs() / chords as f64).cos());
+                        found.slack = inside * steep;
                         let mut from = at;
                         for k in 1..=chords {
                             let end = if k == chords { to } else { arc.point(k as f64 / chords as f64) };
                             self.pass(from, end, &cutter, true, &mut found);
                             from = end;
                         }
+                        found.slack = 0.0;
                     }
                     _ => {}
                 }
@@ -563,7 +603,8 @@ impl Simulation {
                 }
                 // How far the tool's tip is below the stock's bottom while it is over the cell.
                 self.below_stock = self.below_stock.max(self.floor - (a.z + t0 * dz).min(a.z + t1 * dz));
-                let part = self.part.as_ref().and_then(|part| part.get(j * field.nx + i)).copied();
+                let cell = j * field.nx + i;
+                let part = self.part.as_ref().and_then(|part| part.get(cell)).copied();
                 let to = match part {
                     Some(part) if edge => within.max(part),
                     _ => within,
@@ -573,22 +614,25 @@ impl Simulation {
                     *height = to;
                 }
                 // A cut into the part: where there is none (a hole through it, beside it) its
-                // height is below the stock's bottom, and nothing is cut into.
-                if let Some(part) = part
-                    && !edge
-                {
-                    let under = part - within;
-                    if under > self.tolerance + found.allowed {
-                        if found.gouge.is_none_or(|worst| under > worst.depth) {
-                            found.gouge = Some(Gouge { operation, move_index, at: Vec3 { x, y, z }, depth: under });
-                        }
-                    } else if under > 0.0
-                        && found.allowed > 0.0
-                        && let Some(meant) = self.part.as_mut().and_then(|part| part.get_mut(j * field.nx + i))
-                    {
-                        // Cut into, as meant: the part is what the cut leaves there.
-                        *meant = within;
+                // height is below the stock's bottom, and nothing is cut into. It is a gouge
+                // when it goes below the part as it stands, and below the part as the model
+                // has it by more than the toolpath means to: what an earlier pass was let cut
+                // does not let the next go as far again.
+                let under = part.map_or(0.0, |part| part - within);
+                let below_model = self.model.as_ref().and_then(|model| model.get(cell)).map_or(under, |model| model - within);
+                let least = self.tolerance + found.slack;
+                if edge || under <= 0.0 {
+                    continue;
+                }
+                if under > least && below_model > least + found.allowed {
+                    if found.gouge.is_none_or(|worst| under > worst.depth) {
+                        found.gouge = Some(Gouge { operation, move_index, at: Vec3 { x, y, z }, depth: under });
                     }
+                } else if found.allowed > 0.0
+                    && let Some(meant) = self.part.as_mut().and_then(|part| part.get_mut(cell))
+                {
+                    // Cut into, as meant: the part is what the cut leaves there.
+                    *meant = within;
                 }
             }
         }

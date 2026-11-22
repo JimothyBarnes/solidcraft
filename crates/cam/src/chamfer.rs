@@ -15,7 +15,7 @@ use solidcraft_geom::Seg2Geom;
 
 use crate::contour::{CutDirection, MAX_LEAVE, Round, SAME_HEIGHT, apart, bad, cut, go_round, moved_at_least, round};
 use crate::feeds::op_feeds;
-use crate::offset::JOINT_TOLERANCE;
+use crate::offset::{JOINT_TOLERANCE, MAX_OFFSET_SEGMENTS, winding};
 use crate::placement::Placement;
 use crate::tool::{Engagement, Tool, ToolKind};
 use crate::toolpath::{Coolant, MAX_FEED, MAX_SPINDLE_RPM, Move, SpindleDirection, Toolpath};
@@ -37,6 +37,8 @@ pub const CHAMFER_TIP_ANGLES: (f64, f64) = (0.3490658503988659, 2.79252680319092
 const LEAD_CLEAR: f64 = 0.5;
 /// The arcs on and off when none is given, as a share of the tool's diameter (when that is more).
 const LEAD_SHARE: f64 = 0.1;
+/// The most separate outlines a chamfer is given.
+pub const MAX_CHAMFER_OUTLINES: usize = 1_000;
 
 /// A chamfer operation's parameters, as the design keeps them. Every one has a default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -180,7 +182,17 @@ impl ChamferOp {
         if outline.is_empty() {
             return bad("there is no outline to chamfer".into());
         }
-        let regions: Vec<Region2> = outline.iter().map(|l| Region2 { outer: l.clone(), holes: Vec::new() }).collect();
+        if outline.len() > MAX_CHAMFER_OUTLINES || outline.iter().map(|l| l.segs.len()).sum::<usize>() > MAX_OFFSET_SEGMENTS {
+            return bad(format!("the outline to chamfer: 1 to {MAX_CHAMFER_OUTLINES} loops of {MAX_OFFSET_SEGMENTS} segments together"));
+        }
+        // The outside only. Just under its top, a part with an island standing in a pocket has
+        // the island's outline too, inside its own: an inside edge, which is left sharp and said.
+        let within = |k: usize, l: &Loop2| {
+            l.segs.first().is_some_and(|first| outline.iter().enumerate().any(|(other, o)| other != k && winding(first.start(), o) != 0))
+        };
+        let outside: Vec<&Loop2> = outline.iter().enumerate().filter(|(k, l)| !within(*k, l)).map(|(_, l)| l).collect();
+        let islands = outline.len() - outside.len();
+        let regions: Vec<Region2> = outside.iter().map(|l| Region2 { outer: (*l).clone(), holes: Vec::new() }).collect();
         let moved = moved_at_least(&regions, -shape.offset).map_err(|e| Error::BadValue(format!("the part's outline: {e}")))?;
         if moved.is_empty() {
             return bad("the outline left nothing to go round".into());
@@ -232,6 +244,11 @@ impl ChamferOp {
         toolpath.validate()?;
 
         let mut notes = f.notes;
+        if islands > 0 {
+            notes.push(format!(
+                "{islands} edge(s) inside the part's outline (an island standing in a pocket) left sharp: a chamfer goes round the outside only"
+            ));
+        }
         if lead > 0.0 && rounds.iter().any(|r| r.leads.is_none()) {
             notes.push("there is no room for the arcs in and out at a part's wall: the tool goes straight down on to the edge".into());
         }

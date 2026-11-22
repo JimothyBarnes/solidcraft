@@ -1617,6 +1617,40 @@ fn a_chamfer_goes_round_the_parts_top_edge_and_the_simulation_takes_it_as_meant(
     run(&mut s, "cam.op.edit", json!({"id": id, "chamfer": {"width": 1.0, "tip_below": 0.5}}));
     let n = run(&mut s, "cam.op.toolpath", json!({"id": id}))["numbers"].clone();
     assert_eq!((n["z"].as_f64(), n["offset"].as_f64(), n["leads"].clone()), (Some(-2.5), Some(0.5), json!([1.5])));
+
+    // Round a disc of 40 the tool goes in arcs, which the simulation cuts as chords a hair
+    // inside them: that hair is not a cut into the part. The chamfer's triangle (0.125 mm2)
+    // goes once round at a radius of 19.83: 15.6 mm3, as nearly as cells of 0.105 mm can tell.
+    let mut disc = Session::default();
+    run(&mut disc, "solid.cylinder", json!({"diameter": 40, "height": 10, "body_name": "Disc"}));
+    run(&mut disc, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut disc, "cam.tool.create", json!({"tool": chamfer10()}));
+    run(&mut disc, "cam.setup.create", json!({"material": "aluminium"}));
+    run(&mut disc, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut disc, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut disc, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6}));
+    let sim = run(&mut disc, "cam.simulate", json!({"setup": "setup-1"}));
+    assert_eq!(
+        (sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64(), sim["body_hit_count"].as_u64()),
+        (Some(0), Some(0), Some(0)),
+        "{sim:#}"
+    );
+    let taken = sim["operations"][2]["removed"].as_f64().unwrap();
+    assert!((taken - 15.6).abs() < 4.0, "{taken} mm3 by the chamfer round the disc");
+
+    // A plate with a pocket and an island standing in it as high as the plate: just under the
+    // top the island is a piece of its own, inside the plate's outline. The chamfer goes round
+    // the plate (100 x 80: 360 mm and the four corners' quarter turns of radius 1) and says
+    // that the island's edge is left sharp.
+    let mut s = plate();
+    boxed(&mut s, [10.0, 10.0, 14.0], [80.0, 60.0, 6.0], "cut");
+    boxed(&mut s, [40.0, 30.0, 14.0], [20.0, 20.0, 6.0], "join");
+    run(&mut s, "cam.tool.create", json!({"tool": chamfer10()}));
+    run(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 360.0 + 2.0 * PI) && t["numbers"]["entries"].as_array().is_some_and(|e| e.len() == 1), "{}", t["numbers"]);
+    let notes: Vec<&str> = t["notes"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(notes.iter().any(|n| n.starts_with("1 edge(s) inside the part's outline (an island standing in a pocket) left sharp")), "{notes:?}");
 }
 
 #[test]

@@ -228,24 +228,108 @@ fn the_simulation_finds_the_chamfer_where_it_was_meant() {
         plain.gouges.first()
     );
     // A chamfer cut deeper than it says it means to is still found: the same path 1 mm lower.
-    let lower = Toolpath {
+    let lower = |by: f64| Toolpath {
         start: d.toolpath.start,
         moves: d
             .toolpath
             .moves
             .iter()
             .map(|m| match *m {
-                Move::Linear { to, feed } if to.z < 0.0 => Move::Linear { to: p(to.x, to.y, to.z - 1.0), feed },
+                Move::Linear { to, feed } if to.z < 0.0 => Move::Linear { to: p(to.x, to.y, to.z - by), feed },
                 Move::Arc { to, center, plane, direction, feed } => {
-                    Move::Arc { to: p(to.x, to.y, to.z - 1.0), center: p(center.x, center.y, center.z - 1.0), plane, direction, feed }
+                    Move::Arc { to: p(to.x, to.y, to.z - by), center: p(center.x, center.y, center.z - by), plane, direction, feed }
                 }
                 other => other,
             })
             .collect(),
     };
     let mut deep = block_in_stock();
-    assert!(deep.cut_into(0, &lower, &chamfer10(), d.leg).unwrap().gouges > 0);
-    assert!(deep.cut_into(0, &lower, &chamfer10(), -1.0).is_err() && deep.cut_into(0, &lower, &chamfer10(), f64::NAN).is_err());
+    assert!(deep.cut_into(0, &lower(1.0), &chamfer10(), d.leg).unwrap().gouges > 0);
+    assert!(deep.cut_into(0, &lower(1.0), &chamfer10(), -1.0).is_err() && deep.cut_into(0, &lower(1.0), &chamfer10(), f64::NAN).is_err());
+    // What is meant is measured from the model, not from what a pass before left: the chamfer
+    // cut as meant and then again 0.3 lower is 0.8 into the edge where 0.5 was meant. The cells
+    // within 0.29 of the wall are below what was meant, each 0.3 below what the first pass left.
+    let mut twice = block_in_stock();
+    assert_eq!(twice.cut_into(0, &d.toolpath, &chamfer10(), d.leg).unwrap().gouges, 0);
+    let again = twice.cut_into(1, &lower(0.3), &chamfer10(), d.leg).unwrap();
+    assert!(again.gouges >= 8, "{}", again.gouges);
+    // (Along the wall exactly 0.3; on the arcs on and off it, where the tool is a hair further
+    // out, a hair less.)
+    assert!(twice.gouges.iter().all(|g| g.operation == 1 && g.depth > 0.25 && g.depth <= 0.3 + 1e-9), "{:?}", twice.gouges);
+    assert!(twice.gouges.iter().filter(|g| (g.depth - 0.3).abs() < 1e-9).count() >= 4);
+    let f = twice.stock.clone();
+    let cell = |x: f64, y: f64| ((y - f.y) / f.dy - 0.5).round() as usize * f.nx + ((x - f.x) / f.dx - 0.5).round() as usize;
+    let (model, part) = (twice.model().unwrap(), twice.part().unwrap());
+    // The model is as it was given; the part as meant is what the first pass left where the
+    // second went too far (0.45 down at the cell by the wall), and what the second left where
+    // it did not (0.35 in: 0.15 down, then 0.45).
+    assert_eq!((model[cell(10.05, -19.95)], model[cell(10.05, -19.65)]), (0.0, 0.0));
+    assert!((part[cell(10.05, -19.95)] + 0.45).abs() < 1e-9 && (part[cell(10.05, -19.65)] + 0.45).abs() < 1e-9);
+    assert!((f.heights[cell(10.05, -19.95)] + 0.75).abs() < 1e-9, "the stock is cut all the same");
+    // What is cut afterwards is judged against the part as it was meant: a flat tool passing
+    // 0.2 below the top over the chamfered edge alone (its side 0.3 inside the wall) cuts air,
+    // where on the sharp edge it would have cut into the part.
+    let pass = Toolpath { start: p(-10.0, -24.7, -0.2), moves: vec![Move::Linear { to: p(10.0, -24.7, -0.2), feed: 500.0 }] };
+    let flat = Tool { kind: ToolKind::FlatEndMill, ..chamfer10() };
+    let mut after = block_in_stock();
+    after.cut_into(0, &d.toolpath, &chamfer10(), d.leg).unwrap();
+    let cut = after.cut(1, &pass, &flat).unwrap();
+    assert_eq!((cut.gouges, cut.removed), (0, 0.0));
+    let sharp = block_in_stock().cut(0, &pass, &flat).unwrap();
+    assert_eq!(sharp.gouges, 1);
+}
+
+#[test]
+fn a_chamfer_round_an_arc_is_not_a_cut_into_the_part() {
+    // A disc of 40: the tool goes round it in arcs, which the simulation cuts as chords a hair
+    // inside them, so the cone is a hair nearer the disc and cuts as much lower. For a tool
+    // with a sloping side the chords are fine enough to keep that within the tolerance, on a
+    // coarse grid as on a fine one: no gouge, and the chamfer no deeper than its half
+    // millimetre and a tolerance (0.01) anywhere round the disc.
+    let disc = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 20.0, start: 0.0, sweep: 2.0 * PI }] };
+    let d = ChamferOp::default().toolpath(None, &chamfer10(), &faced_block(), Some("aluminium"), &[disc]).unwrap();
+    for cell in [0.25, 0.1] {
+        let sim = Simulation::new(Bounds { min: p(-31.0, -21.0, -20.0), max: p(31.0, 21.0, 0.0) }, cell, 0.01).unwrap();
+        let f = sim.stock.clone();
+        let part: Vec<f64> =
+            (0..f.nx * f.ny).map(|k| if f.centre(k % f.nx, k / f.nx).x.hypot(f.centre(k % f.nx, k / f.nx).y) < 20.0 { 0.0 } else { -21.0 }).collect();
+        let mut sim = sim.with_part(part.clone()).unwrap();
+        let cut = sim.cut_into(0, &d.toolpath, &chamfer10(), d.leg).unwrap();
+        assert_eq!(cut.gouges, 0, "cells of {cell}: {:?}", sim.gouges.first());
+        let deepest = sim.stock.heights.iter().zip(&part).filter(|(_, part)| **part > -20.0).map(|(stock, part)| part - stock).fold(0.0, f64::max);
+        assert!(deepest <= d.leg + 0.01 + 1e-9 && deepest > 0.3, "cells of {cell}: the chamfer goes {deepest} down");
+        // Told nothing was meant, the same toolpath is a cut into the part at every arc.
+        let mut plain =
+            Simulation::new(Bounds { min: p(-31.0, -21.0, -20.0), max: p(31.0, 21.0, 0.0) }, cell, 0.01).unwrap().with_part(part).unwrap();
+        assert!(plain.cut(0, &d.toolpath, &chamfer10()).unwrap().gouges >= 2);
+    }
+}
+
+#[test]
+fn an_island_standing_in_a_pocket_is_left_sharp_and_said() {
+    // Just under the top of a plate with a pocket and an island in it, the section has two
+    // pieces: the plate, and the island inside the plate's outline. The chamfer goes round the
+    // outside exactly as it does without the island, and says what it left.
+    let island = Loop2 { segs: vec![Seg2::Arc { center: q(8.0, 2.0), radius: 9.0, start: 0.0, sweep: 2.0 * PI }] };
+    let alone = chamfered(&ChamferOp::default(), &chamfer10()).unwrap();
+    for outline in [vec![block_outline(), island.clone()], vec![island.clone(), block_outline()]] {
+        let d = ChamferOp::default().toolpath(None, &chamfer10(), &faced_block(), Some("aluminium"), &outline).unwrap();
+        assert!(same_moves(&d.toolpath.moves, &alone.toolpath.moves));
+        assert_eq!((d.entries.len(), d.round), (1, alone.round));
+        assert_eq!(
+            d.notes,
+            ["1 edge(s) inside the part's outline (an island standing in a pocket) left sharp: a chamfer goes round the outside only"]
+        );
+    }
+    assert!(alone.notes.is_empty());
+    // Two parts side by side are each an outside, and each is gone round.
+    let beside = Loop2 { segs: vec![Seg2::Arc { center: q(60.0, 0.0), radius: 9.0, start: 0.0, sweep: 2.0 * PI }] };
+    let d = ChamferOp::default().toolpath(None, &chamfer10(), &faced_block(), Some("aluminium"), &[block_outline(), beside]).unwrap();
+    assert!(d.entries.len() == 2 && d.notes.is_empty() && close(d.round, alone.round + 20.0 * PI), "{:?} {}", d.notes, d.round);
+    // More loops than a part has are refused before any is looked at.
+    let many = vec![island; MAX_CHAMFER_OUTLINES + 1];
+    let refused = ChamferOp::default().toolpath(None, &chamfer10(), &faced_block(), None, &many).unwrap_err().to_string();
+    assert!(refused.contains("1 to 1000 loops"), "{refused}");
 }
 
 #[test]

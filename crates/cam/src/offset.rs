@@ -328,7 +328,7 @@ fn left_of(s: &Seg2, t: f64) -> (Vec2, Vec2) {
 
 /// How many times the loop `l` winds counter-clockwise about `p`, which is not on it: the turns
 /// of the direction from `p` to a point going round the loop.
-fn winding(p: Vec2, l: &Loop2) -> i64 {
+pub(crate) fn winding(p: Vec2, l: &Loop2) -> i64 {
     let mut turned = 0.0;
     for s in &l.segs {
         let (a, b) = (s.start(), s.end());
