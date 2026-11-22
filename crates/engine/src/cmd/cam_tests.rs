@@ -1718,3 +1718,35 @@ fn a_setup_sheet_is_written_to_an_html_file_and_never_over_one_by_surprise() {
     assert_eq!((empty["tools"].as_u64(), empty["operations"].as_u64()), (Some(0), Some(0)));
     assert!(empty["html"].as_str().unwrap().contains("<tr><th>Stock</th><td>62.00 × 42.00 × 21.00 mm, aluminium</td></tr>"));
 }
+
+#[test]
+fn a_simulation_finds_a_holder_in_the_stock() {
+    // The plate with a pocket 60 x 40, 15 deep: its floor is at Z -16 under the stock's top. The
+    // 10 mm end mill sticks 12 out of a holder 40 across, so at the floor the holder's face is
+    // at Z -4, in the stock round the pocket wherever the tool is near a wall.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 5.0], [60.0, 40.0, 15.0], "cut");
+    let mut held = mill10();
+    held["holder"] = json!({"stick_out": 12.0, "segments": [{"length": 30.0, "lower_diameter": 40.0, "upper_diameter": 40.0}]});
+    run(&mut s, "cam.tool.edit", json!({"number": 2, "tool": held}));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let count = sim["body_hit_count"].as_u64().unwrap();
+    assert!(count > 0 && sim["operations"][0]["body_hits"].as_u64() == Some(count), "{sim:#}");
+    let hits = sim["body_hits"].as_array().unwrap();
+    assert!(hits.iter().all(|hit| hit["part"] == "holder" && hit["operation"] == "op-1"), "{hits:?}");
+    let deepest = hits.iter().map(|hit| hit["depth"].as_f64().unwrap()).fold(0.0, f64::max);
+    assert!((deepest - 4.0).abs() < 1e-9, "{deepest}");
+    // The setup sheet gives it as a line to check.
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    let said =
+        format!("The simulation found {count} move(s) with a tool's shank or holder in material, the deepest 4.00 mm (the holder), in Pocket 1.");
+    assert!(sheet["notes"].as_array().unwrap().iter().any(|note| note == &json!(said)), "{}", sheet["notes"]);
+    // Sticking 20 out, the holder stays above the stock, and nothing is found.
+    let mut longer = mill10();
+    longer["holder"] = json!({"stick_out": 20.0, "segments": [{"length": 30.0, "lower_diameter": 40.0, "upper_diameter": 40.0}]});
+    run(&mut s, "cam.tool.edit", json!({"number": 2, "tool": longer}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert_eq!((sim["body_hit_count"].as_u64(), sim["body_hits"].clone()), (Some(0), json!([])));
+}

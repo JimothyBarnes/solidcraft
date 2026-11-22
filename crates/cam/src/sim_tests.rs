@@ -2,7 +2,7 @@ use std::f64::consts::PI;
 
 use super::*;
 use crate::cycle::DrillCycle;
-use crate::tool::{Holder, Overrides, ToolGeometry};
+use crate::tool::{Holder, HolderSegment, Overrides, ToolGeometry};
 use crate::toolpath::{ArcDirection, Coolant, Plane};
 
 fn p(x: f64, y: f64, z: f64) -> Vec3 {
@@ -404,4 +404,100 @@ fn a_part_faced_pocketed_and_contoured_loses_the_stock_that_is_not_part_and_noth
         "{over} over the part (the corners are {}), {beside} beside it",
         corners * 6.0
     );
+}
+
+/// The 10 mm flat tool with only 10 mm of flutes.
+fn short10() -> Tool {
+    let mut t = flat10();
+    t.geometry.flute_length = 10.0;
+    t
+}
+
+#[test]
+fn a_cut_deeper_than_the_flutes_puts_the_shank_in_material() {
+    // A slot 15 deep in one pass with 10 mm of flutes: 5 mm of the stock above the flutes is in
+    // the way of what does not cut, in the plunge and in the slot after it.
+    let mut sim = stock();
+    let deep = sim.cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, -15.0), feed(80.0, 30.0, -15.0)]), &short10()).unwrap();
+    assert_eq!((deep.body_hits, sim.body_hit_count, deep.gouges), (2, 2, 0));
+    let hit = sim.body_hits[1];
+    assert_eq!((hit.operation, hit.move_index, hit.part, hit.depth, hit.at.z), (1, 1, BodyPart::Shank, 5.0, -5.0));
+    // The same slot in two passes of 7.5: at the second the stock above the flutes is gone, and
+    // the wall beside the tool is the wall, not something in the shank's way.
+    let mut sim = stock();
+    let passes = vec![feed(20.0, 30.0, -7.5), feed(80.0, 30.0, -7.5), feed(80.0, 30.0, -15.0), feed(20.0, 30.0, -15.0)];
+    assert_eq!(sim.cut(1, &path(p(20.0, 30.0, 5.0), passes), &short10()).unwrap().body_hits, 0);
+    // With flutes to spare nothing is looked at, and nothing found: the 30 mm tool, 15 deep.
+    let mut sim = stock();
+    assert_eq!(sim.cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, -15.0), feed(80.0, 30.0, -15.0)]), &flat10()).unwrap().body_hits, 0);
+}
+
+#[test]
+fn a_shank_wider_than_the_cutter_and_a_holder_are_checked_to_their_width() {
+    // A 4 mm cutter with 8 mm of flutes on a 10 mm shank that begins 12 from the tip. A slot 14
+    // deep in two passes: the cutter's own depth is fine, but at the second pass the shank's
+    // lower end is at Z -2, and beside the 4 mm slot the stock is still at 0: 2 mm in.
+    let necked = {
+        let mut t = tool(ToolKind::FlatEndMill, 4.0, 0.0, 0.0);
+        (t.geometry.flute_length, t.geometry.shoulder_length, t.geometry.shank_diameter) = (8.0, 12.0, 10.0);
+        t
+    };
+    let mut sim = stock();
+    let passes = vec![feed(20.0, 30.0, -7.0), feed(80.0, 30.0, -7.0), feed(80.0, 30.0, -14.0), feed(20.0, 30.0, -14.0)];
+    let cut = sim.cut(1, &path(p(20.0, 30.0, 5.0), passes), &necked).unwrap();
+    assert_eq!((cut.body_hits, sim.body_hits[0].move_index, sim.body_hits[0].part, sim.body_hits[0].depth), (2, 2, BodyPart::Shank, 2.0));
+    let beside = sim.body_hits[1].at;
+    assert!((beside.y - 30.0).abs() > 2.0 && (beside.y - 30.0).abs() < 5.0 && beside.z == -2.0, "{beside:?}");
+    // One pass 10 deep is within the shank's reach (it begins 12 up), though past the flutes:
+    // the stock above the flutes is in the neck's way under the cutter, and only there.
+    let mut sim = stock();
+    let cut = sim.cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, -10.0), feed(80.0, 30.0, -10.0)]), &necked).unwrap();
+    assert_eq!((cut.body_hits, sim.body_hits[0].depth), (2, 2.0));
+    assert!(sim.body_hits.iter().all(|hit| (hit.at.y - 30.0).abs() < 2.0), "{:?}", sim.body_hits);
+    // A holder 30 mm across that the 10 mm tool sticks 12 out of, widening to 40 over 20 mm. A
+    // pocket 16 x 16 cut 15 deep in two passes round a middle already cleared: the holder's face
+    // is at Z -3 at the bottom, 3 mm into the stock round the pocket.
+    let held = {
+        let mut t = flat10();
+        t.holder = Holder { stick_out: 12.0, segments: vec![HolderSegment { length: 20.0, lower_diameter: 30.0, upper_diameter: 40.0 }] };
+        t
+    };
+    let square = |z: f64| vec![feed(47.0, 27.0, z), feed(53.0, 27.0, z), feed(53.0, 33.0, z), feed(47.0, 33.0, z), feed(47.0, 27.0, z)];
+    let mut sim = stock();
+    let down: Vec<Move> = square(-7.5).into_iter().chain(square(-15.0)).collect();
+    let cut = sim.cut(1, &path(p(47.0, 27.0, 5.0), down), &held).unwrap();
+    assert_eq!(cut.body_hits, 5, "every move of the lower pass: {:?}", sim.body_hits);
+    assert!(
+        sim.body_hits.iter().all(|hit| hit.part == BodyPart::Holder && hit.move_index >= 5 && (hit.depth - 3.0).abs() < 1e-9 && hit.at.z == -3.0)
+    );
+    // 12 deep, the holder's face is at the stock's top: nothing touches.
+    let mut sim = stock();
+    let shallow: Vec<Move> = square(-6.0).into_iter().chain(square(-12.0)).collect();
+    assert_eq!(sim.cut(1, &path(p(47.0, 27.0, 5.0), shallow), &held).unwrap().body_hits, 0);
+    // At rapid too. A slot 10 wide cut 15 deep by a tool that reaches; then this one run along
+    // it at rapid, its tip 14 down: the tip is in the slot and passes through nothing, but the
+    // holder's face is 2 below the top of the stock on both sides of the slot.
+    let mut sim = stock();
+    let slot = vec![feed(20.0, 30.0, -7.5), feed(80.0, 30.0, -7.5), feed(80.0, 30.0, -15.0), feed(20.0, 30.0, -15.0)];
+    assert_eq!(sim.cut(1, &path(p(20.0, 30.0, 5.0), slot), &flat10()).unwrap().body_hits, 0);
+    let along =
+        sim.cut(2, &path(p(20.0, 30.0, 5.0), vec![rapid(20.0, 30.0, -14.0), rapid(80.0, 30.0, -14.0), rapid(80.0, 30.0, 5.0)]), &held).unwrap();
+    assert_eq!((along.rapid_hits, along.body_hits), (0, 3), "{:?}", sim.body_hits);
+    let worst = sim.body_hits[1];
+    assert_eq!((worst.operation, worst.move_index, worst.part, worst.depth, worst.at.z), (2, 1, BodyPart::Holder, 2.0, -2.0));
+    // Well above the stock a holder is not looked at: a rapid across with the tip 8 up.
+    let over = sim.cut(3, &path(p(-30.0, 30.0, 8.0), vec![rapid(130.0, 30.0, 8.0)]), &held).unwrap();
+    assert_eq!((over.rapid_hits, over.body_hits), (0, 0));
+    // A tool with no holder described has none to check, however deep it goes; and hostile
+    // sizes make no holder rather than a panic.
+    let mut bare = flat10();
+    bare.holder = Holder { stick_out: 5.0, segments: vec![] };
+    let mut sim = stock();
+    assert_eq!(sim.cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, -15.0)]), &bare).unwrap().body_hits, 0);
+    for v in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1e300] {
+        let mut odd = held.clone();
+        odd.holder = Holder { stick_out: v, segments: vec![HolderSegment { length: v, lower_diameter: v, upper_diameter: 30.0 }; 300] };
+        (odd.geometry.flute_length, odd.geometry.shank_diameter, odd.geometry.shoulder_length) = (v, v, v);
+        let _ = stock().cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, -15.0), rapid(20.0, 30.0, 5.0)]), &odd);
+    }
 }

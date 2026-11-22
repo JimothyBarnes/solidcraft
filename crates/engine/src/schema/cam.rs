@@ -482,6 +482,8 @@ pub struct CamSimulatedOperation {
     /// material.
     pub gouges: usize,
     pub rapid_hits: usize,
+    /// How many of its moves brought the tool's shank or holder into material.
+    pub body_hits: usize,
     /// Why it was left out, when its toolpath could not be worked out or its tool can't be shown.
     pub skipped: Option<String>,
 }
@@ -497,6 +499,22 @@ pub struct CamSimulatedHit {
     /// deepest.
     pub at: [f64; 3],
     /// How far below the part (a gouge) or below the material's top (a rapid), mm.
+    pub depth: f64,
+}
+
+/// A move a simulation found bringing a part of the tool that does not cut into material.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct CamSimulatedBodyHit {
+    /// The operation's id and which of its moves (from 0).
+    pub operation: String,
+    #[serde(rename = "move")]
+    pub move_index: usize,
+    /// `shank` (the tool above its flutes) or `holder`.
+    pub part: String,
+    /// Where, `[x, y, z]` in the setup's WCS: that part's own height over the cell where it was
+    /// deepest in material.
+    pub at: [f64; 3],
+    /// How far into the material, mm.
     pub depth: f64,
 }
 
@@ -526,6 +544,10 @@ pub struct CamSimulated {
     /// How many rapids passed through material, and the first hundred of them.
     pub rapid_hit_count: usize,
     pub rapid_hits: Vec<CamSimulatedHit>,
+    /// How many moves brought a tool's shank or holder into material, and the first hundred of
+    /// them. A holder is checked where the tool's data describes one.
+    pub body_hit_count: usize,
+    pub body_hits: Vec<CamSimulatedBodyHit>,
 }
 
 /// Write a setup's sheet for the shop (decision 0019 of the CAM work).

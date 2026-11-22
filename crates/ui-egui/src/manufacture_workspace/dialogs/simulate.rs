@@ -117,6 +117,23 @@ impl SimForm {
                         ui_kit::status_line(ui, &said, ui_kit::StatusTone::Error);
                     }
                 }
+                match stock.body_hits.iter().max_by(|a, b| a.depth.total_cmp(&b.depth)) {
+                    None => {
+                        ui_kit::status_line(ui, tr("manufacture.sim_no_body"), ui_kit::StatusTone::Dim);
+                    }
+                    Some(worst) => {
+                        let (count, depth) = (stock.body_hit_count.to_string(), format_length(worst.depth, units, decimals));
+                        let part = tr(match worst.part {
+                            solidcraft_engine::cmd::BodyPart::Shank => "manufacture.sim_part_shank",
+                            solidcraft_engine::cmd::BodyPart::Holder => "manufacture.sim_part_holder",
+                        });
+                        let said = solidcraft_ui_text::format(
+                            "manufacture.sim_body",
+                            &[("count", &count), ("depth", &depth), ("part", part), ("operation", name_of(worst.operation))],
+                        );
+                        ui_kit::status_line(ui, &said, ui_kit::StatusTone::Error);
+                    }
+                }
                 if stock.below_stock > stock.tolerance {
                     let said = solidcraft_ui_text::format("manufacture.sim_below", &[("depth", &format_length(stock.below_stock, units, decimals))]);
                     ui_kit::status_line(ui, &said, ui_kit::StatusTone::Warning);

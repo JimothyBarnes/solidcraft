@@ -9,6 +9,10 @@
 //! end of the stretch during which the cell is under it); for other profiles the lowest of a few
 //! places along that stretch. A gouge is a cell lowered below the part; a rapid that passes below
 //! the material's top is a hit.
+//!
+//! Above its flutes a tool does not cut: its neck, its shank and its holder are discs at their
+//! heights above the tip, and a move that brings one of them into material is a hit of its own
+//! ([`BodyHit`]). The holder is checked where the tool's data describes one.
 
 use std::f64::consts::PI;
 
@@ -36,6 +40,10 @@ const WALL_SLACK: f64 = 0.75;
 /// How many places along the stretch a cell is under a tool that is not flat are tried, besides
 /// its ends and the nearest.
 const PROFILE_SAMPLES: usize = 5;
+/// How many steps a holder's cone is checked as, each as wide as its wider end.
+const HOLDER_STEPS: usize = 4;
+/// The most pieces of a holder that are checked.
+const MAX_BODY_DISCS: usize = 256;
 
 fn bad<T>(message: String) -> Result<T> {
     Err(Error::BadValue(message))
@@ -115,11 +123,31 @@ fn within(lo: f64, hi: f64, origin: f64, side: f64, n: usize) -> Option<(usize, 
     (last >= first).then_some((first as usize, last as usize))
 }
 
-/// A tool as the simulation cuts with it: a radius and the shape below it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A tool as the simulation cuts with it: a radius and the shape below it, and above its
+/// flutes what does not cut.
+#[derive(Clone, Debug, PartialEq)]
 struct Cutter {
     radius: f64,
     profile: Profile,
+    /// The tool above its flutes, from the tip up.
+    body: Vec<Disc>,
+}
+
+/// A part of a tool that does not cut: from `above` mm above the tip it is `radius` wide.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Disc {
+    radius: f64,
+    above: f64,
+    part: BodyPart,
+}
+
+/// Which part of a tool that does not cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyPart {
+    /// Above its flutes: its neck or its shank.
+    Shank,
+    /// Its holder.
+    Holder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,7 +187,34 @@ impl Cutter {
             }
             _ => Profile::Flat,
         };
-        Ok(Cutter { radius, profile })
+        // Above the flutes nothing cuts: the neck, as wide as the cutter at most; the shank where
+        // it is wider, from the shoulder; and the holder's pieces from where the tool leaves it.
+        let usable = |v: f64| v.is_finite() && v > 0.0;
+        let mut body = Vec::new();
+        if usable(g.flute_length) {
+            body.push(Disc { radius, above: g.flute_length, part: BodyPart::Shank });
+            let shank = 0.5 * g.shank_diameter;
+            if usable(shank) && shank > radius + 1e-9 {
+                let from = if usable(g.shoulder_length) { g.shoulder_length.max(g.flute_length) } else { g.flute_length };
+                body.push(Disc { radius: shank, above: from, part: BodyPart::Shank });
+            }
+        }
+        let mut above = tool.holder.stick_out;
+        for piece in &tool.holder.segments {
+            let (lower, upper) = (0.5 * piece.lower_diameter, 0.5 * piece.upper_diameter);
+            if !(usable(above) && usable(piece.length) && usable(lower.max(upper))) || body.len() + HOLDER_STEPS > MAX_BODY_DISCS {
+                break;
+            }
+            // A cone in steps, each as wide as its wider end: never narrower than the holder.
+            let steps = if (upper - lower).abs() <= 1e-9 { 1 } else { HOLDER_STEPS };
+            for k in 0..steps {
+                let (from, to) = (k as f64 / steps as f64, (k + 1) as f64 / steps as f64);
+                let widest = (lower + from * (upper - lower)).max(lower + to * (upper - lower));
+                body.push(Disc { radius: widest, above: above + from * piece.length, part: BodyPart::Holder });
+            }
+            above += piece.length;
+        }
+        Ok(Cutter { radius, profile, body })
     }
 
     /// How far the cutting surface is above the tip at `out` mm from the axis (within the radius).
@@ -200,6 +255,42 @@ pub struct RapidHit {
     pub depth: f64,
 }
 
+/// A move that brought a part of the tool that does not cut into material.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyHit {
+    pub operation: usize,
+    pub move_index: usize,
+    pub part: BodyPart,
+    /// Where: the centre of the cell whose material was furthest above that part of the tool,
+    /// and that part's own height there.
+    pub at: Vec3,
+    /// How far into the material, mm.
+    pub depth: f64,
+}
+
+/// The stretch of a straight move (as shares of it) during which a point `(px, py)` from the
+/// move's start is within `r` of the tool's axis, the share at which the axis is nearest, and
+/// how near that is; `None` when it never is. `(dx, dy)` is the move seen from above.
+fn stretch(px: f64, py: f64, dx: f64, dy: f64, r: f64) -> Option<(f64, f64, f64, f64)> {
+    let along = dx * dx + dy * dy;
+    if along <= 1e-18 {
+        let out = px.hypot(py);
+        return (out <= r).then_some((0.0, 1.0, 0.0, out));
+    }
+    let middle = (px * dx + py * dy) / along;
+    let off = (px * dy - py * dx).abs() / along.sqrt();
+    if off > r {
+        return None;
+    }
+    let half = (r * r - off * off).sqrt() / along.sqrt();
+    let (t0, t1) = ((middle - half).max(0.0), (middle + half).min(1.0));
+    if t0 > t1 {
+        return None;
+    }
+    let nearest = middle.clamp(0.0, 1.0);
+    Some((t0, t1, nearest, (px - nearest * dx).hypot(py - nearest * dy)))
+}
+
 /// What one move of a toolpath has been found to do, as its pieces are passed.
 struct Found {
     operation: usize,
@@ -209,6 +300,8 @@ struct Found {
     /// Its deepest cut below the part, and where as a rapid it was furthest below the material.
     gouge: Option<Gouge>,
     hit: Option<RapidHit>,
+    /// Where a part of the tool that does not cut was deepest in material.
+    body: Option<BodyHit>,
 }
 
 /// What one toolpath did to the stock.
@@ -219,6 +312,8 @@ pub struct CutReport {
     /// How many of its moves cut into the part, and how many of its rapids passed through material.
     pub gouges: usize,
     pub rapid_hits: usize,
+    /// How many of its moves brought the tool's shank or holder into material.
+    pub body_hits: usize,
 }
 
 /// A stock being cut.
@@ -244,6 +339,12 @@ pub struct Simulation {
     pub rapid_hits: Vec<RapidHit>,
     /// How far below the stock's bottom the lowest cut went, mm (0 when none did).
     pub below_stock: f64,
+    /// The stock's top before anything was cut: no material is above it.
+    pub top: f64,
+    /// How many moves have brought a tool's shank or holder into material, and the first
+    /// [`MAX_LISTED`] of them.
+    pub body_hit_count: usize,
+    pub body_hits: Vec<BodyHit>,
 }
 
 impl Simulation {
@@ -265,6 +366,9 @@ impl Simulation {
             rapid_hit_count: 0,
             rapid_hits: Vec::new(),
             below_stock: 0.0,
+            top: stock.max.z,
+            body_hit_count: 0,
+            body_hits: Vec::new(),
         })
     }
 
@@ -316,7 +420,7 @@ impl Simulation {
         toolpath.validate()?;
         let cutter = Cutter::of(tool)?;
         let motion = CycleMotion::default();
-        let before = (self.removed, self.gouge_count, self.rapid_hit_count);
+        let before = (self.removed, self.gouge_count, self.rapid_hit_count, self.body_hit_count);
         let mut plain: Vec<Move> = Vec::new();
         for (index, (from, m)) in toolpath.walk().enumerate() {
             plain.clear();
@@ -325,7 +429,7 @@ impl Simulation {
                 other => plain.push(other),
             }
             let mut at = from;
-            let mut found = Found { operation, move_index: index, allowed: into_part, gouge: None, hit: None };
+            let mut found = Found { operation, move_index: index, allowed: into_part, gouge: None, hit: None, body: None };
             for step in &plain {
                 match *step {
                     Move::Rapid { to } => self.pass(at, to, &cutter, false, &mut found),
@@ -359,14 +463,59 @@ impl Simulation {
                     self.rapid_hits.push(hit);
                 }
             }
+            if let Some(hit) = found.body {
+                self.body_hit_count += 1;
+                if self.body_hits.len() < MAX_LISTED {
+                    self.body_hits.push(hit);
+                }
+            }
         }
-        Ok(CutReport { removed: self.removed - before.0, gouges: self.gouge_count - before.1, rapid_hits: self.rapid_hit_count - before.2 })
+        Ok(CutReport {
+            removed: self.removed - before.0,
+            gouges: self.gouge_count - before.1,
+            rapid_hits: self.rapid_hit_count - before.2,
+            body_hits: self.body_hit_count - before.3,
+        })
+    }
+
+    /// Notes where a part of the tool that does not cut is in material during one straight move
+    /// of the tip from `a` to `b`, cutting or not: the material as it stands before the move.
+    /// A part higher than the stock ever was is not looked at, which is nearly every move.
+    fn body_pass(&self, a: Vec3, b: Vec3, cutter: &Cutter, found: &mut Found) {
+        let field = &self.stock;
+        let (dx, dy, dz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+        for disc in &cutter.body {
+            if !(a.z.min(b.z) + disc.above < self.top - self.tolerance) {
+                continue;
+            }
+            // Under the cutter itself the wall's own row of cells is the grid's error, as it is
+            // for a cut; a wider shank and a holder are checked to their full width.
+            let r = if disc.radius <= cutter.radius + 1e-9 { (disc.radius - WALL_SLACK * field.dx.max(field.dy)).max(0.0) } else { disc.radius };
+            let Some((i0, i1)) = field.columns(a.x.min(b.x) - r, a.x.max(b.x) + r) else { continue };
+            let Some((j0, j1)) = field.rows(a.y.min(b.y) - r, a.y.max(b.y) + r) else { continue };
+            for j in j0..=j1 {
+                let y = field.y + (j as f64 + 0.5) * field.dy;
+                for i in i0..=i1 {
+                    let x = field.x + (i as f64 + 0.5) * field.dx;
+                    let Some((t0, t1, ..)) = stretch(x - a.x, y - a.y, dx, dy, r) else { continue };
+                    let Some(height) = field.heights.get(j * field.nx + i) else { continue };
+                    // The lowest that part of the tool gets over the cell.
+                    let z = (a.z + t0 * dz).min(a.z + t1 * dz) + disc.above;
+                    let depth = height - z;
+                    if depth > self.tolerance && found.body.is_none_or(|worst| depth > worst.depth) {
+                        found.body =
+                            Some(BodyHit { operation: found.operation, move_index: found.move_index, part: disc.part, at: Vec3 { x, y, z }, depth });
+                    }
+                }
+            }
+        }
     }
 
     /// One straight move of the tool's tip from `a` to `b`: cutting, it lowers the cells under
     /// the tool and notes the deepest cut below the part; at rapid, it notes where the tool is
     /// furthest below the material's top.
     fn pass(&mut self, a: Vec3, b: Vec3, cutter: &Cutter, cutting: bool, found: &mut Found) {
+        self.body_pass(a, b, cutter, found);
         let (operation, move_index) = (found.operation, found.move_index);
         let field = &mut self.stock;
         let r = cutter.radius;
@@ -374,7 +523,6 @@ impl Simulation {
         let Some((i0, i1)) = field.columns(a.x.min(b.x) - r, a.x.max(b.x) + r) else { return };
         let Some((j0, j1)) = field.rows(a.y.min(b.y) - r, a.y.max(b.y) + r) else { return };
         let (dx, dy, dz) = (b.x - a.x, b.y - a.y, b.z - a.z);
-        let along = dx * dx + dy * dy;
         let area = field.dx * field.dy;
         let inner = (r - WALL_SLACK * field.dx.max(field.dy)).max(0.0);
         for j in j0..=j1 {
@@ -384,26 +532,7 @@ impl Simulation {
                 let (px, py) = (x - a.x, y - a.y);
                 // The stretch of the move (as shares of it) during which the cell is under the
                 // tool, and how near the tool's axis comes to it.
-                let (t0, t1, nearest, least) = if along <= 1e-18 {
-                    let out = px.hypot(py);
-                    if out > r {
-                        continue;
-                    }
-                    (0.0, 1.0, 0.0, out)
-                } else {
-                    let middle = (px * dx + py * dy) / along;
-                    let off = (px * dy - py * dx).abs() / along.sqrt();
-                    if off > r {
-                        continue;
-                    }
-                    let half = (r * r - off * off).sqrt() / along.sqrt();
-                    let (t0, t1) = ((middle - half).max(0.0), (middle + half).min(1.0));
-                    if t0 > t1 {
-                        continue;
-                    }
-                    let nearest = middle.clamp(0.0, 1.0);
-                    (t0, t1, nearest, (px - nearest * dx).hypot(py - nearest * dy))
-                };
+                let Some((t0, t1, nearest, least)) = stretch(px, py, dx, dy, r) else { continue };
                 // The lowest the tool's surface gets over the cell.
                 let surface = |t: f64| a.z + t * dz + cutter.rise((px - t * dx).hypot(py - t * dy).min(r));
                 let z = match cutter.profile {

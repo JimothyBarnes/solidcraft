@@ -89,7 +89,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("id → removes the operation"),
     CommandSpec::new("cam.simulate", "Simulate", crate::checked!("cam.simulate", simulate)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSimulateParams>::new()).output(output_schema_for::<CamSimulated>)
-        .params("setup: id, cell?: mm → the setup's operations cut from its stock on a grid of heights: stock_volume, removed, over_part, beside_part (mm3), operations: [{id, name, removed, gouges, rapid_hits, skipped?}], gouges and rapid_hits: [{operation, move, at: [x, y, z], depth}] with their counts, below_stock; the part's heights are read from the bodies' exact faces; a check as fine as its cells (cell, cells, tolerance), never a proof that a program is safe to run"),
+        .params("setup: id, cell?: mm → the setup's operations cut from its stock on a grid of heights: stock_volume, removed, over_part, beside_part (mm3), operations: [{id, name, removed, gouges, rapid_hits, body_hits, skipped?}], gouges and rapid_hits: [{operation, move, at: [x, y, z], depth}] with their counts, body_hits: [{operation, move, part: shank | holder, at, depth}] where a tool's shank or holder is in material, below_stock; the part's heights are read from the bodies' exact faces; a check as fine as its cells (cell, cells, tolerance), never a proof that a program is safe to run"),
     CommandSpec::new("cam.setup.sheet", "Setup Sheet", crate::checked!("cam.setup.sheet", setup_sheet)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<crate::schema::cam::CamSetupSheetParams>::new()).output(output_schema_for::<crate::schema::cam::CamSetupSheet>)
         .params("setup: id, units?: mm | inch (default the design's), date?: text to write on it, path?: also write it to this .html file, overwrite?: replace an existing file (default false) → html: one page for the shop with the stock, the work origin, the tools (how far each sticks out, the lowest its tip goes), the operations in order with speeds, feeds and times, the setup from above, and what to check (the operations' and the simulation's notes, a tool that goes deeper than it sticks out)"),
@@ -865,7 +865,7 @@ fn work(
 }
 
 // The Manufacture types a view of a setup is made of, for the UI above the engine.
-pub use solidcraft_cam::{Drawn, Placement};
+pub use solidcraft_cam::{BodyPart, Drawn, Placement};
 
 /// Writes `bytes` to the file `path` in one step; a file already there is replaced only when
 /// `overwrite`. `what` names the content in the error.
@@ -1088,6 +1088,8 @@ pub struct SimulatedOperation {
     pub removed: f64,
     pub gouges: usize,
     pub rapid_hits: usize,
+    /// How many of its moves brought the tool's shank or holder into material.
+    pub body_hits: usize,
     /// Why it was left out, when its toolpath could not be worked out or its tool can't be shown.
     pub skipped: Option<String>,
 }
@@ -1152,11 +1154,20 @@ pub fn manufacture_simulation(s: &Session, id: &str, cell: Option<f64>) -> std::
                 removed: cut.removed,
                 gouges: cut.gouges,
                 rapid_hits: cut.rapid_hits,
+                body_hits: cut.body_hits,
                 skipped: None,
             },
             Err(why) => {
                 at = None;
-                SimulatedOperation { id: op.id.clone(), name: op.name.clone(), removed: 0.0, gouges: 0, rapid_hits: 0, skipped: Some(why) }
+                SimulatedOperation {
+                    id: op.id.clone(),
+                    name: op.name.clone(),
+                    removed: 0.0,
+                    gouges: 0,
+                    rapid_hits: 0,
+                    body_hits: 0,
+                    skipped: Some(why),
+                }
             }
         });
     }
@@ -1190,6 +1201,7 @@ fn simulate(s: &mut Session, p: &Value) -> Result<Value> {
                     removed: op.removed,
                     gouges: op.gouges,
                     rapid_hits: op.rapid_hits,
+                    body_hits: op.body_hits,
                     skipped: op.skipped.clone(),
                 })
                 .collect(),
@@ -1207,8 +1219,29 @@ fn simulate(s: &mut Session, p: &Value) -> Result<Value> {
                 .iter()
                 .map(|h| CamSimulatedHit { operation: id_of(h.operation), move_index: h.move_index, at: [h.at.x, h.at.y, h.at.z], depth: h.depth })
                 .collect(),
+            body_hit_count: done.stock.body_hit_count,
+            body_hits: done
+                .stock
+                .body_hits
+                .iter()
+                .map(|h| crate::schema::cam::CamSimulatedBodyHit {
+                    operation: id_of(h.operation),
+                    move_index: h.move_index,
+                    part: body_part(h.part).to_string(),
+                    at: [h.at.x, h.at.y, h.at.z],
+                    depth: h.depth,
+                })
+                .collect(),
         },
     )
+}
+
+/// A part of a tool that does not cut, in a word.
+fn body_part(part: solidcraft_cam::BodyPart) -> &'static str {
+    match part {
+        solidcraft_cam::BodyPart::Shank => "shank",
+        solidcraft_cam::BodyPart::Holder => "holder",
+    }
 }
 
 fn op_toolpath_command(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1449,6 +1482,15 @@ fn setup_sheet(s: &mut Session, p: &Value) -> Result<Value> {
                     "The simulation found {} rapid move(s) through material, the deepest {:.2} mm, in {}.",
                     sim.rapid_hit_count,
                     deepest.depth,
+                    name_of(deepest.operation)
+                ));
+            }
+            if let Some(deepest) = sim.body_hits.iter().max_by(|a, b| a.depth.total_cmp(&b.depth)) {
+                notes.push(format!(
+                    "The simulation found {} move(s) with a tool's shank or holder in material, the deepest {:.2} mm (the {}), in {}.",
+                    sim.body_hit_count,
+                    deepest.depth,
+                    body_part(deepest.part),
                     name_of(deepest.operation)
                 ));
             }

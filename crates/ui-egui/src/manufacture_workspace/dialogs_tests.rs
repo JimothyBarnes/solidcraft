@@ -1317,6 +1317,7 @@ fn simulate_draws_the_stock_as_it_is_left_and_says_what_it_found() {
     assert!(h.widget("175.64 cm³").is_some() && h.widget("8.36 cm³").is_some());
     assert!(h.widget("Face 1").is_some() && h.widget("Pocket 2").is_some());
     assert!(h.widget(tr("manufacture.sim_no_gouge")).is_some() && h.widget(tr("manufacture.sim_no_rapid")).is_some());
+    assert!(h.widget(tr("manufacture.sim_no_body")).is_some());
     assert!(h.widget(tr("manufacture.sim_note")).is_some(), "a check, not a proof");
     // On the model: the stock as it is left, in place of its box (whose edges stay) and of the
     // toolpaths that left it so.
@@ -1507,4 +1508,30 @@ fn the_setup_sheet_is_saved_where_the_save_prompt_says() {
     let html = std::fs::read_to_string(&file).unwrap();
     assert!(html.starts_with("<!DOCTYPE html>") && html.contains("Face 1") && html.contains("<svg") && html.contains("Unverified program"), "{html}");
     assert!(html.contains("<tr><th>Stock</th><td>62.00 × 42.00 × 21.00 mm, aluminium</td></tr>"));
+}
+
+#[test]
+fn simulate_says_when_a_holder_is_in_the_stock() {
+    let mut h = harness();
+    // The plate's big pocket (6 deep under 1 mm of stock) cut with a 10 mm end mill that sticks
+    // only 5 out of a holder 40 across: at the floor the holder's face is 2 into the stock.
+    pocketed_plate(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    let mut tool = data(&mut h)["tools"][0].clone();
+    tool["holder"] = json!({"stick_out": 5.0, "segments": [{"length": 30.0, "lower_diameter": 40.0, "upper_diameter": 40.0}]});
+    h.app.run("cam.tool.edit", json!({"number": 1, "tool": tool})).unwrap();
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    h.app.run("cam.op.pocket", json!({"setup": "setup-1", "tool": 1, "pocket": {"pockets": [[0, 0]]}})).unwrap();
+    h.frames(3);
+    ribbon(&mut h, "cam.simulate");
+    let simulated = simulate_form(&mut h).simulated().expect("a simulation");
+    let count = simulated.stock.body_hit_count;
+    assert!(count > 0 && simulated.stock.gouge_count == 0, "{count}");
+    let said = solidcraft_ui_text::format(
+        "manufacture.sim_body",
+        &[("count", &count.to_string()), ("depth", "2.00 mm"), ("part", tr("manufacture.sim_part_holder")), ("operation", "Pocket 1")],
+    );
+    assert!(h.widget(&said).is_some(), "{said}");
+    assert!(h.widget(tr("manufacture.sim_no_body")).is_none() && h.widget(tr("manufacture.sim_no_gouge")).is_some());
+    press(&mut h, "Close");
 }
