@@ -43,6 +43,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Import(_)) => "import",
         Some(Dialog::Setup(_)) => "setup",
         Some(Dialog::Face(_)) => "face",
+        Some(Dialog::Contour(_)) => "contour",
         Some(Dialog::Drill(_)) => "drill",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
@@ -67,6 +68,13 @@ fn face_form(h: &mut Harness) -> &mut FaceForm {
     match h.app.manufacture_workspace.dialog.as_mut() {
         Some(Dialog::Face(form)) => form,
         _ => panic!("Face is not open"),
+    }
+}
+
+fn contour_form(h: &mut Harness) -> &mut ContourForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Contour(form)) => form,
+        _ => panic!("Contour is not open"),
     }
 }
 
@@ -464,6 +472,7 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
     let placed = [
         ("cam.setup.create", "SETUP"),
         ("cam.op.face", "MILLING"),
+        ("cam.op.contour", "MILLING"),
         ("cam.op.drill", "DRILLING"),
         ("cam.post", "ACTIONS"),
         ("cam.tool.create", "MANAGE"),
@@ -957,4 +966,141 @@ fn tools_go_out_to_a_library_file_and_back_in() {
         (file_name("Bracket v2 tools", "tools", "json"), file_name(" / ", "tools", "json")),
         ("Bracket-v2-tools.json".to_string(), "tools.json".to_string())
     );
+}
+
+#[test]
+fn contour_cuts_round_the_part_and_keeps_only_what_is_typed() {
+    use std::f64::consts::PI;
+    let mut h = harness();
+    // Nothing to cut round or with: the form says what to make first.
+    ribbon(&mut h, "cam.op.contour");
+    assert_eq!(open(&h), "contour");
+    assert!(h.widget(tr("manufacture.no_setup")).is_some());
+    press(&mut h, "Cancel");
+    block(&mut h);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.contour");
+    assert!(h.widget(tr("manufacture.no_tool_for_contour")).is_some());
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("contour", json!([])));
+    press(&mut h, "Cancel");
+    add_tool(&mut h, "drill", 6.0);
+    ribbon(&mut h, "cam.op.contour");
+    assert!(h.widget(tr("manufacture.no_tool_for_contour")).is_some(), "a drill cuts no wall");
+    press(&mut h, "Cancel");
+
+    // With the 20 mm end mill (T2) the form shows what the engine works out, nothing typed: down
+    // to the block's bottom (Z -21 under 1 mm of stock), in steps of at most half the tool, at
+    // the speed and feed of the tool's data for a cut as wide as the tool.
+    add_mill(&mut h, "aluminium");
+    ribbon(&mut h, "cam.op.contour");
+    let rpm = 200_000.0 / (20.0 * PI);
+    let form = contour_form(&mut h);
+    assert_eq!((form.bottom, form.typed_bottom, form.stepdown, form.typed_stepdown, form.leave, form.direction), (-21.0, false, 10.0, false, 0.0, 0));
+    assert!(form.rpm == 3183.0 && (form.feed - 0.2 * rpm).abs() < 1e-9, "{} rev/min, {} mm/min", form.rpm, form.feed);
+    assert!(h.widget("3 × 7.00 mm").is_some(), "21 mm in three levels of 7");
+    // 57 mm of plunging at half the feed and three rounds of 206 + 20 pi at the feed: 86.8 s.
+    assert!(h.widget("1:27").is_some());
+    assert!(h.widget(tr("manufacture.contour_loose")).is_some() && h.widget(tr("manufacture.preview_note")).is_some());
+    // Drawn before it exists: a rapid down to the retract height and one back up at the end,
+    // and at each of the three levels a plunge, the way in, five straight runs (the side it
+    // starts on is in two), four corners of thirteen pieces each, the way out and a rapid up.
+    let drawn = scene::counts(&h.app);
+    assert_eq!(drawn, (12, 15, 2 + 3 * (1 + 1 + 5 + 4 * 13 + 1 + 1)));
+    assert_eq!(data(&mut h)["setups"][0]["operations"], json!([]));
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    // Nothing was typed, so only the direction is kept: the contour goes on following the model
+    // and its tool.
+    assert_eq!(
+        data(&mut h)["setups"][0]["operations"][0]["operation"],
+        json!({"kind": "contour", "contour": {"top": null, "bottom": null, "stepdown": null, "leave": null, "direction": "climb", "clear": null, "rpm": null, "feed": null}})
+    );
+    assert_eq!(scene::counts(&h.app), drawn, "the operation's own toolpath, where the preview was");
+    let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
+    assert_eq!(made["numbers"]["levels"], json!([-7.0, -14.0, -21.0]));
+    h.frames(3);
+    h.step(&json!({"click": {"browser": "Contour 1 (T2)"}})).unwrap_or_else(|e| panic!("its row in the Browser: {e}"));
+
+    // What is typed is kept: 10 mm short of the bottom, 4 mm steps, half a millimetre left on the
+    // wall, the other way round.
+    ribbon(&mut h, "cam.op.contour");
+    let form = contour_form(&mut h);
+    (form.bottom, form.typed_bottom) = (-11.0, true);
+    (form.stepdown, form.typed_stepdown) = (4.0, true);
+    form.leave = 0.5;
+    form.direction = 1;
+    h.frames(3);
+    assert!(h.widget("3 × 3.67 mm").is_some(), "11 mm in three levels");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][1]["operation"]["contour"].clone();
+    assert_eq!(
+        (kept["bottom"].as_f64(), kept["stepdown"].as_f64(), kept["leave"].as_f64(), kept["direction"].as_str(), kept["rpm"].clone()),
+        (Some(-11.0), Some(4.0), Some(0.5), Some("conventional"), Value::Null)
+    );
+    let made = h.app.run("cam.op.toolpath", json!({"id": "op-2"})).unwrap();
+    assert_eq!((made["numbers"]["levels"].as_array().map(Vec::len), made["numbers"]["offset"].as_f64()), (Some(3), Some(10.5)));
+}
+
+#[test]
+fn contour_says_why_it_would_cut_into_the_part_and_its_form_changes_only_what_it_shows() {
+    let mut h = harness();
+    // A 20 x 20 foot under a 40 x 40 cap: round the foot's outline the tool would cut the cap.
+    h.app.run("solid.box", json!({"length": 20, "width": 20, "height": 10, "corner": [10, 10, 0], "body_name": "Part"})).unwrap();
+    h.app.run("solid.box", json!({"length": 40, "width": 40, "height": 10, "corner": [0, 0, 10], "operation": "join", "targets": ["Part"]})).unwrap();
+    add_mill(&mut h, "aluminium");
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.contour");
+    let form = contour_form(&mut h);
+    let why = form.worked.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("wider above the contour's bottom") && !why.starts_with("operation"), "{why:?}");
+    // The part's bottom is shown all the same: it is the number to change.
+    assert_eq!((form.bottom, form.typed_bottom), (-21.0, false));
+    assert!(h.widget(&why).is_some());
+    assert_eq!(scene::counts(&h.app).2, 0, "no toolpath to draw");
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("contour", json!([])));
+    // Down to the cap's bottom only (Z -11), the outline is the cap's and the contour is made.
+    let form = contour_form(&mut h);
+    (form.bottom, form.typed_bottom) = (-11.0, true);
+    h.frames(3);
+    assert!(contour_form(&mut h).worked.trouble().is_none() && scene::counts(&h.app).2 > 0);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"]["bottom"], json!(-11.0));
+
+    // A contour made by a script, with parts the form does not show (its top, its clearance):
+    // opened and left alone, the form gives back what the design keeps.
+    h.app
+        .run("cam.op.contour", json!({"setup": "setup-1", "tool": 1, "contour": {"top": -1.0, "bottom": -11.0, "clear": 4.0, "stepdown": 5.0}}))
+        .unwrap();
+    let form = ContourForm::edit(&h.app, "op-2").unwrap();
+    assert_eq!(
+        form.params(),
+        json!({"setup": "setup-1", "tool": 1, "contour": {"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "direction": "climb", "clear": 4.0}})
+    );
+    assert!(ContourForm::edit(&h.app, "op-9").is_err());
+    // Its row's Edit opens the form on what it keeps; a change is one edit of the operation.
+    h.frames(3);
+    row_menu(&mut h, "Contour 2 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "contour");
+    assert!(h.widget("Contour 2").is_some() && h.widget("OK").is_some() && h.widget("Create").is_none());
+    assert!(h.widget(tr("manufacture.preview_note_edit")).is_some());
+    let form = contour_form(&mut h);
+    assert_eq!((form.bottom, form.typed_bottom, form.stepdown, form.typed_stepdown, form.typed_rpm), (-11.0, true, 5.0, true, false));
+    form.leave = 0.2;
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][1].clone();
+    assert_eq!((kept["id"].as_str(), kept["name"].as_str(), kept["tool"].as_u64()), (Some("op-2"), Some("Contour 2"), Some(1)));
+    assert_eq!(
+        kept["operation"]["contour"],
+        json!({"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "leave": 0.2, "direction": "climb", "clear": 4.0, "rpm": null, "feed": null})
+    );
+    // A double click on the row opens the same form.
+    h.step(&json!({"click": {"browser": "Contour 1 (T1)"}, "double": true})).unwrap();
+    h.frames(3);
+    assert_eq!(open(&h), "contour");
+    press(&mut h, "Cancel");
 }

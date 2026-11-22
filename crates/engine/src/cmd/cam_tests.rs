@@ -498,7 +498,7 @@ fn a_form_previews_an_operation_before_it_is_made() {
         ("cam.op.face", json!({"setup": 5}), "parameters:"),
         ("cam.op.face", json!(null), "parameters:"),
         ("cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": {"holes": []}}), "drill:"),
-        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill or face operation"),
+        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill, face or contour operation"),
     ] {
         let said = why(&s, command, params.clone());
         assert!(said.contains(expect), "{command} {params}: {said:?} does not say {expect:?}");
@@ -575,7 +575,7 @@ fn commands_that_measure_the_model_bring_it_up_to_date_first() {
     // posting read the evaluated model: the engine finishes a stale model (one left behind by a
     // live drag) before they run. The others read and write only the design's Manufacture data.
     for spec in super::COMMANDS {
-        let measures = matches!(spec.id, "cam.setup.measure" | "cam.setup.holes" | "cam.op.toolpath" | "cam.post");
+        let measures = matches!(spec.id, "cam.setup.measure" | "cam.setup.holes" | "cam.setup.outline" | "cam.op.toolpath" | "cam.post");
         assert_eq!(spec.reads_model, measures, "{}", spec.id);
     }
 }
@@ -831,4 +831,260 @@ fn damaged_manufacture_data_is_kept_and_never_overwritten() {
     assert!(refused(&mut s, "cam.data", json!({})).contains("can't be read"));
     assert!(refused(&mut s, "cam.setup.create", json!({})).contains("kept as it is"));
     assert_eq!(s.doc.plugin_data.get("solidcraft-cam/data.json").map(|b| b.as_ref().to_vec()), Some(damaged.to_vec()));
+}
+
+/// The block of `drilling()` with the 20 mm end mill (tool 4) in the design.
+fn milling() -> Session {
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    s
+}
+
+fn about(v: &Value, want: f64) -> bool {
+    v.as_f64().is_some_and(|got| (got - want).abs() <= 1e-9 * want.abs().max(1.0))
+}
+
+#[test]
+fn a_contour_goes_round_the_outline_read_from_the_model() {
+    use std::f64::consts::PI;
+    let mut s = milling();
+    // The block's outline at its bottom (Z -21 in the WCS, under 1 mm of stock): 60 x 40 about
+    // the origin, four lines.
+    let found = run(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    assert_eq!(
+        (found["id"].as_str(), found["z"].as_f64(), found["loops"].as_array().map(Vec::len)),
+        (Some("setup-1"), Some(-21.0), Some(1)),
+        "{found:#}"
+    );
+    let l = &found["loops"][0];
+    assert!(about(&l["length"], 200.0) && about(&l["area"], 2400.0), "{l:#}");
+    assert_eq!((l["min"].clone(), l["max"].clone()), (json!([-30.0, -20.0]), json!([30.0, 20.0])));
+    let segments = l["segments"].as_array().unwrap();
+    assert_eq!(segments.len(), 4);
+    assert!(segments.iter().all(|seg| seg["type"] == "line"), "{segments:?}");
+    // The contour: three levels of 7 (21 mm in steps of at most half the 20 mm tool), the centre
+    // 10 out, in from the front at Y -33 (see the strategy's own test for every move).
+    assert_eq!(run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert_eq!(n["levels"], json!([-7.0, -14.0, -21.0]));
+    assert_eq!((n["stepdown"].as_f64(), n["offset"].as_f64(), n["entries"].clone()), (Some(10.0), Some(10.0), json!([[0.0, -33.0]])));
+    let rpm = 200_000.0 / (20.0 * PI);
+    assert!(about(&n["rpm"], rpm) && about(&n["feed"], 0.2 * rpm) && about(&n["plunge_feed"], 0.1 * rpm), "{n}");
+    assert!(about(&n["round"], 200.0 + 20.0 * PI), "{n}");
+    assert!(about(&t["feed_length"], 57.0 + 3.0 * (206.0 + 20.0 * PI)) && about(&t["rapid_length"], 97.0), "{t}");
+    assert_eq!((t["min"].clone(), t["max"].clone()), (json!([-40.0, -33.0, -21.0]), json!([40.0, 30.0, 25.0])));
+    // It posts with its arcs, and the program read back is the toolpath.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = posted["text"].as_str().unwrap();
+    // Four clockwise corner arcs at the first level; the lower levels repeat them.
+    assert!(text.lines().filter(|line| line.contains("G2")).count() >= 4, "{text}");
+    // A raised bottom cuts the block half way up: the same outline, read from a section.
+    let half = run(&mut s, "cam.setup.outline", json!({"id": "setup-1", "z": -11}));
+    assert_eq!(half["z"].as_f64(), Some(-11.0));
+    assert!(about(&half["loops"][0]["length"], 200.0) && about(&half["loops"][0]["area"], 2400.0), "{half:#}");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"bottom": -11, "leave": 0.5}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!((t["numbers"]["levels"].clone(), t["numbers"]["offset"].as_f64()), (json!([-5.5, -11.0]), Some(10.5)));
+    // A height below the part reads its lowest outline: a cut through into a spoil board.
+    assert_eq!(run(&mut s, "cam.setup.outline", json!({"id": "setup-1", "z": -50}))["z"].as_f64(), Some(-21.0));
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"bottom": -22, "stepdown": 11}}));
+    assert_eq!(run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["levels"], json!([-11.0, -22.0]));
+    // The outline follows the model: a quarter round of radius 5 cut down one corner is in it
+    // the next time it is read (an outline is kept only for the geometry it was read from).
+    run(&mut s, "solid.cylinder", json!({"diameter": 10, "height": 30, "base": [60, 40, -5], "axis": "Z", "operation": "cut", "targets": ["Block"]}));
+    let cut = run(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    assert!(about(&cut["loops"][0]["length"], 190.0 + 2.5 * PI) && about(&cut["loops"][0]["area"], 2400.0 - 6.25 * PI), "{cut:#}");
+    assert_eq!(run(&mut s, "cam.setup.outline", json!({"id": "setup-1"})), cut, "read again, it is the same");
+    // Above the part there is no outline; neither is there for a setup that isn't.
+    assert!(refused(&mut s, "cam.setup.outline", json!({"id": "setup-1", "z": 5})).contains("has no outline at Z 5 mm"));
+    assert!(refused(&mut s, "cam.setup.outline", json!({"id": "setup-1", "z": 1e300})).contains("finite"));
+    assert!(refused(&mut s, "cam.setup.outline", json!({"id": "setup-9"})).contains("no setup 'setup-9'"));
+    // Another kind's parameters are refused, and so is a tool that can't cut a wall.
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "face": {}})).contains("is a contour: it takes `contour`, not `face`"));
+    assert!(refused(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 3})).contains("does not cut a contour"));
+    assert!(refused(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4, "contour": {"tabs": 4}})).contains("contour"));
+}
+
+#[test]
+fn an_outline_keeps_the_models_arcs_and_leaves_its_holes_alone() {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    // The holed block: holes through it and into it, and a quarter round of radius 5 down the
+    // corner at (30, 20). Its outline is the four sides, 5 short at that corner, and the quarter
+    // arc; the holes are openings, not outline.
+    let mut s = holed();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    let found = run(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    assert_eq!(found["loops"].as_array().map(Vec::len), Some(1), "{found:#}");
+    let l = &found["loops"][0];
+    assert!(about(&l["length"], 190.0 + 2.5 * PI) && about(&l["area"], 2400.0 - 6.25 * PI), "{l:#}");
+    let arcs: Vec<&Value> = l["segments"].as_array().unwrap().iter().filter(|seg| seg["type"] == "arc").collect();
+    assert_eq!(arcs.len(), 1, "{l:#}");
+    assert!(about(&arcs[0]["radius"], 5.0) && about(&arcs[0]["center"][0], 30.0) && about(&arcs[0]["center"][1], 20.0), "{:#}", arcs[0]);
+    // The 20 mm tool is too big for that corner: its centre rolls 10 from each end of the arc,
+    // (25, 20) and (30, 15), and the two turns meet on the diagonal, sqrt(100 - 12.5) from the
+    // middle between them. Each turns from its side to there: a quarter less the angle of
+    // (h + 2.5, h - 2.5), h being that distance along each axis.
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let h = (87.5_f64 / 2.0).sqrt();
+    let turn = FRAC_PI_2 - (h - 2.5).atan2(h + 2.5);
+    assert!(about(&t["numbers"]["round"], 60.0 + 40.0 + 55.0 + 35.0 + 15.0 * PI + 2.0 * 10.0 * turn), "{}", t["numbers"]);
+}
+
+#[test]
+fn a_contour_is_refused_where_the_part_is_wider_above() {
+    // A 20 x 20 foot, 10 high, under a 40 x 40 cap, 10 high: at the foot's outline the tool
+    // would cut the cap away.
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 10, "corner": [10, 10, 0], "body_name": "Part"}));
+    run(&mut s, "solid.box", json!({"length": 40, "width": 40, "height": 10, "corner": [0, 0, 10], "operation": "join", "targets": ["Part"]}));
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.setup.create", json!({"material": "aluminium"}));
+    let said = refused(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    assert!(said.contains("'Part' is wider above the contour's bottom than at it") && said.contains("raise the bottom"), "{said}");
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    let said = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(said.contains("operation op-1 (Contour 1)") && said.contains("wider above"), "{said}");
+    // The form's preview says the same, in its own words.
+    let previewed = crate::cmd::manufacture_preview(&s, "cam.op.contour", &json!({"setup": "setup-1", "tool": 4})).err().unwrap();
+    assert!(previewed.contains("wider above") && !previewed.contains("cam.preview") && !previewed.contains("operation"), "{previewed}");
+    // From the cap's bottom (Z -11 in the WCS) up, the outline is the cap's: 40 x 40.
+    let cap = run(&mut s, "cam.setup.outline", json!({"id": "setup-1", "z": -11}));
+    assert!(about(&cap["loops"][0]["length"], 160.0) && about(&cap["loops"][0]["area"], 1600.0), "{cap:#}");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"bottom": -11}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 160.0 + 20.0 * std::f64::consts::PI), "{}", t["numbers"]);
+    let ok = crate::cmd::manufacture_preview(&s, "cam.op.contour", &json!({"setup": "setup-1", "tool": 4, "contour": {"bottom": -11}})).unwrap();
+    assert!(ok.pieces.len() > 20 && ok.rpm > 0.0 && ok.feed > 0.0 && ok.cut_minutes > 0.0);
+    // The other way up (a cap under a foot) the part is widest at its bottom: fine as it is.
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 40, "width": 40, "height": 10, "corner": [0, 0, 0], "body_name": "Part"}));
+    run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 10, "corner": [10, 10, 10], "operation": "join", "targets": ["Part"]}));
+    run(&mut s, "cam.setup.create", json!({"material": "aluminium"}));
+    let found = run(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    assert!(about(&found["loops"][0]["length"], 160.0), "{found:#}");
+}
+
+#[test]
+fn rounded_corners_are_arcs_in_the_outline_and_a_chamfer_underneath_is_an_overhang() {
+    use std::f64::consts::PI;
+    // The block with its four upright edges rounded to a radius of 5: sides of 50 and 30 and four
+    // quarter arcs. The 20 mm tool's centre runs 10 out: the same sides, the arcs at 15.
+    let mut s = milling();
+    run(&mut s, "solid.fillet", json!({"edges": [[0, 0, 10], [60, 0, 10], [60, 40, 10], [0, 40, 10]], "radius": 5, "body": "Block"}));
+    let found = run(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    assert_eq!(found["loops"].as_array().map(Vec::len), Some(1), "{found:#}");
+    let l = &found["loops"][0];
+    assert!(about(&l["length"], 160.0 + 10.0 * PI) && about(&l["area"], 2400.0 - (4.0 - PI) * 25.0), "{l:#}");
+    let arcs: Vec<&Value> = l["segments"].as_array().unwrap().iter().filter(|seg| seg["type"] == "arc").collect();
+    assert!(arcs.len() == 4 && arcs.iter().all(|arc| about(&arc["radius"], 5.0)), "{l:#}");
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 160.0 + 30.0 * PI), "{}", t["numbers"]);
+    // The top edges rounded too: the part is narrower at its top, which is no overhang.
+    run(&mut s, "solid.chamfer", json!({"edges": [[30, 0, 20], [30, 40, 20]], "distance": 2, "body": "Block"}));
+    assert!(about(&run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["round"], 160.0 + 30.0 * PI));
+    // A 2 mm chamfer along one bottom edge: at the bottom the part is 2 mm narrower than just
+    // above it, so its outline there is not the part's. From the chamfer's top up it is.
+    run(&mut s, "solid.chamfer", json!({"edges": [[30, 0, 0]], "distance": 2, "body": "Block"}));
+    let said = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(said.contains("wider above the contour's bottom"), "{said}");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"bottom": -19}}));
+    assert!(about(&run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["round"], 160.0 + 30.0 * PI));
+}
+
+#[test]
+fn round_parts_and_several_bodies_have_their_outlines() {
+    use std::f64::consts::PI;
+    // A disc of diameter 40: its outline is its circle, and the tool's centre runs at 30.
+    let mut s = Session::default();
+    run(&mut s, "solid.cylinder", json!({"diameter": 40, "height": 10, "body_name": "Disc"}));
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.setup.create", json!({"material": "aluminium"}));
+    let found = run(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    let l = &found["loops"][0];
+    assert!(about(&l["length"], 40.0 * PI) && about(&l["area"], 400.0 * PI), "{l:#}");
+    assert!(l["segments"].as_array().unwrap().iter().all(|seg| seg["type"] == "arc" && about(&seg["radius"], 20.0)), "{l:#}");
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 60.0 * PI), "{}", t["numbers"]);
+    let moves = t["toolpath"]["moves"].as_array().unwrap();
+    assert!(
+        moves.iter().filter(|m| m["kind"] == "arc").count() >= 4 && moves.iter().all(|m| m["kind"] != "arc" || m["direction"] == "clockwise"),
+        "{moves:?}"
+    );
+    // Two bodies standing apart are two loops, each gone round.
+    let mut s = milling();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 30, "corner": [100, 0, 0], "operation": "new", "body_name": "Post"}));
+    let found = run(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    let mut lengths: Vec<f64> = found["loops"].as_array().unwrap().iter().map(|l| l["length"].as_f64().unwrap()).collect();
+    lengths.sort_by(f64::total_cmp);
+    assert!(lengths.len() == 2 && (lengths[0] - 40.0).abs() < 1e-9 && (lengths[1] - 200.0).abs() < 1e-9, "{lengths:?}");
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4, "contour": {"bottom": -20}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 240.0 + 40.0 * PI), "{}", t["numbers"]);
+    assert_eq!(t["numbers"]["entries"].as_array().map(Vec::len), Some(2));
+    // A body hanging in the air above the cut's bottom, beside the others, would be cut into.
+    let mut s = milling();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [100, 0, 5], "operation": "new", "body_name": "Shelf"}));
+    let said = refused(&mut s, "cam.setup.outline", json!({"id": "setup-1"}));
+    assert!(said.contains("'Shelf' is wider above the contour's bottom"), "{said}");
+}
+
+#[test]
+fn an_outline_with_free_form_edges_is_fitted_with_arcs() {
+    use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
+    use solidcraft_geom::prelude::*;
+    let q = |x: f64, y: f64| Vec2 { x, y };
+    let post =
+        |outline: Loop2| solidcraft_kernel::extrude(&Plane::XY, &[Region2 { outer: outline, holes: Vec::new() }], 0.0, 10.0).unwrap().remove(0);
+    let at = |z: f64| Plane { origin: Vec3 { x: 0.0, y: 0.0, z }, ..Plane::XY };
+    // A post shaped like a D, 10 high: a straight side of 40 and one cubic curve bulging 18.75
+    // from it (three quarters of its 25 mm handles).
+    let cubic = Seg2::Cubic { p0: q(20.0, 0.0), p1: q(20.0, 25.0), p2: q(-20.0, 25.0), p3: q(-20.0, 0.0) };
+    let d = post(Loop2 { segs: vec![Seg2::Line { a: q(-20.0, 0.0), b: q(20.0, 0.0) }, cubic] });
+    let found = super::super::cam_outline::outline(&[("Post", &d)], &at(0.0)).unwrap();
+    assert_eq!(found.len(), 1);
+    let outline = &found[0];
+    // Lines and arcs only, closed, counter-clockwise, and never more than 2 microns from the
+    // curve: every piece's ends and middle are measured against the curve itself.
+    assert!(outline.is_line_arc() && outline.is_closed(1e-9) && outline.is_ccw(), "{outline:?}");
+    assert!(outline.segs.len() >= 5, "{} pieces", outline.segs.len());
+    let off = |p: Vec2| if p.y <= 1e-9 { p.y.abs() } else { p.dist(cubic.point_at(cubic.closest_param(p))) };
+    let worst = outline.segs.iter().flat_map(|seg| [seg.start(), seg.mid(), seg.end()]).map(off).fold(0.0, f64::max);
+    assert!(worst <= 0.0021, "{worst} mm from the curve");
+    // The area under a cubic with upright handles of 25 over a 40 mm chord is 3/5 of 40 x 25.
+    assert!((outline.signed_area() - 600.0).abs() < 0.2, "{}", outline.signed_area());
+    // Half way up it is the same outline, read from a section; above the post there is none.
+    let cut = super::super::cam_outline::outline(&[("Post", &d)], &at(5.0)).unwrap();
+    assert!(cut.len() == 1 && (cut[0].signed_area() - outline.signed_area()).abs() < 0.2, "{cut:?}");
+    assert!(super::super::cam_outline::outline(&[("Post", &d)], &at(10.0)).unwrap().is_empty());
+    // An elliptical post, 40 by 20 across: four quarter ellipses held exactly (rational
+    // quadratics of weight cos 45°). Its outline is arcs within 2 microns of the ellipse,
+    // measured to first order (f / |grad f| for f = (x/rx)^2 + (y/ry)^2 - 1).
+    let (rx, ry, w) = (20.0, 10.0, std::f64::consts::FRAC_1_SQRT_2);
+    let quarter = |a: Vec2, apex: Vec2, b: Vec2| Seg2::Conic { a, apex, b, w };
+    let ellipse = post(Loop2 {
+        segs: vec![
+            quarter(q(rx, 0.0), q(rx, ry), q(0.0, ry)),
+            quarter(q(0.0, ry), q(-rx, ry), q(-rx, 0.0)),
+            quarter(q(-rx, 0.0), q(-rx, -ry), q(0.0, -ry)),
+            quarter(q(0.0, -ry), q(rx, -ry), q(rx, 0.0)),
+        ],
+    });
+    let found = super::super::cam_outline::outline(&[("Oval", &ellipse)], &at(0.0)).unwrap();
+    let oval = &found[0];
+    assert!(found.len() == 1 && oval.is_line_arc() && oval.is_closed(1e-9) && oval.is_ccw() && oval.segs.len() >= 8, "{oval:?}");
+    let off = |p: Vec2| ((p.x / rx).powi(2) + (p.y / ry).powi(2) - 1.0).abs() / (2.0 * p.x / (rx * rx)).hypot(2.0 * p.y / (ry * ry));
+    let worst = oval.segs.iter().flat_map(|seg| [seg.start(), seg.mid(), seg.end()]).map(off).fold(0.0, f64::max);
+    assert!(worst <= 0.0021, "{worst} mm from the ellipse");
+    assert!((oval.signed_area() - std::f64::consts::PI * rx * ry).abs() < 0.2, "{}", oval.signed_area());
+    // The offsetter takes the fitted outline: 10 mm out, a smooth convex loop is longer by a
+    // full turn of radius 10, and it is still about the ellipse's own 96.88 mm round.
+    let length = |l: &Loop2| l.segs.iter().map(|seg| seg.length()).sum::<f64>();
+    let grown = solidcraft_cam::offset_region(&Region2 { outer: oval.clone(), holes: Vec::new() }, -10.0).unwrap();
+    assert_eq!(grown.len(), 1);
+    assert!((length(&grown[0].outer) - (length(oval) + 20.0 * std::f64::consts::PI)).abs() < 1e-3, "{} {}", length(&grown[0].outer), length(oval));
+    assert!((length(oval) - 96.884).abs() < 0.01, "{}", length(oval));
 }

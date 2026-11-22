@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
+use crate::contour::ContourOp;
 use crate::drill::DrillOp;
 use crate::face::FaceOp;
 use crate::tool::Tool;
@@ -133,6 +134,8 @@ pub enum OperationKind {
     Drill { drill: DrillOp },
     /// The stock's top taken down to the part's top in straight passes (decision 0010).
     Face { face: FaceOp },
+    /// Round the outside of the part, its outline taken from the model (decision 0013).
+    Contour { contour: ContourOp },
 }
 
 /// One operation of a setup.
@@ -334,6 +337,7 @@ impl ManufactureData {
                 OperationKind::Manual { toolpath } => toolpath.validate().map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Drill { drill } => drill.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Face { face } => face.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Contour { contour } => contour.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())

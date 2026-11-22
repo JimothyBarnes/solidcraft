@@ -15,6 +15,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod contour;
 mod cycle;
 mod drill;
 mod face;
@@ -28,6 +29,7 @@ mod tool;
 mod toolpath;
 mod units;
 
+pub use contour::{ContourOp, Contoured, CutDirection, DEFAULT_CONTOUR_CLEAR, DEFAULT_CONTOUR_STEPDOWN, MAX_CONTOUR_LEVELS};
 pub use cycle::{CycleMotion, DrillCycle, G98Rule, MAX_CYCLE_DISTANCE, MAX_PECKS, MIN_HOLE_DEPTH, MIN_PECK, PeckRetract};
 pub use drill::{Between, DepthTo, DrillOp, Drilled, HoleOrder, MAX_HOLES};
 pub use face::{DEFAULT_FACE_CLEAR, DEFAULT_FACE_STEPOVER, FaceOp, FacePattern, Faced, MAX_FACE_LEVELS, MAX_FACE_PASSES};

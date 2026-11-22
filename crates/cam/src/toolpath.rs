@@ -26,7 +26,7 @@ pub const MAX_TOOL_NUMBER: u32 = 99_999;
 /// controller following it accepts too.
 pub const ARC_RADIUS_TOLERANCE: f64 = 0.002;
 /// The smallest arc radius accepted, in mm.
-const MIN_ARC_RADIUS: f64 = 1e-3;
+pub(crate) const MIN_ARC_RADIUS: f64 = 1e-3;
 /// Start and end closer than this in the arc's plane, in mm, make a full circle.
 const FULL_CIRCLE_CHORD: f64 = 1e-6;
 

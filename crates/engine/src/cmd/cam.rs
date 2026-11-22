@@ -6,18 +6,20 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData,
-    Operation, OperationKind, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
+    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ContourOp, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT,
+    ManufactureData, Operation, OperationKind, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation,
+    WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
+use solidcraft_geom::{Loop2Geom as _, Seg2Geom as _};
 
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
-    CamData, CamDataParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams, CamOpManualParams, CamOpToolpath,
-    CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles,
-    CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams,
-    CamToolWritten, HoleBottom, HoleGroup,
+    CamData, CamDataParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams, CamOpManualParams,
+    CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams,
+    CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupOutline, CamSetupOutlineParams, CamSetupWritten,
+    CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, HoleBottom, HoleGroup, OutlineLoop,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -50,6 +52,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup.holes", "Find Holes", crate::checked!("cam.setup.holes", setup_holes)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSetupHolesParams>::new()).output(output_schema_for::<CamSetupHoles>)
         .params("id: the setup → groups: [{diameter, top, depth, bottom: through | flat | point, holes: [[x, y]]}] in the setup's WCS (mm): the whole cylinder walls of its bodies that run along its Z with nothing above them, from the bodies' exact faces; holes of one diameter, top and depth are a group, the group with the most holes first"),
+    CommandSpec::new("cam.setup.outline", "Find Outline", crate::checked!("cam.setup.outline", setup_outline)).icon("inspect").noundo().read_only()
+        .contract(&TypedContract::<CamSetupOutlineParams>::new()).output(output_schema_for::<CamSetupOutline>)
+        .params("id: the setup, z?: a height in its WCS (default the model's bottom) → z, loops: [{segments, length, area, min, max}] in the setup's WCS (mm): the outer loop of every piece of its bodies' section at that height, lines and arcs from the bodies' exact faces, counter-clockwise; refused when a body is wider above that height than at it"),
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
@@ -59,12 +64,15 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpFaceParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
+    CommandSpec::new("cam.op.contour", "Contour", crate::checked!("cam.op.contour", op_contour)).icon("edit").doc_only()
+        .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock"),
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
     CommandSpec::new("cam.op.edit", "Edit Operation", crate::checked!("cam.op.edit", op_edit)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpEditParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("id, then any of name, tool, suppressed, and the operation's own parameters whole: drill (a drill operation), face (a facing) or toolpath (a hand-made one) → replaces those; parameters of another kind of operation are refused"),
+        .params("id, then any of name, tool, suppressed, and the operation's own parameters whole: drill (a drill operation), face (a facing), contour (a contour) or toolpath (a hand-made one) → replaces those; parameters of another kind of operation are refused"),
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
@@ -411,6 +419,84 @@ pub fn manufacture_holes(s: &Session, id: &str) -> std::result::Result<Vec<HoleG
     holes(s, CMD, setup).map_err(said)
 }
 
+/// The outlines read lately ([`outline_at`]), each under a number made of its bodies' geometry and
+/// its plane. Only outlines that were read are kept, never a refusal.
+static OUTLINES: std::sync::Mutex<Vec<(u64, Vec<solidcore_record::Loop2>)>> = std::sync::Mutex::new(Vec::new());
+const OUTLINES_KEPT: usize = 16;
+
+/// The outline a contour goes round (decision 0013 of the CAM work): the outer loop of every piece
+/// of the section of the setup's bodies at the height `z` of its WCS (the model's bottom when
+/// `None` or below it: a cut past the part goes round the part's lowest outline), in the WCS, and
+/// the height it was read at.
+fn outline_at(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    z: Option<f64>,
+) -> std::result::Result<(f64, Vec<solidcore_record::Loop2>), String> {
+    let floor = p.model.min.z;
+    let z = z.map_or(floor, |z| z.max(floor));
+    if !(z.abs() <= solidcraft_cam::MAX_COORDINATE) {
+        return Err(format!("the height to read the outline at must be finite and within {} mm", solidcraft_cam::MAX_COORDINATE));
+    }
+    // The WCS at that height: a section read in this plane is in the WCS's own X and Y.
+    let plane = solidcore_record::Plane { origin: p.origin + p.z_axis * z, x: p.x_axis, y: p.y_axis };
+    let loops = with_bodies(s, cmd, setup, |bodies| {
+        // Reading an outline cuts the bodies, and a form asks again at every change of a number
+        // that leaves the outline as it was: one read lately from the same geometry is kept.
+        let key = bodies.iter().map(|b| b.geometry_key()).collect::<Option<Vec<u64>>>().map(|geometry| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            geometry.hash(&mut h);
+            bodies.iter().for_each(|b| b.name.hash(&mut h));
+            [plane.origin, plane.x, plane.y].iter().flat_map(|v| [v.x, v.y, v.z]).for_each(|v| v.to_bits().hash(&mut h));
+            h.finish()
+        });
+        let known = key.and_then(|k| OUTLINES.lock().ok().and_then(|kept| kept.iter().find(|(at, _)| *at == k).map(|(_, loops)| loops.clone())));
+        if let Some(loops) = known {
+            return Ok(loops);
+        }
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let loops = super::cam_outline::outline(&named, &plane).map_err(|e| bad(cmd, e))?;
+        if let Some(key) = key
+            && let Ok(mut kept) = OUTLINES.lock()
+        {
+            kept.retain(|(at, _)| *at != key);
+            kept.insert(0, (key, loops.clone()));
+            kept.truncate(OUTLINES_KEPT);
+        }
+        Ok(loops)
+    })
+    .map_err(said)?;
+    if loops.is_empty() {
+        return Err(format!("the part has no outline at Z {z} mm: nothing of it is cut by that height or stands flat on it"));
+    }
+    Ok((z, loops))
+}
+
+fn setup_outline(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.outline";
+    let p: CamSetupOutlineParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let setup = d.setups.iter().find(|x| x.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.id)))?;
+    let (model, _) = model_box(s, CMD, setup)?;
+    let placement = setup.place(model).map_err(|e| bad(CMD, e.to_string()))?;
+    let (z, found) = outline_at(s, CMD, setup, &placement, p.z).map_err(|e| bad(CMD, e))?;
+    let mut loops = Vec::with_capacity(found.len());
+    for l in &found {
+        let around = l.segs.iter().fold(solidcraft_geom::Aabb2::EMPTY, |b, seg| b.union(&seg.bounds()));
+        loops.push(OutlineLoop {
+            segments: serde_json::to_value(&l.segs).map_err(|e| bad(CMD, e.to_string()))?,
+            length: l.segs.iter().map(|seg| seg.length()).sum(),
+            area: l.signed_area().abs(),
+            min: [around.min.x, around.min.y],
+            max: [around.max.x, around.max.y],
+        });
+    }
+    reply(CMD, CamSetupOutline { id: p.id, z, loops })
+}
+
 fn setup_measure(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "cam.setup.measure";
     let p: CamSetupMeasureParams = parse(CMD, "parameters", p)?;
@@ -451,8 +537,12 @@ fn op_face(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.face", "Face", p)
 }
 
-/// What the parameters of `cmd` (`cam.op.drill` or `cam.op.face`) describe: the setup's id, the
-/// name given, the tool's number and the operation.
+fn op_contour(s: &mut Session, p: &Value) -> Result<Value> {
+    add_operation(s, "cam.op.contour", "Contour", p)
+}
+
+/// What the parameters of `cmd` (`cam.op.drill`, `cam.op.face` or `cam.op.contour`) describe: the
+/// setup's id, the name given, the tool's number and the operation.
 fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, OperationKind)> {
     match cmd {
         "cam.op.drill" => {
@@ -468,7 +558,15 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             };
             Ok((p.setup, p.name, p.tool, OperationKind::Face { face }))
         }
-        other => Err(bad(other, "not a command that adds a drill or face operation")),
+        "cam.op.contour" => {
+            let p: CamOpContourParams = parse(cmd, "parameters", p)?;
+            let contour: ContourOp = match &p.contour {
+                Some(v) => parse(cmd, "contour", v)?,
+                None => ContourOp::default(),
+            };
+            Ok((p.setup, p.name, p.tool, OperationKind::Contour { contour }))
+        }
+        other => Err(bad(other, "not a command that adds a drill, face or contour operation")),
     }
 }
 
@@ -553,6 +651,18 @@ fn work(
             });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
         }
+        OperationKind::Contour { contour } => {
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            // Its numbers and tool first: what is wrong with them is said before the model is cut.
+            contour.validate(tool).map_err(failed)?;
+            let (_, outline) = outline_at(s, cmd, setup, &placement, contour.bottom).map_err(|e| bad(cmd, of(op, e)))?;
+            let done = contour.toolpath(start, tool, &placement, material, &outline).map_err(failed)?;
+            let numbers = serde_json::json!({
+                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "levels": done.levels,
+                "stepdown": done.stepdown, "offset": done.offset, "round": done.round, "entries": done.entries
+            });
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+        }
     }
 }
 
@@ -595,7 +705,7 @@ pub struct ToolChoice {
     pub diameter: f64,
 }
 
-/// The design's tools that can do `operation` (`face` or `drill`), for a form to offer; every
+/// The design's tools that can do `operation` (`face`, `drill` or `contour`), for a form to offer; every
 /// tool for any other word. The operations' own checks decide, so a form never offers a tool its
 /// command would refuse.
 pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec<ToolChoice> {
@@ -615,6 +725,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
     let can = |tool: &Tool| match operation {
         "face" => FaceOp::default().validate(tool).is_ok(),
         "drill" => drill.validate(tool).is_ok(),
+        "contour" => ContourOp::default().validate(tool).is_ok(),
         _ => true,
     };
     data.tools.iter().filter(|t| can(t)).map(|t| ToolChoice { number: t.number, name: t.name.clone(), diameter: t.geometry.diameter }).collect()
@@ -696,11 +807,14 @@ pub struct OperationPreview {
     pub feed: f64,
     /// Time spent feeding and dwelling, minutes.
     pub cut_minutes: f64,
+    /// What the strategy worked out, as `cam.op.toolpath` gives it (a contour's levels, a
+    /// facing's passes).
+    pub numbers: Value,
     /// Things worth showing beside the numbers (a capped spindle speed, a thin chip).
     pub notes: Vec<String>,
 }
 
-/// What `command` (`cam.op.face` or `cam.op.drill`) would make from `params`, without making it:
+/// What `command` (`cam.op.face`, `cam.op.drill` or `cam.op.contour`) would make from `params`, without making it:
 /// for a form to draw the toolpath and show the speed and feed it works out before OK, or to say
 /// why there would be no toolpath. It reads the design and changes nothing.
 pub fn manufacture_preview(s: &Session, command: &str, params: &Value) -> std::result::Result<OperationPreview, String> {
@@ -721,6 +835,7 @@ pub fn manufacture_preview(s: &Session, command: &str, params: &Value) -> std::r
         rpm: number("rpm"),
         feed: number("feed"),
         cut_minutes: stats.feed_minutes + stats.dwell_minutes,
+        numbers: worked.numbers,
         notes: worked.notes,
     })
 }
@@ -805,8 +920,9 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Manual { .. } => ("a hand-made toolpath", "toolpath"),
         OperationKind::Drill { .. } => ("a drill operation", "drill"),
         OperationKind::Face { .. } => ("a facing", "face"),
+        OperationKind::Contour { .. } => ("a contour", "contour"),
     };
-    for (given, name) in [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face")] {
+    for (given, name) in [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face"), (&p.contour, "contour")] {
         if given.is_some() && name != takes {
             return Err(bad(CMD, format!("operation {} is {kind}: it takes `{takes}`, not `{name}`", op.id)));
         }
@@ -825,6 +941,11 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Face { face } => {
             if let Some(v) = &p.face {
                 *face = parse(CMD, "face", v)?;
+            }
+        }
+        OperationKind::Contour { contour } => {
+            if let Some(v) = &p.contour {
+                *contour = parse(CMD, "contour", v)?;
             }
         }
     }

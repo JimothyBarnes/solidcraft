@@ -185,6 +185,41 @@ pub struct CamSetupHoles {
     pub groups: Vec<HoleGroup>,
 }
 
+/// Read the outline of a setup's bodies at a height.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupOutlineParams {
+    pub id: String,
+    /// The height, as Z in the setup's WCS; left out, or below the model, the model's bottom.
+    #[serde(default)]
+    pub z: Option<f64>,
+}
+
+/// One closed loop of an outline, in a setup's WCS, mm.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct OutlineLoop {
+    /// Its lines and arcs in order, counter-clockwise, as a sketch profile writes them: `{type:
+    /// line, a: [x, y], b: [x, y]}` or `{type: arc, center: [x, y], radius, start, sweep}` (angles
+    /// in radians, a positive sweep counter-clockwise).
+    pub segments: Value,
+    pub length: f64,
+    /// The area it encloses.
+    pub area: f64,
+    /// The box round it, `[x, y]` of its least and greatest corners.
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+}
+
+/// The outline of a setup's bodies at a height: the outer loop of every piece of their section
+/// there, read from their exact faces (never a display mesh). What a contour goes round.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupOutline {
+    pub id: String,
+    /// The Z the outline was read at.
+    pub z: f64,
+    pub loops: Vec<OutlineLoop>,
+}
+
 /// What a setup command left.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CamSetupWritten {
@@ -238,6 +273,9 @@ pub struct CamOpEditParams {
     /// A facing operation's parameters, whole, as `cam.op.face` takes them.
     #[serde(default)]
     pub face: Option<Value>,
+    /// A contour operation's parameters, whole, as `cam.op.contour` takes them.
+    #[serde(default)]
+    pub contour: Option<Value>,
     /// A hand-made operation's toolpath, whole, as `cam.op.manual` takes it.
     #[serde(default)]
     pub toolpath: Option<Value>,
@@ -277,6 +315,24 @@ pub struct CamOpFaceParams {
     pub face: Option<Value>,
 }
 
+/// Add a contour operation to a setup (decision 0013 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpContourParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: a flat or bull-nose end mill.
+    pub tool: u32,
+    /// `{top?: Z (default the stock top), bottom?: Z (default the model's bottom), stepdown?: mm
+    /// (default half the tool's diameter), leave?: mm of stock left on the wall (default 0),
+    /// direction?: climb | conventional, clear?: mm past the stock where the tool goes down
+    /// (default 2), rpm?, feed?}`; every field has a default.
+    #[serde(default)]
+    pub contour: Option<Value>,
+}
+
 /// Work out one operation's toolpath.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -301,7 +357,8 @@ pub struct CamOpToolpath {
     pub min: [f64; 3],
     pub max: [f64; 3],
     /// What the strategy worked out (a drill: rpm, feed, bottom, r, clearance; a facing: rpm, feed,
-    /// plunge_feed, levels, passes, stepover); empty for a hand-made toolpath.
+    /// plunge_feed, levels, passes, stepover; a contour: rpm, feed, plunge_feed, top, levels,
+    /// stepdown, offset, round, entries); empty for a hand-made toolpath.
     pub numbers: Value,
     pub notes: Vec<String>,
 }

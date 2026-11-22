@@ -27,6 +27,7 @@ pub(crate) mod browser;
 mod cam;
 mod cam_holes;
 mod cam_library;
+mod cam_outline;
 mod cell_grid;
 pub(crate) mod clearance;
 mod clipboard;
