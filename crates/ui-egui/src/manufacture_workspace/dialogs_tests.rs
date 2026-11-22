@@ -1323,6 +1323,23 @@ fn simulate_draws_the_stock_as_it_is_left_and_says_what_it_found() {
     // toolpaths that left it so.
     assert_eq!(scene::counts(&h.app), (0, 15, 0));
     assert!(scene::stock_triangles(&h.app) > 100_000, "{}", scene::stock_triangles(&h.app));
+    // The surface is a hair above the plate's top (model Z 20) and the pocket's floor (Z 14),
+    // and it comes down on the open side of the pocket's walls, where the model's own faces
+    // can't hide it: every piece of it that goes below the top lies wholly over the pocket's
+    // opening (X 20 to 80, Y 20 to 60), none of it behind a wall. The millimetre of stock still
+    // standing all round the plate has its sides too, outside the plate's own walls and down
+    // to the stock's bottom (Z 0).
+    let surface = scene::stock_surface(&h.app);
+    let low: Vec<_> = surface.iter().filter(|triangle| triangle.iter().any(|v| v[2] < 19.9)).collect();
+    assert!(low.len() > 50_000, "{}", low.len());
+    let over_pocket = |v: &[f32; 3]| (20.0..=80.0).contains(&v[0]) && (20.0..=60.0).contains(&v[1]);
+    let beside_plate = |v: &[f32; 3]| !(0.0..=100.0).contains(&v[0]) || !(0.0..=80.0).contains(&v[1]);
+    let sides = low.iter().filter(|triangle| triangle.iter().all(beside_plate)).count();
+    let behind = low.iter().filter(|triangle| !triangle.iter().all(over_pocket) && !triangle.iter().all(beside_plate)).count();
+    assert!(behind == 0 && sides > 1_000, "{behind} behind a wall and {sides} at the stock's sides, of {}", low.len());
+    let heights = |from: f32, to: f32| surface.iter().flatten().filter(|v| v[2] > from && v[2] < to).count();
+    assert!(heights(20.0, 20.04) > 100_000 && heights(14.0, 14.04) > 100_000 && heights(14.04, 20.0) == 0 && heights(20.04, 30.0) == 0);
+    assert!(heights(-0.01, 0.04) > 1_000 && heights(0.04, 14.0) == 0, "the sides reach the stock's bottom");
     press(&mut h, "Close");
     assert_eq!((open(&h), scene::counts(&h.app).0, scene::stock_triangles(&h.app)), ("none", 12, 0));
 

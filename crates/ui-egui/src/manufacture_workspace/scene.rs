@@ -164,50 +164,99 @@ fn placed(sc: &mut GpuScene, p: &Placement, sides: bool) {
     }
 }
 
-/// The stock a simulation left (decision 0015 of the CAM work): its top as a surface through the
-/// cells' heights, a hair above them, each patch coloured by what its cells are: cut into the
-/// part, still standing above it, or cut to size. Where it is cut into the part the surface is
-/// drawn on the part instead (the cut itself is inside the part, where it could not be seen):
-/// the mark lies on the face that was cut into. Where nothing is left and there is no part,
-/// nothing is drawn. A fine grid is drawn every few cells, each patch still coloured by all of
-/// the cells it stands for.
+/// What a cell of a simulated stock is, weakest first: where cells of two kinds meet, the picture
+/// shows the stronger.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Left {
+    /// No part there, and no stock left.
+    Gone,
+    ToSize,
+    Standing,
+    CutInto,
+}
+
+/// The stock a simulation left (decision 0015 of the CAM work), drawn over the model: a surface
+/// through the cells' heights, a hair above them, each patch coloured by what its cells are: cut
+/// into the part, still standing above it, or cut to size. Where the stock is below the model's
+/// own face (cut into it, by mistake or as a chamfer on an edge the model leaves sharp means
+/// to) the surface is drawn on that face: the cut itself is inside the model, where it could not
+/// be seen. Where nothing is left and there is no part, nothing is drawn.
+///
+/// The surface is a patch wider than the cells all round: each of its corners stands as high as
+/// the highest cell within a patch of it. A wall of the model lies somewhere between two cells,
+/// and a surface that came down between those two would be partly behind the wall, where the
+/// model's own face would show through it; this way it comes down on the open side of every
+/// wall. A fine grid is drawn every few cells, each corner still standing for all the cells
+/// round it. (A groove narrower than three patches is drawn closed.) At the stock's own sides
+/// the surface goes down to the stock's bottom wherever stock still stands there.
 fn stock_left(sc: &mut GpuScene, simulated: &Simulated) {
     let t = Tokens::get();
     let (stock, p) = (&simulated.stock, &simulated.placement);
-    let (field, part) = (&stock.stock, stock.part());
+    let (field, part, model) = (&stock.stock, stock.part(), stock.model());
     let (standing, to_size, cut_into) = (sc.color(c4(t.construction_geom)), sc.color(c4(t.figure_ok)), sc.color(c4(t.interference)));
     let patches = field.nx.saturating_sub(1) * field.ny.saturating_sub(1);
     let stride = ((2 * patches) as f64 / MAX_STOCK_TRIANGLES as f64).sqrt().ceil().max(1.0) as usize;
-    // A cell's height, and the part's under it (below everything where there is none).
+    // A cell: how high it is drawn (its stock's top, or the model's face where the stock is
+    // below it), and what it is against the part as it is meant.
     let cell = |i: usize, j: usize| {
-        let under = part.and_then(|part| part.get(j * field.nx + i)).copied().unwrap_or(f64::NEG_INFINITY);
-        field.at(i, j).map(|height| (height, under))
-    };
-    for j in (0..field.ny.saturating_sub(stride)).step_by(stride) {
-        for i in (0..field.nx.saturating_sub(stride)).step_by(stride) {
-            // What the cells this patch stands for are.
-            let (mut into, mut above, mut gone) = (false, false, true);
-            for (height, under) in (j..=j + stride).flat_map(|jj| (i..=i + stride).filter_map(move |ii| cell(ii, jj))) {
-                into |= under > stock.floor && height < under - TO_SIZE;
-                above |= height > under.max(stock.floor) + TO_SIZE;
-                gone &= height <= stock.floor + TO_SIZE && under <= stock.floor;
-            }
-            if gone {
-                continue;
-            }
-            let colour = if into {
-                cut_into
-            } else if above {
-                standing
+        let at = |heights: Option<&[f64]>| heights.and_then(|heights| heights.get(j * field.nx + i)).copied().unwrap_or(f64::NEG_INFINITY);
+        let (meant, face) = (at(part), at(model));
+        field.at(i, j).map(|height| {
+            let left = if meant > stock.floor && height < meant - TO_SIZE {
+                Left::CutInto
+            } else if height > meant.max(stock.floor) + TO_SIZE {
+                Left::Standing
+            } else if meant > stock.floor {
+                Left::ToSize
             } else {
-                to_size
+                Left::Gone
             };
-            let corner = |ii: usize, jj: usize| {
-                let (height, under) = cell(ii, jj).unwrap_or((stock.floor, f64::NEG_INFINITY));
-                let at = field.centre(ii, jj);
-                on_model(p, at.x, at.y, height.max(under) + STOCK_LIFT)
+            (height.max(face), left)
+        })
+    };
+    // A corner of the surface: as high as the highest cell within a patch of it, and what the
+    // cells that high are.
+    let corner = |i: usize, j: usize| {
+        let round = move || {
+            let rows = j.saturating_sub(stride)..=(j + stride).min(field.ny.saturating_sub(1));
+            let columns = i.saturating_sub(stride)..=(i + stride).min(field.nx.saturating_sub(1));
+            rows.flat_map(move |jj| columns.clone().filter_map(move |ii| cell(ii, jj)))
+        };
+        let top = round().map(|(top, _)| top).fold(stock.floor, f64::max);
+        let left = round().filter(|(height, _)| *height >= top - TO_SIZE).map(|(_, left)| left).max().unwrap_or(Left::Gone);
+        (field.centre(i, j), top, left)
+    };
+    // The corners: every few cells, and one more all round at the stock's own sides, down at its
+    // bottom, so that stock still standing at a side shows that side.
+    let along = |from: f64, cells: usize, side: f64, centre: &dyn Fn(usize) -> f64| {
+        let within = (0..cells).step_by(stride).map(|k| (centre(k), Some(k)));
+        std::iter::once((from, None)).chain(within).chain(std::iter::once((from + cells as f64 * side, None))).collect::<Vec<_>>()
+    };
+    let columns = along(field.x, field.nx, field.dx, &|i| field.centre(i, 0).x);
+    let rows = along(field.y, field.ny, field.dy, &|j| field.centre(0, j).y);
+    let row = |&(y, j): &(f64, Option<usize>)| {
+        let at = |&(x, i): &(f64, Option<usize>)| match (i, j) {
+            (Some(i), Some(j)) => corner(i, j),
+            _ => (solidcore_record::Vec2 { x, y }, stock.floor, Left::Gone),
+        };
+        columns.iter().map(at).collect::<Vec<_>>()
+    };
+    let mut near: Option<Vec<_>> = None;
+    for far in rows.iter().map(row) {
+        for (a, b) in near.iter().flat_map(|near| near.windows(2).zip(far.windows(2))) {
+            let (&[a, b], &[d, c]) = (a, b) else { continue };
+            // A patch is what its highest corners are: a wall belongs to what stands above it.
+            let corners = [a, b, c, d];
+            let top = corners.iter().map(|corner| corner.1).fold(f64::NEG_INFINITY, f64::max);
+            let highest = corners.iter().filter(|corner| corner.1 >= top - TO_SIZE).map(|corner| corner.2).max();
+            let strongest = corners.iter().map(|corner| corner.2).max();
+            let colour = match if highest == Some(Left::Gone) { strongest } else { highest } {
+                Some(Left::CutInto) => cut_into,
+                Some(Left::Standing) => standing,
+                Some(Left::ToSize) => to_size,
+                Some(Left::Gone) | None => continue,
             };
-            let (a, b, c, d) = (corner(i, j), corner(i + stride, j), corner(i + stride, j + stride), corner(i, j + stride));
+            let [a, b, c, d] = corners.map(|(at, top, _)| on_model(p, at.x, at.y, top + STOCK_LIFT));
             for [u, v, w] in [[a, b, c], [a, c, d]] {
                 let (e, f) = ([v[0] - u[0], v[1] - u[1], v[2] - u[2]], [w[0] - u[0], w[1] - u[1], w[2] - u[2]]);
                 let n = [e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0]];
@@ -218,6 +267,7 @@ fn stock_left(sc: &mut GpuScene, simulated: &Simulated) {
                 }
             }
         }
+        near = Some(far);
     }
 }
 
@@ -244,9 +294,21 @@ fn toolpath(sc: &mut GpuScene, p: &Placement, pieces: &[(Drawn, solidcore_record
 /// How many triangles the stock a simulation left is drawn with, for tests.
 #[cfg(test)]
 pub(crate) fn stock_triangles(app: &SolveApp) -> usize {
+    stock_surface(app).len()
+}
+
+/// The triangles the stock a simulation left is drawn with, in the model's coordinates, for
+/// tests.
+#[cfg(test)]
+pub(crate) fn stock_surface(app: &SolveApp) -> Vec<[[f32; 3]; 3]> {
     let mut sc = GpuScene::default();
     draw(app, &mut sc);
-    sc.tris.len() / crate::gpu::TRI_SIZE / 3
+    let vertex = |bytes: &[u8; crate::gpu::TRI_SIZE]| {
+        let at = |k: usize| bytes.get(4 * k..4 * k + 4).and_then(|b| b.try_into().ok()).map_or(f32::NAN, f32::from_le_bytes);
+        [at(0), at(1), at(2)]
+    };
+    let vertices: Vec<[f32; 3]> = sc.tris.as_chunks::<{ crate::gpu::TRI_SIZE }>().0.iter().map(vertex).collect();
+    vertices.as_chunks::<3>().0.to_vec()
 }
 
 /// How much of a setup the scene holds, for tests: translucent triangles, reference lines and
