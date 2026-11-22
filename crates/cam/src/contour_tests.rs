@@ -89,6 +89,19 @@ fn contoured(op: &ContourOp) -> Result<Contoured> {
     op.toolpath(None, &mill20(), &block(), Some("aluminium"), &[polygon(&BLOCK)])
 }
 
+/// A contour that goes straight in to the wall and straight back out: no arcs.
+fn straight() -> ContourOp {
+    ContourOp { lead: Some(0.0), ..ContourOp::default() }
+}
+
+/// Tool 6: the 20 mm mill as a 6 mm one with 3 flutes.
+fn mill6() -> Tool {
+    let mut tool = mill20();
+    (tool.number, tool.name, tool.flutes) = (6, "6 mm flat end mill".into(), 3);
+    (tool.geometry.diameter, tool.geometry.shank_diameter) = (6.0, 6.0);
+    tool
+}
+
 /// Whether two toolpaths' moves are the same to a nanometre (the offsetter's last bits are its own).
 fn same_moves(got: &[Move], want: &[Move]) -> bool {
     let near = |a: Vec3, b: Vec3| (a.x - b.x).abs() <= 1e-9 && (a.y - b.y).abs() <= 1e-9 && (a.z - b.z).abs() <= 1e-9;
@@ -137,9 +150,10 @@ fn a_contour_goes_clockwise_round_a_block_in_equal_levels() {
     // 20 mm tool) is three levels of 7. The tool's centre is its radius, 10, outside the block:
     // sides at X ±40 and Y ±30, each corner an arc of 10 about the block's corner. The longest
     // sides are the two along X; the front one (Y -30) is where it comes in, from Y -33: the
-    // stock's edge at -21, the tool's radius and 2 clear.
-    let d = contoured(&ContourOp::default()).unwrap();
+    // stock's edge at -21, the tool's radius and 2 clear. Straight in and out, here.
+    let d = contoured(&straight()).unwrap();
     assert_eq!((d.top, d.levels.clone()), (0.0, vec![-7.0, -14.0, -21.0]));
+    assert_eq!((d.leads.clone(), d.tabs.len(), d.tab_top), (vec![0.0], 0, None));
     assert_eq!((d.stepdown, d.offset), (10.0, 10.0));
     assert_eq!(d.entries, vec![[0.0, -33.0]]);
     assert!(close(d.round, 200.0 + 20.0 * PI), "{}", d.round);
@@ -170,7 +184,7 @@ fn a_contour_goes_clockwise_round_a_block_in_equal_levels() {
 
 #[test]
 fn conventional_goes_the_other_way_and_stock_to_leave_moves_the_path_out() {
-    let d = contoured(&ContourOp { direction: CutDirection::Conventional, stepdown: Some(21.0), ..ContourOp::default() }).unwrap();
+    let d = contoured(&ContourOp { direction: CutDirection::Conventional, stepdown: Some(21.0), ..straight() }).unwrap();
     assert_eq!(d.levels, vec![-21.0]);
     let arc = |x: f64, y: f64, cx: f64, cy: f64| Move::Arc {
         to: p(x, y, -21.0),
@@ -198,7 +212,7 @@ fn conventional_goes_the_other_way_and_stock_to_leave_moves_the_path_out() {
     assert!(same_moves(&d.toolpath.moves[5..18], &want), "{:#?}", d.toolpath.moves);
     // Half a millimetre left on the wall: the centre is 10.5 out, so it comes in to Y -30.5 from
     // the same place beside the stock, and the round is 200 + 21 pi.
-    let d = contoured(&ContourOp { leave: Some(0.5), ..ContourOp::default() }).unwrap();
+    let d = contoured(&ContourOp { leave: Some(0.5), ..straight() }).unwrap();
     assert_eq!((d.offset, d.entries.clone()), (10.5, vec![[0.0, -33.0]]));
     assert!(close(d.round, 200.0 + 21.0 * PI), "{}", d.round);
     assert!(same_moves(
@@ -224,9 +238,10 @@ fn heights_and_the_stepdown_given_set_the_levels() {
     // Speed and feed typed in: used as they are, plunging at half the feed.
     let d = contoured(&ContourOp { rpm: Some(2000.0), feed: Some(500.0), ..ContourOp::default() }).unwrap();
     assert_eq!((d.rpm, d.feed, d.plunge_feed), (2000.0, 500.0, 250.0));
-    // More clearance moves where it goes down further out.
+    // More clearance moves where it goes down further out (2 to the side, where the arc on to
+    // the wall begins).
     let d = contoured(&ContourOp { clear: Some(5.0), ..ContourOp::default() }).unwrap();
-    assert_eq!(d.entries, vec![[0.0, -36.0]]);
+    assert_eq!(d.entries, vec![[2.0, -36.0]]);
 }
 
 /// The distance from `at` to the closed polygon through `points`.
@@ -289,8 +304,8 @@ fn the_tool_never_comes_nearer_the_part_than_its_radius_and_reaches_every_wall()
         }
     }
     // It comes in at the front (the longest side, Y -40 in the WCS, 60 long as the left one is, and nearer
-    // the front), from beside the stock.
-    assert_eq!(d.entries, vec![[0.0, -43.0]]);
+    // the front), from beside the stock, 2 to the side of the middle for its arc on to the wall.
+    assert_eq!((d.entries.clone(), d.leads.clone()), (vec![[2.0, -43.0]], vec![2.0]));
 }
 
 #[test]
@@ -298,7 +313,7 @@ fn a_round_part_is_cut_in_arcs_about_its_centre() {
     // A disc of radius 20 as one full arc; the tool's centre runs at 30.
     let disc = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 20.0, start: 0.0, sweep: 2.0 * PI }] };
     let placement = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(40.0, 40.0, 10.0) }, 1.0);
-    let d = ContourOp::default().toolpath(None, &mill20(), &placement, Some("aluminium"), &[disc]).unwrap();
+    let d = straight().toolpath(None, &mill20(), &placement, Some("aluminium"), &[disc]).unwrap();
     assert!(close(d.round, 60.0 * PI), "{}", d.round);
     assert_eq!(d.levels, vec![-5.5, -11.0]);
     // It comes in straight out from the circle, from beside the stock (21 + 10 + 2 from the middle).
@@ -330,9 +345,11 @@ fn each_part_is_gone_round_and_the_way_in_never_crosses_another() {
     let right = [(35.0, -50.0), (45.0, -50.0), (45.0, 50.0), (35.0, 50.0)];
     let placement = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(90.0, 100.0, 10.0) }, 1.0);
     let d = ContourOp::default().toolpath(None, &mill20(), &placement, Some("aluminium"), &[polygon(&left), polygon(&right)]).unwrap();
+    // Each goes down 2 before the middle of its side, where its arc on to the wall begins:
+    // clockwise is up the left bar's left side and down the right bar's right side.
     let mut entries = d.entries.clone();
     entries.sort_by(|a, b| a[0].total_cmp(&b[0]));
-    assert_eq!(entries, vec![[-58.0, 0.0], [58.0, 0.0]]);
+    assert_eq!(entries, vec![[-58.0, -2.0], [58.0, 2.0]]);
     assert!(close(d.round, 2.0 * (220.0 + 20.0 * PI)), "{}", d.round);
     // Between the two the tool is up at the retract height.
     let mut at = d.toolpath.start;
@@ -409,8 +426,8 @@ fn what_is_worth_knowing_is_noted() {
     // A block in stock 100 mm bigger all round: the way in is 100 mm of full-width cutting, at every level.
     let wide = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(60.0, 40.0, 20.0) }, 100.0);
     let d = ContourOp::default().toolpath(None, &mill20(), &wide, Some("aluminium"), &[polygon(&BLOCK)]).unwrap();
-    assert_eq!(d.entries, vec![[0.0, -132.0]]);
-    assert!(d.notes.iter().any(|n| n.contains("102.0 mm of cutting as wide as the tool")), "{:?}", d.notes);
+    assert_eq!(d.entries, vec![[2.0, -132.0]]);
+    assert!(d.notes.iter().any(|n| n.contains("100.0 mm of cutting as wide as the tool")), "{:?}", d.notes);
 }
 
 #[test]
@@ -465,6 +482,12 @@ fn what_cannot_be_contoured_is_refused_with_the_reason() {
         (ContourOp { bottom: Some(f64::NAN), ..ContourOp::default() }, mill20(), "finite"),
         (ContourOp { rpm: Some(0.0), ..ContourOp::default() }, mill20(), "rpm"),
         (ContourOp { feed: Some(-1.0), ..ContourOp::default() }, mill20(), "feed"),
+        (ContourOp { lead: Some(-1.0), ..ContourOp::default() }, mill20(), "radius of the arcs in and out"),
+        (ContourOp { tabs: Some(Tabs { count: 0, width: None, height: None }), ..ContourOp::default() }, mill20(), "number of tabs"),
+        (ContourOp { tabs: Some(Tabs { count: 2, width: Some(0.0), height: None }), ..ContourOp::default() }, mill20(), "width and height"),
+        // The round is 200 + 20 pi, about 263 mm: six tabs of 6 with the 20 mm tool take 46 each.
+        (ContourOp { tabs: Some(Tabs { count: 6, width: None, height: None }), ..ContourOp::default() }, mill20(), "6 tab(s) 6 mm wide do not fit"),
+        (ContourOp { tabs: Some(Tabs { count: 2, width: None, height: Some(21.0) }), ..ContourOp::default() }, mill20(), "as high as the cut"),
     ];
     for (op, tool, expect) in cases {
         let e = op.toolpath(None, &tool, &block(), Some("aluminium"), &[polygon(&BLOCK)]).unwrap_err().to_string();
@@ -502,7 +525,7 @@ fn hostile_numbers_never_panic() {
     let tool = mill20();
     let outline = [polygon(&BLOCK)];
     for &v in &bad {
-        for field in 0..7 {
+        for field in 0..11 {
             let mut op = ContourOp::default();
             match field {
                 0 => op.top = Some(v),
@@ -511,7 +534,11 @@ fn hostile_numbers_never_panic() {
                 3 => op.leave = Some(v),
                 4 => op.clear = Some(v),
                 5 => op.rpm = Some(v),
-                _ => op.feed = Some(v),
+                6 => op.feed = Some(v),
+                7 => op.lead = Some(v),
+                8 => op.tabs = Some(Tabs { count: 3, width: Some(v), height: None }),
+                9 => op.tabs = Some(Tabs { count: 3, width: None, height: Some(v) }),
+                _ => op.tabs = Some(Tabs { count: if v > 0.0 { usize::MAX } else { 0 }, width: Some(v), height: Some(v) }),
             }
             let _ = op.toolpath(None, &tool, &block(), Some("aluminium"), &outline);
         }
@@ -551,6 +578,363 @@ fn a_contour_operation_is_plain_json_and_every_field_has_a_default() {
     assert_eq!(op.direction, CutDirection::Climb);
     let op: ContourOp = serde_json::from_str(r#"{"direction": "conventional", "stepdown": 3, "bottom": -12, "leave": 0.2}"#).unwrap();
     assert_eq!((op.direction, op.stepdown, op.bottom, op.leave), (CutDirection::Conventional, Some(3.0), Some(-12.0), Some(0.2)));
-    assert!(serde_json::from_str::<ContourOp>(r#"{"tabs": 4}"#).is_err());
+    assert!(serde_json::from_str::<ContourOp>(r#"{"spiral": true}"#).is_err());
     assert_eq!(serde_json::from_value::<ContourOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
+    // Tabs are a number of them at least; the arcs in and out a radius.
+    let op: ContourOp = serde_json::from_str(r#"{"lead": 1.5, "tabs": {"count": 4}}"#).unwrap();
+    assert_eq!((op.lead, op.tabs), (Some(1.5), Some(Tabs { count: 4, width: None, height: None })));
+    let op: ContourOp = serde_json::from_str(r#"{"tabs": {"count": 3, "width": 8, "height": 1.5}}"#).unwrap();
+    assert_eq!(op.tabs, Some(Tabs { count: 3, width: Some(8.0), height: Some(1.5) }));
+    assert!(serde_json::from_str::<ContourOp>(r#"{"tabs": 4}"#).is_err() && serde_json::from_str::<ContourOp>(r#"{"tabs": {"width": 4}}"#).is_err());
+    assert_eq!(serde_json::from_value::<ContourOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
+}
+
+#[test]
+fn the_tool_meets_the_wall_and_leaves_it_by_quarter_turns() {
+    // The 20 mm tool's arcs are 2 mm in radius (a tenth of its diameter) about (0, -32), 2 out
+    // from where the round starts at (0, -30). Clockwise round the part is towards -X along the
+    // front, so the tool comes on from (2, -32), counter-clockwise, and leaves to (-2, -32). It
+    // goes down beside the stock at (2, -33), straight out from where the arc begins, and comes
+    // up where the arc off the wall ends, in the cut it has just made.
+    let d = contoured(&ContourOp::default()).unwrap();
+    assert_eq!((d.entries.clone(), d.leads.clone()), (vec![[2.0, -33.0]], vec![2.0]));
+    assert!(d.notes.is_empty(), "{:?}", d.notes);
+    let level = |z: f64| {
+        let arc = |x: f64, y: f64, cx: f64, cy: f64, direction: ArcDirection| Move::Arc {
+            to: p(x, y, z),
+            center: p(cx, cy, z),
+            plane: Plane::Xy,
+            direction,
+            feed: d.feed,
+        };
+        let line = |x: f64, y: f64| Move::Linear { to: p(x, y, z), feed: d.feed };
+        vec![
+            Move::Linear { to: p(2.0, -33.0, z), feed: d.plunge_feed },
+            line(2.0, -32.0),
+            arc(0.0, -30.0, 0.0, -32.0, ArcDirection::CounterClockwise),
+            line(-30.0, -30.0),
+            arc(-40.0, -20.0, -30.0, -20.0, ArcDirection::Clockwise),
+            line(-40.0, 20.0),
+            arc(-30.0, 30.0, -30.0, 20.0, ArcDirection::Clockwise),
+            line(30.0, 30.0),
+            arc(40.0, 20.0, 30.0, 20.0, ArcDirection::Clockwise),
+            line(40.0, -20.0),
+            arc(30.0, -30.0, 30.0, -20.0, ArcDirection::Clockwise),
+            line(0.0, -30.0),
+            arc(-2.0, -32.0, 0.0, -32.0, ArcDirection::CounterClockwise),
+            Move::Rapid { to: p(-2.0, -32.0, 5.0) },
+        ]
+    };
+    let mut want = vec![
+        Move::ToolChange { tool: 4 },
+        Move::Spindle { rpm: d.rpm, direction: SpindleDirection::Clockwise },
+        Move::Coolant { mode: Coolant::Flood },
+        Move::Rapid { to: p(2.0, -33.0, 25.0) },
+        Move::Rapid { to: p(2.0, -33.0, 5.0) },
+    ];
+    want.extend(level(-7.0));
+    for z in [-14.0, -21.0] {
+        // Back over to where it goes down.
+        want.push(Move::Rapid { to: p(2.0, -33.0, 5.0) });
+        want.extend(level(z));
+    }
+    want.extend([Move::Rapid { to: p(-2.0, -32.0, 25.0) }, Move::Coolant { mode: Coolant::Off }, Move::SpindleStop]);
+    assert!(same_moves(&d.toolpath.moves, &want), "{:#?}", d.toolpath.moves);
+    // Measured: plunges of 12, 19 and 26, and at each level 1 in, a quarter turn of radius 2
+    // (pi), the round, and a quarter turn off. Rapids: 20 down, 12, 19 and 26 up, two hops of
+    // sqrt(17) back to where it goes down, and 20 up at the end.
+    let s = d.toolpath.stats().unwrap();
+    assert!(close(s.feed_length, 57.0 + 3.0 * (201.0 + 22.0 * PI)), "{}", s.feed_length);
+    assert!(close(s.rapid_length, 97.0 + 2.0 * 17.0_f64.sqrt()), "{}", s.rapid_length);
+    // Conventional goes the other way round, so the arcs are mirrored: on from (-2, -32),
+    // clockwise.
+    let d = contoured(&ContourOp { direction: CutDirection::Conventional, stepdown: Some(21.0), ..ContourOp::default() }).unwrap();
+    assert_eq!(d.entries, vec![[-2.0, -33.0]]);
+    let on = Move::Arc { to: p(0.0, -30.0, -21.0), center: p(0.0, -32.0, -21.0), plane: Plane::Xy, direction: ArcDirection::Clockwise, feed: d.feed };
+    let off =
+        Move::Arc { to: p(2.0, -32.0, -21.0), center: p(0.0, -32.0, -21.0), plane: Plane::Xy, direction: ArcDirection::Clockwise, feed: d.feed };
+    assert!(same_moves(&d.toolpath.moves[7..8], &[on]) && same_moves(&d.toolpath.moves[17..18], &[off]), "{:#?}", d.toolpath.moves);
+    // A radius given is the radius used; a disc is met by an arc too, on the outside of its own.
+    let d = contoured(&ContourOp { lead: Some(5.0), ..ContourOp::default() }).unwrap();
+    assert_eq!((d.entries.clone(), d.leads.clone()), (vec![[5.0, -35.0]], vec![5.0]));
+    let disc = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 20.0, start: 0.0, sweep: 2.0 * PI }] };
+    let placement = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(40.0, 40.0, 10.0) }, 1.0);
+    let d = ContourOp::default().toolpath(None, &mill20(), &placement, Some("aluminium"), &[disc]).unwrap();
+    assert_eq!(d.leads, vec![2.0]);
+    // Every point of the cut, the arcs on and off included, keeps the tool's radius from the disc.
+    let nearest = cutting_points(&d.toolpath).iter().map(|at| at.x.hypot(at.y)).fold(f64::INFINITY, f64::min);
+    assert!((nearest - 30.0).abs() <= 1e-6, "{nearest}");
+}
+
+/// A square loop from (0, 0) to (100, 100), counter-clockwise, as a tool's centre path.
+fn square_path() -> Region2 {
+    Region2 { outer: polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]), holes: Vec::new() }
+}
+
+/// A small box as something in the way.
+fn in_the_way(x: (f64, f64), y: (f64, f64)) -> Region2 {
+    Region2 { outer: polygon(&[(x.0, y.0), (x.1, y.0), (x.1, y.1), (x.0, y.1)]), holes: Vec::new() }
+}
+
+#[test]
+fn the_arcs_are_made_smaller_or_left_out_where_there_is_no_room() {
+    let beside = (q(-20.0, -20.0), q(120.0, 120.0));
+    let led = |all: &[Region2]| round(&all[0].outer, all, CutDirection::Climb, beside, 8.0).unwrap();
+    let radius = |r: &Round| r.leads.map(|(on, _)| if let Seg2::Arc { radius, .. } = on { radius } else { 0.0 });
+    // Nothing in the way: arcs of 8 at the middle of the front side. Clockwise is towards -X
+    // there, so the tool comes on from (58, -8) and goes down straight out from that.
+    let free = led(&[square_path()]);
+    assert_eq!((free.start, free.entry, radius(&free)), (q(50.0, 0.0), q(58.0, -20.0), Some(8.0)));
+    let (on, off) = free.leads.unwrap();
+    assert!(apart(on.start(), q(58.0, -8.0)) < 1e-12 && apart(on.end(), q(50.0, 0.0)) < 1e-12, "{on:?}");
+    assert!(apart(off.start(), q(50.0, 0.0)) < 1e-12 && apart(off.end(), q(42.0, -8.0)) < 1e-12, "{off:?}");
+    // Something where the arc off the front side would pass: the next side is taken, with its
+    // full arcs (the left one, of the two as near the front).
+    let blocked_front = in_the_way((40.0, 45.0), (-6.0, -3.0));
+    let next = led(&[square_path(), blocked_front.clone()]);
+    assert_eq!((next.start, radius(&next)), (q(0.0, 50.0), Some(8.0)));
+    // The same in the way at every side: the front again, with arcs of 4, which pass inside it.
+    let all_round = [
+        square_path(),
+        blocked_front,
+        in_the_way((-6.0, -3.0), (55.0, 60.0)),
+        in_the_way((103.0, 106.0), (40.0, 45.0)),
+        in_the_way((55.0, 60.0), (103.0, 106.0)),
+    ];
+    let smaller = led(&all_round);
+    assert_eq!((smaller.start, smaller.entry, radius(&smaller)), (q(50.0, 0.0), q(54.0, -20.0), Some(4.0)));
+    // Walls close on both sides of the way in to each side, 1.5 from it: no arc of 8, 4 or 2
+    // passes, and the tool goes straight in at the front.
+    let mut tight = vec![square_path()];
+    for (x, y) in [((0.0, 48.5), (-30.0, -0.5)), ((51.5, 100.0), (-30.0, -0.5)), ((0.0, 48.5), (100.5, 130.0)), ((51.5, 100.0), (100.5, 130.0))] {
+        tight.push(in_the_way(x, y));
+        tight.push(in_the_way(y, x));
+    }
+    let none = led(&tight);
+    assert_eq!((none.start, none.entry, radius(&none)), (q(50.0, 0.0), q(50.0, -20.0), None));
+    // No arcs asked for: straight in, whatever the room.
+    let plain = round(&square_path().outer, &[square_path()], CutDirection::Climb, beside, 0.0).unwrap();
+    assert_eq!((plain.entry, radius(&plain)), (q(50.0, -20.0), None));
+}
+
+#[test]
+fn an_arc_on_to_a_side_that_curves_away_stays_well_inside_its_curve() {
+    // A crescent: a disc of 30 about the origin with a bite of radius 50 about (60, 0) out of
+    // it. Its outside is the long arc; the bite is an arc the other way round, its centre on
+    // the outside. A wall stands in the way in to the long arc, arcs and all, so the round
+    // starts in the bite, at (10, 0), and an arc on to the wall there must be smaller than the
+    // bite: at most half its radius, 25.
+    let (x, y) = (50.0 / 3.0, (900.0_f64 - 2500.0 / 9.0).sqrt());
+    let horn = y.atan2(x);
+    let bite = (y).atan2(x - 60.0);
+    let crescent = Region2 {
+        outer: Loop2 {
+            segs: vec![
+                Seg2::Arc { center: q(0.0, 0.0), radius: 30.0, start: horn, sweep: 2.0 * PI - 2.0 * horn },
+                Seg2::Arc { center: q(60.0, 0.0), radius: 50.0, start: 2.0 * PI - bite, sweep: -(2.0 * PI - 2.0 * bite) },
+            ],
+        },
+        holes: Vec::new(),
+    };
+    assert!(crescent.outer.is_closed(1e-9) && crescent.outer.is_ccw());
+    let all = [crescent, in_the_way((-50.0, -40.0), (-60.0, 60.0))];
+    let beside = (q(-60.0, -60.0), q(60.0, 60.0));
+    let radius = |lead: f64| {
+        let r = round(&all[0].outer, &all, CutDirection::Climb, beside, lead).unwrap();
+        assert!(apart(r.start, q(10.0, 0.0)) < 1e-9, "{:?}", r.start);
+        r.leads.map(|(on, _)| if let Seg2::Arc { radius, .. } = on { radius } else { 0.0 })
+    };
+    assert_eq!(radius(20.0), Some(20.0));
+    // 30 is too big for the bite; half of it is taken.
+    assert_eq!(radius(30.0), Some(15.0));
+    assert_eq!(radius(60.0), Some(15.0));
+    // No part of 120 fits: straight in.
+    assert_eq!(radius(120.0), None);
+}
+
+#[test]
+fn an_arc_is_clear_only_when_it_meets_no_other_side_or_arc() {
+    let region = |segs: Vec<Seg2>| vec![Region2 { outer: Loop2 { segs }, holes: Vec::new() }];
+    let nothing = Loop2 { segs: Vec::new() };
+    let clear = |arc: &Seg2, regions: &[Region2]| arc_is_clear(arc, regions, (&nothing, 0));
+    // A quarter turn of radius 5 about the origin, from (5, 0) to (0, 5).
+    let quarter = Seg2::Arc { center: q(0.0, 0.0), radius: 5.0, start: 0.0, sweep: 0.5 * PI };
+    // A side across it, one beside it, one that stops short of it, and one that only touches it.
+    assert!(!clear(&quarter, &region(vec![Seg2::Line { a: q(0.0, 0.0), b: q(6.0, 6.0) }])));
+    assert!(clear(&quarter, &region(vec![Seg2::Line { a: q(0.0, 0.0), b: q(-6.0, -6.0) }])), "it would cross the other half of the circle");
+    assert!(clear(&quarter, &region(vec![Seg2::Line { a: q(0.0, 0.0), b: q(3.0, 3.0) }])));
+    assert!(!clear(&quarter, &region(vec![Seg2::Line { a: q(5.0, -1.0), b: q(5.0, 1.0) }])), "touching counts");
+    assert!(clear(&quarter, &region(vec![Seg2::Line { a: q(5.5, -1.0), b: q(5.5, 1.0) }])));
+    // Another arc: crossing it, on the far side of its circle, inside it, outside it.
+    let other = |cx: f64, radius: f64, start: f64, sweep: f64| region(vec![Seg2::Arc { center: q(cx, 4.0), radius, start, sweep }]);
+    assert!(!clear(&quarter, &other(4.0, 2.0, 0.0, 2.0 * PI)));
+    assert!(clear(&quarter, &other(4.0, 2.0, -0.25 * PI, PI)), "only the half of that circle away from the arc");
+    assert!(!clear(&quarter, &other(4.0, 2.0, 0.75 * PI, PI)), "the half towards it");
+    assert!(clear(&quarter, &other(1.0, 0.5, 0.0, 2.0 * PI)));
+    assert!(clear(&quarter, &other(9.0, 2.0, 0.0, 2.0 * PI)));
+    // The side it is drawn to touch is not counted; the same side of another loop is.
+    let wall = region(vec![Seg2::Line { a: q(5.0, -1.0), b: q(5.0, 1.0) }]);
+    assert!(arc_is_clear(&quarter, &wall, (&wall[0].outer, 0)));
+    assert!(!arc_is_clear(&quarter, &wall, (&wall[0].outer, 1)));
+    // A straight line is not an arc.
+    assert!(!clear(&Seg2::Line { a: q(0.0, 0.0), b: q(1.0, 0.0) }, &[]));
+}
+
+/// A simulation of `stock` in cells of 0.1 mm, with `d` cut from it by `tool`.
+fn cut_from(stock: Bounds, d: &Contoured, tool: &Tool) -> crate::sim::Simulation {
+    let mut sim = crate::sim::Simulation::new(stock, 0.1, 0.01).unwrap();
+    sim.cut(0, &d.toolpath, tool).unwrap();
+    sim
+}
+
+#[test]
+fn tabs_are_left_at_the_bottom_one_to_a_side_where_they_fit() {
+    // The block with the 6 mm tool: its centre goes round at X ±33 and Y ±23, the corners arcs
+    // of 3, 200 + 6 pi round. Four tabs of 6 are 54.71 apart, and the tool is up for 12 at each
+    // (the tab and its own diameter). The first may be 9 to 45.71 from the start; all four lie
+    // on straight sides when it is 9 to 14 or 40.71 to 45.71, and the middle of the first of
+    // those, 11.5, is taken: one tab to a side, each 11.5 past the middle of its side.
+    let op = ContourOp { tabs: Some(Tabs { count: 4, width: None, height: None }), ..ContourOp::default() };
+    let d = op.toolpath(None, &mill6(), &block(), Some("aluminium"), &[polygon(&BLOCK)]).unwrap();
+    assert_eq!(d.levels, vec![-3.0, -6.0, -9.0, -12.0, -15.0, -18.0, -21.0]);
+    assert_eq!(d.tab_top, Some(-19.0));
+    let want = [(-11.5, -23.0), (-33.0, 11.5), (11.5, 23.0), (33.0, -11.5)];
+    assert_eq!(d.tabs.len(), 4);
+    for (got, want) in d.tabs.iter().zip(want) {
+        assert!((got[0] - want.0).abs() < 1e-9 && (got[1] - want.1).abs() < 1e-9, "{:?}", d.tabs);
+    }
+    // Only the last level is below the tabs' tops. There the tool goes up 2 at the cutting feed
+    // 6 before each tab's middle, across at Z -19, and down again 6 past it at the plunge feed.
+    let mut at = d.toolpath.start;
+    let (mut ups, mut downs, mut over) = (Vec::new(), Vec::new(), Vec::new());
+    for m in &d.toolpath.moves {
+        let to = m.end(at);
+        if let Move::Linear { feed, .. } = *m {
+            let level = (at.x - to.x).abs() > 1e-9 || (at.y - to.y).abs() > 1e-9;
+            match (level, at.z, to.z) {
+                (false, a, b) if a == -21.0 && b == -19.0 => ups.push((to.x, to.y, feed)),
+                (false, a, b) if a == -19.0 && b == -21.0 => downs.push((to.x, to.y, feed)),
+                (true, a, b) if a == -19.0 && b == -19.0 => over.push((at.x - to.x).hypot(at.y - to.y)),
+                _ => {}
+            }
+        }
+        at = to;
+    }
+    let near = |got: &[(f64, f64, f64)], want: &[(f64, f64)], feed: f64| {
+        got.len() == want.len() && got.iter().zip(want).all(|(g, w)| (g.0 - w.0).abs() < 1e-9 && (g.1 - w.1).abs() < 1e-9 && close(g.2, feed))
+    };
+    assert!(near(&ups, &[(-5.5, -23.0), (-33.0, 5.5), (5.5, 23.0), (33.0, -5.5)], d.feed), "{ups:?}");
+    assert!(near(&downs, &[(-17.5, -23.0), (-33.0, 17.5), (17.5, 23.0), (33.0, -17.5)], d.plunge_feed), "{downs:?}");
+    assert!(over.len() == 4 && over.iter().all(|&length| close(length, 12.0)), "{over:?}");
+    // Measured in stock with 10 mm round the block, so that the whole of the slot is in it: each
+    // tab stands 2 high where the tool passed over it, the slot beside it is cut to the bottom,
+    // and the four hold back what a 6 mm slot 12 long less the tool's two half discs is, 2
+    // high: 4 x (72 - 9 pi) x 2 mm3. The tabs are where they were: they go by the round.
+    let wide = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(60.0, 40.0, 20.0) }, 10.0);
+    let stock = Bounds { min: p(-40.0, -30.0, -21.0), max: p(40.0, 30.0, 0.0) };
+    let in_wide = |op: &ContourOp| op.toolpath(None, &mill6(), &wide, Some("aluminium"), &[polygon(&BLOCK)]).unwrap();
+    let (whole, tabbed) = (cut_from(stock, &in_wide(&ContourOp::default()), &mill6()), cut_from(stock, &in_wide(&op), &mill6()));
+    assert_eq!(in_wide(&op).tabs, d.tabs);
+    let held = whole.removed - tabbed.removed;
+    assert!((held - 8.0 * (72.0 - 9.0 * PI)).abs() < 0.02 * held, "{held}");
+    let height = |sim: &crate::sim::Simulation, x: f64, y: f64| {
+        let f = &sim.stock;
+        f.at(((x - f.x) / f.dx - 0.5).round() as usize, ((y - f.y) / f.dy - 0.5).round() as usize).unwrap()
+    };
+    assert_eq!((height(&tabbed, -11.5, -23.0), height(&tabbed, -25.0, -23.0), height(&whole, -11.5, -23.0)), (-19.0, -21.0, -21.0));
+    assert_eq!((height(&tabbed, 33.0, -11.5), height(&tabbed, 33.0, 5.0)), (-19.0, -21.0));
+    // Tabs 4 high stand above the last two levels: the tool lifts over each on both.
+    let op = ContourOp { tabs: Some(Tabs { count: 4, width: Some(6.0), height: Some(4.0) }), ..ContourOp::default() };
+    let d = op.toolpath(None, &mill6(), &block(), Some("aluminium"), &[polygon(&BLOCK)]).unwrap();
+    let mut at = d.toolpath.start;
+    let mut lifts = Vec::new();
+    for m in &d.toolpath.moves {
+        let to = m.end(at);
+        if matches!(m, Move::Linear { .. }) && at.x == to.x && at.y == to.y && to.z == -17.0 {
+            lifts.push(at.z);
+        }
+        at = to;
+    }
+    assert_eq!(lifts, vec![-18.0, -18.0, -18.0, -18.0, -21.0, -21.0, -21.0, -21.0]);
+    assert_eq!(d.tab_top, Some(-17.0));
+    // Two tabs: the middles of the left and right sides. Three are a third of the round apart:
+    // all are on straight sides with the first from 76 + 3 pi less that third (where the second
+    // comes on to the back side) to 24 (where the first leaves the front one). The middle of
+    // that is 50/3 + pi/2: tabs at the front and at the back, each that far left of the middle,
+    // and one at the middle of the right side.
+    let middles = |count: usize| {
+        let op = ContourOp { tabs: Some(Tabs { count, width: None, height: None }), ..ContourOp::default() };
+        op.toolpath(None, &mill6(), &block(), Some("aluminium"), &[polygon(&BLOCK)]).unwrap().tabs
+    };
+    let two = middles(2);
+    assert!(two.len() == 2 && apart(q(two[0][0], two[0][1]), q(-33.0, 0.0)) < 1e-9 && apart(q(two[1][0], two[1][1]), q(33.0, 0.0)) < 1e-9, "{two:?}");
+    let three = middles(3);
+    let first = 50.0 / 3.0 + 0.5 * PI;
+    let want = [q(-first, -23.0), q(-first, 23.0), q(33.0, 0.0)];
+    assert!(three.len() == 3 && three.iter().zip(want).all(|(got, want)| apart(q(got[0], got[1]), want) < 1e-9), "{three:?}");
+}
+
+#[test]
+fn tabs_keep_to_straight_sides_where_they_can_and_are_evenly_spaced_where_they_cannot() {
+    let along = |from: f64, to: f64| Seg2::Line { a: q(from, 0.0), b: q(to, 0.0) };
+    // A corner as an arc of the given length (its radius 10) from (x, 0).
+    let corner = |x: f64, length: f64| Seg2::Arc { center: q(x, 10.0), radius: 10.0, start: -0.5 * PI, sweep: length / 10.0 };
+    // One tab on a round of two sides of 40 with a corner of 10 between them: the tool is up
+    // for 12, which may begin 3 from the start and end 3 before the end. A whole side holds it
+    // when its middle is 9 to 34 or 56 to 81: the middle of the first, 21.5.
+    let spans = tab_spans(&[along(0.0, 40.0), corner(40.0, 10.0), along(50.0, 90.0)], 1, 6.0, &mill6()).unwrap();
+    assert_eq!(spans, vec![(15.5, 27.5)]);
+    // Two tabs on three sides of 30 with corners of 12 between: 57 apart. No place puts both on
+    // a side: with the first at 9 to 24 it is on the first side, and with it at 33 to 48 the
+    // second tab is on the third. The first stretch is taken, its middle 16.5; the second tab,
+    // at 73.5, would lie on the second corner (72 to 84) and is moved back 7.5, on to the end
+    // of the middle side.
+    let sides = [along(0.0, 30.0), corner(30.0, 12.0), along(42.0, 72.0), corner(72.0, 12.0), along(84.0, 114.0)];
+    assert_eq!(tab_spans(&sides, 2, 6.0, &mill6()).unwrap(), vec![(10.5, 22.5), (60.0, 72.0)]);
+    // No straight side long enough: evenly spaced, the first half a space from the start.
+    let arcs = [corner(0.0, 15.0), corner(15.0, 15.0), corner(30.0, 15.0), corner(45.0, 15.0)];
+    assert_eq!(tab_spans(&arcs, 2, 6.0, &mill6()).unwrap(), vec![(9.0, 21.0), (39.0, 51.0)]);
+    // Too many to fit: each tab takes its width and twice the tool's diameter.
+    let e = tab_spans(&sides, 7, 6.0, &mill6()).unwrap_err().to_string();
+    assert!(e.contains("7 tab(s) 6 mm wide do not fit") && e.contains("each takes 18 mm of the 114.000 mm"), "{e}");
+    // Six just fit (19 apart for the 18 each takes): half a millimetre of choice, and none of
+    // it on straight sides for all, but every lift is 12 long with at least 6 down between.
+    let spans = tab_spans(&sides, 6, 6.0, &mill6()).unwrap();
+    assert_eq!(spans.len(), 6);
+    assert!(spans.iter().all(|&(up, down)| close(down - up, 12.0)) && spans.windows(2).all(|w| w[1].0 - w[0].1 >= 6.0 - 1e-9), "{spans:?}");
+    assert!(spans[0].0 >= 3.0 - 1e-9 && spans[5].1 <= 111.0 + 1e-9, "{spans:?}");
+}
+
+#[test]
+fn a_round_part_has_its_tabs_evenly_round_it() {
+    // A disc of 20: the 6 mm tool's centre goes round at 23, clockwise from the front, (0, -23).
+    // Three tabs, a third of a turn apart, the first a sixth of a turn from the start.
+    let disc = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 20.0, start: 0.0, sweep: 2.0 * PI }] };
+    let placement = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(40.0, 40.0, 10.0) }, 1.0);
+    let op = ContourOp { tabs: Some(Tabs { count: 3, width: None, height: None }), ..ContourOp::default() };
+    let d = op.toolpath(None, &mill6(), &placement, Some("aluminium"), &[disc]).unwrap();
+    let want = [(-23.0 * 0.75_f64.sqrt(), -11.5), (0.0, 23.0), (23.0 * 0.75_f64.sqrt(), -11.5)];
+    assert_eq!(d.tabs.len(), 3);
+    for (got, want) in d.tabs.iter().zip(want) {
+        assert!((got[0] - want.0).abs() < 1e-9 && (got[1] - want.1).abs() < 1e-9, "{:?}", d.tabs);
+    }
+    // Over each tab the tool is 2 above the bottom (Z -11) for 12 mm of arc, and never nearer
+    // the disc than its radius.
+    let points = cutting_points(&d.toolpath);
+    let nearest = points.iter().map(|at| at.x.hypot(at.y)).fold(f64::INFINITY, f64::min);
+    assert!((nearest - 23.0).abs() <= 1e-6, "{nearest}");
+    let mut at = d.toolpath.start;
+    let mut over = 0.0;
+    for m in &d.toolpath.moves {
+        let to = m.end(at);
+        if let Move::Arc { center, .. } = *m
+            && at.z == -9.0
+            && to.z == -9.0
+        {
+            let turned = ((at.y - center.y).atan2(at.x - center.x) - (to.y - center.y).atan2(to.x - center.x)).rem_euclid(2.0 * PI);
+            over += 23.0 * turned;
+        }
+        at = to;
+    }
+    assert!(close(over, 36.0), "{over}");
 }

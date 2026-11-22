@@ -371,7 +371,10 @@ pub struct CamOpContourParams {
     /// `{top?: Z (default the stock top), bottom?: Z (default the model's bottom), stepdown?: mm
     /// (default half the tool's diameter), leave?: mm of stock left on the wall (default 0),
     /// direction?: climb | conventional, clear?: mm past the stock where the tool goes down
-    /// (default 2), rpm?, feed?}`; every field has a default.
+    /// (default 2), lead?: mm, the radius of the arcs on to the wall and off it (default a tenth
+    /// of the tool's diameter; 0 for straight in and out), tabs?: {count, width?: mm (default 6),
+    /// height?: mm above the bottom (default 2)} bridges of stock left round each part (default
+    /// none), rpm?, feed?}`; every field has a default.
     #[serde(default)]
     pub contour: Option<Value>,
 }

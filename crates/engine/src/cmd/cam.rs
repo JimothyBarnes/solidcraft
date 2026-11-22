@@ -807,7 +807,8 @@ fn work(
             let done = contour.toolpath(start, tool, &placement, material, &outline).map_err(failed)?;
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "levels": done.levels,
-                "stepdown": done.stepdown, "offset": done.offset, "round": done.round, "entries": done.entries
+                "stepdown": done.stepdown, "offset": done.offset, "round": done.round, "entries": done.entries,
+                "leads": done.leads, "tabs": done.tabs, "tab_top": done.tab_top
             });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
         }

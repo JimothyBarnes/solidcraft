@@ -866,22 +866,26 @@ fn a_contour_goes_round_the_outline_read_from_the_model() {
     assert_eq!(segments.len(), 4);
     assert!(segments.iter().all(|seg| seg["type"] == "line"), "{segments:?}");
     // The contour: three levels of 7 (21 mm in steps of at most half the 20 mm tool), the centre
-    // 10 out, in from the front at Y -33 (see the strategy's own test for every move).
+    // 10 out, in from the front at Y -33 and on to the wall by an arc of 2 (see the strategy's
+    // own test for every move).
     assert_eq!(run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}))["id"], "op-1");
     let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
     let n = &t["numbers"];
     assert_eq!(n["levels"], json!([-7.0, -14.0, -21.0]));
-    assert_eq!((n["stepdown"].as_f64(), n["offset"].as_f64(), n["entries"].clone()), (Some(10.0), Some(10.0), json!([[0.0, -33.0]])));
+    assert_eq!((n["stepdown"].as_f64(), n["offset"].as_f64(), n["entries"].clone()), (Some(10.0), Some(10.0), json!([[2.0, -33.0]])));
+    assert_eq!((n["leads"].clone(), n["tabs"].clone(), n["tab_top"].clone()), (json!([2.0]), json!([]), Value::Null));
     let rpm = 200_000.0 / (20.0 * PI);
     assert!(about(&n["rpm"], rpm) && about(&n["feed"], 0.2 * rpm) && about(&n["plunge_feed"], 0.1 * rpm), "{n}");
     assert!(about(&n["round"], 200.0 + 20.0 * PI), "{n}");
-    assert!(about(&t["feed_length"], 57.0 + 3.0 * (206.0 + 20.0 * PI)) && about(&t["rapid_length"], 97.0), "{t}");
+    assert!(about(&t["feed_length"], 57.0 + 3.0 * (201.0 + 22.0 * PI)) && about(&t["rapid_length"], 97.0 + 2.0 * 17.0_f64.sqrt()), "{t}");
     assert_eq!((t["min"].clone(), t["max"].clone()), (json!([-40.0, -33.0, -21.0]), json!([40.0, 30.0, 25.0])));
     // It posts with its arcs, and the program read back is the toolpath.
     let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = posted["text"].as_str().unwrap();
-    // Four clockwise corner arcs at the first level; the lower levels repeat them.
+    // Four clockwise corner arcs at the first level; the lower levels repeat them. The arcs on
+    // to the wall and off it turn the other way: two a level.
     assert!(text.lines().filter(|line| line.contains("G2")).count() >= 4, "{text}");
+    assert_eq!(text.lines().filter(|line| line.split_whitespace().any(|word| word == "G3")).count(), 6, "{text}");
     // A raised bottom cuts the block half way up: the same outline, read from a section.
     let half = run(&mut s, "cam.setup.outline", json!({"id": "setup-1", "z": -11}));
     assert_eq!(half["z"].as_f64(), Some(-11.0));
@@ -1012,11 +1016,15 @@ fn round_parts_and_several_bodies_have_their_outlines() {
     run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
     let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
     assert!(about(&t["numbers"]["round"], 60.0 * PI), "{}", t["numbers"]);
+    // Round the disc clockwise, in arcs about its middle; on to it and off it by an arc of 2 the
+    // other way round, at each of the two levels.
     let moves = t["toolpath"]["moves"].as_array().unwrap();
-    assert!(
-        moves.iter().filter(|m| m["kind"] == "arc").count() >= 4 && moves.iter().all(|m| m["kind"] != "arc" || m["direction"] == "clockwise"),
-        "{moves:?}"
-    );
+    let arcs: Vec<&Value> = moves.iter().filter(|m| m["kind"] == "arc").collect();
+    let round = |m: &&&Value| m["center"][0].as_f64().is_some_and(|x| x.abs() < 1e-9) && m["center"][1].as_f64().is_some_and(|y| y.abs() < 1e-9);
+    assert!(arcs.iter().filter(round).count() >= 4 && arcs.iter().filter(round).all(|m| m["direction"] == "clockwise"), "{moves:?}");
+    let leads: Vec<&&Value> = arcs.iter().filter(|m| !round(m)).collect();
+    assert!(leads.len() == 4 && leads.iter().all(|m| m["direction"] == "counter_clockwise"), "{moves:?}");
+    assert_eq!(t["numbers"]["leads"], json!([2.0]));
     // Two bodies standing apart are two loops, each gone round.
     let mut s = milling();
     run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 30, "corner": [100, 0, 0], "operation": "new", "body_name": "Post"}));
@@ -1429,4 +1437,48 @@ fn a_drill_through_the_parts_own_hole_is_not_a_cut_into_the_part() {
         (Some(1), Some(0), Some(20.0)),
         "{sim:#}"
     );
+}
+
+#[test]
+fn a_contour_leaves_tabs_and_the_simulation_finds_them_standing() {
+    let mut s = milling();
+    // Two tabs round the block with the 20 mm tool: the middles of its left and right sides,
+    // 2 mm high above the bottom at Z -21, on the tool's centre path 10 out from the block.
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4, "contour": {"tabs": {"count": 2}}}));
+    let n = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"].clone();
+    assert_eq!(n["tab_top"].as_f64(), Some(-19.0), "{n}");
+    let tabs = n["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 2);
+    assert!(
+        about(&tabs[0][0], -40.0)
+            && tabs[0][1].as_f64().unwrap().abs() < 1e-9
+            && about(&tabs[1][0], 40.0)
+            && tabs[1][1].as_f64().unwrap().abs() < 1e-9,
+        "{n}"
+    );
+    // The stock is 1 mm bigger than the block all round, and the contour takes all of that but
+    // the tabs: each is that 1 mm strip for the 26 mm the tool is up, less what its round ends
+    // take (twice the area under a circle of 10 from 9 to 10 out), 2 mm high.
+    let under = 25.0 * std::f64::consts::PI - (4.5 * 19.0_f64.sqrt() + 50.0 * 0.9_f64.asin());
+    let held = 2.0 * 2.0 * (26.0 - 2.0 * under);
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let beside = sim["beside_part"].as_f64().unwrap();
+    assert!((beside - held).abs() < 0.15 * held, "{beside} mm3 beside the part, not {held}");
+    // Without tabs nothing is left beside it.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {}}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert!(sim["beside_part"].as_f64().unwrap() < 0.05 * held, "{sim:#}");
+    // Tabs that can't be made are refused with the reason, and so are words that are not tabs.
+    let refusal = |s: &mut Session, contour: Value| {
+        run(s, "cam.op.edit", json!({"id": "op-1", "contour": contour}));
+        refused(s, "cam.op.toolpath", json!({"id": "op-1"}))
+    };
+    assert!(refusal(&mut s, json!({"tabs": {"count": 6}})).contains("6 tab(s) 6 mm wide do not fit"));
+    assert!(refusal(&mut s, json!({"tabs": {"count": 2, "height": 30}})).contains("as high as the cut"));
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"tabs": {"count": 2, "shape": "round"}}})).contains("contour"));
+    // Straight in and out when the arcs are turned off.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"lead": 0}}));
+    let n = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"].clone();
+    assert_eq!((n["leads"].clone(), n["entries"].clone()), (json!([0.0]), json!([[0.0, -33.0]])));
 }

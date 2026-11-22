@@ -1015,16 +1015,21 @@ fn contour_cuts_round_the_part_and_keeps_only_what_is_typed() {
     let rpm = 200_000.0 / (20.0 * PI);
     let form = contour_form(&mut h);
     assert_eq!((form.bottom, form.typed_bottom, form.stepdown, form.typed_stepdown, form.leave, form.direction), (-21.0, false, 10.0, false, 0.0, 0));
+    // On to the wall by an arc of a tenth of the tool, and no tabs.
+    assert_eq!((form.lead, form.typed_lead, form.tabs), (2.0, false, 0));
     assert!(form.rpm == 3183.0 && (form.feed - 0.2 * rpm).abs() < 1e-9, "{} rev/min, {} mm/min", form.rpm, form.feed);
     assert!(h.widget("3 × 7.00 mm").is_some(), "21 mm in three levels of 7");
-    // 57 mm of plunging at half the feed and three rounds of 206 + 20 pi at the feed: 86.8 s.
+    // 57 mm of plunging at half the feed and three rounds of 201 + 22 pi at the feed: 87.1 s.
     assert!(h.widget("1:27").is_some());
     assert!(h.widget(tr("manufacture.contour_loose")).is_some() && h.widget(tr("manufacture.preview_note")).is_some());
+    assert!(h.widget(tr("manufacture.contour_tabs_note")).is_none() && h.widget(tr("manufacture.contour_tab_width")).is_none());
     // Drawn before it exists: a rapid down to the retract height and one back up at the end,
-    // and at each of the three levels a plunge, the way in, five straight runs (the side it
-    // starts on is in two), four corners of thirteen pieces each, the way out and a rapid up.
+    // and at each of the three levels a plunge, the way in, the arc on to the wall in six
+    // pieces, five straight runs (the side it starts on is in two), four corners of thirteen
+    // pieces each, the arc off the wall in six and a rapid up; and between levels a hop back to
+    // where it goes down.
     let drawn = scene::counts(&h.app);
-    assert_eq!(drawn, (12, 15, 2 + 3 * (1 + 1 + 5 + 4 * 13 + 1 + 1)));
+    assert_eq!(drawn, (12, 15, 2 + 3 * (1 + 1 + 6 + 5 + 4 * 13 + 6 + 1) + 2));
     assert_eq!(data(&mut h)["setups"][0]["operations"], json!([]));
     press(&mut h, "Create");
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
@@ -1032,7 +1037,7 @@ fn contour_cuts_round_the_part_and_keeps_only_what_is_typed() {
     // and its tool.
     assert_eq!(
         data(&mut h)["setups"][0]["operations"][0]["operation"],
-        json!({"kind": "contour", "contour": {"top": null, "bottom": null, "stepdown": null, "leave": null, "direction": "climb", "clear": null, "rpm": null, "feed": null}})
+        json!({"kind": "contour", "contour": {"top": null, "bottom": null, "stepdown": null, "leave": null, "direction": "climb", "clear": null, "rpm": null, "feed": null, "lead": null, "tabs": null}})
     );
     assert_eq!(scene::counts(&h.app), drawn, "the operation's own toolpath, where the preview was");
     let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
@@ -1048,8 +1053,15 @@ fn contour_cuts_round_the_part_and_keeps_only_what_is_typed() {
     (form.stepdown, form.typed_stepdown) = (4.0, true);
     form.leave = 0.5;
     form.direction = 1;
+    // Two tabs, and a bigger arc on to the wall: the tabs' width and height appear, 6 and 2
+    // until typed, and the note says what holds the part.
+    (form.lead, form.typed_lead, form.tabs) = (5.0, true, 2);
     h.frames(3);
     assert!(h.widget("3 × 3.67 mm").is_some(), "11 mm in three levels");
+    assert!(h.widget(tr("manufacture.contour_tabs_note")).is_some() && h.widget(tr("manufacture.contour_loose")).is_none());
+    assert!(h.widget(tr("manufacture.contour_tab_width")).is_some() && h.widget(tr("manufacture.contour_tab_height")).is_some());
+    let form = contour_form(&mut h);
+    assert_eq!((form.tab_width, form.tab_height, form.worked.trouble()), (6.0, 2.0, None));
     press(&mut h, "Create");
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     let kept = data(&mut h)["setups"][0]["operations"][1]["operation"]["contour"].clone();
@@ -1057,6 +1069,17 @@ fn contour_cuts_round_the_part_and_keeps_only_what_is_typed() {
         (kept["bottom"].as_f64(), kept["stepdown"].as_f64(), kept["leave"].as_f64(), kept["direction"].as_str(), kept["rpm"].clone()),
         (Some(-11.0), Some(4.0), Some(0.5), Some("conventional"), Value::Null)
     );
+    // The tabs are kept as a number of them: their size stays the engine's own until typed.
+    assert_eq!((kept["lead"].as_f64(), kept["tabs"].clone()), (Some(5.0), json!({"count": 2, "width": null, "height": null})));
+    assert_eq!(h.app.run("cam.op.toolpath", json!({"id": "op-2"})).unwrap()["numbers"]["tab_top"], json!(-9.0));
+    // Opened again, the form shows them; with the tabs taken away it keeps none.
+    let mut form = ContourForm::edit(&h.app, "op-2").unwrap();
+    assert_eq!((form.lead, form.typed_lead, form.tabs, form.tab_width, form.typed_tab_width), (5.0, true, 2, 6.0, false));
+    assert_eq!(form.params()["contour"]["tabs"], json!({"count": 2}));
+    (form.tab_height, form.typed_tab_height) = (1.5, true);
+    assert_eq!(form.params()["contour"]["tabs"], json!({"count": 2, "height": 1.5}));
+    form.tabs = 0;
+    assert_eq!(form.params()["contour"].get("tabs"), None);
     let made = h.app.run("cam.op.toolpath", json!({"id": "op-2"})).unwrap();
     assert_eq!((made["numbers"]["levels"].as_array().map(Vec::len), made["numbers"]["offset"].as_f64()), (Some(3), Some(10.5)));
 }
@@ -1114,7 +1137,7 @@ fn contour_says_why_it_would_cut_into_the_part_and_its_form_changes_only_what_it
     assert_eq!((kept["id"].as_str(), kept["name"].as_str(), kept["tool"].as_u64()), (Some("op-2"), Some("Contour 2"), Some(1)));
     assert_eq!(
         kept["operation"]["contour"],
-        json!({"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "leave": 0.2, "direction": "climb", "clear": 4.0, "rpm": null, "feed": null})
+        json!({"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "leave": 0.2, "direction": "climb", "clear": 4.0, "rpm": null, "feed": null, "lead": null, "tabs": null})
     );
     // A double click on the row opens the same form.
     h.step(&json!({"click": {"browser": "Contour 1 (T1)"}, "double": true})).unwrap();

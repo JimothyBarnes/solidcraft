@@ -31,7 +31,10 @@ mod tool;
 mod toolpath;
 mod units;
 
-pub use contour::{ContourOp, Contoured, CutDirection, DEFAULT_CONTOUR_CLEAR, DEFAULT_CONTOUR_STEPDOWN, MAX_CONTOUR_LEVELS};
+pub use contour::{
+    ContourOp, Contoured, CutDirection, DEFAULT_CONTOUR_CLEAR, DEFAULT_CONTOUR_STEPDOWN, DEFAULT_LEAD_RADIUS, DEFAULT_TAB_HEIGHT, DEFAULT_TAB_WIDTH,
+    MAX_CONTOUR_LEVELS, MAX_TABS, Tabs,
+};
 pub use cycle::{CycleMotion, DrillCycle, G98Rule, MAX_CYCLE_DISTANCE, MAX_PECKS, MIN_HOLE_DEPTH, MIN_PECK, PeckRetract};
 pub use drill::{Between, DepthTo, DrillOp, Drilled, HoleOrder, MAX_HOLES};
 pub use face::{DEFAULT_FACE_CLEAR, DEFAULT_FACE_STEPOVER, FaceOp, FacePattern, Faced, MAX_FACE_LEVELS, MAX_FACE_PASSES};

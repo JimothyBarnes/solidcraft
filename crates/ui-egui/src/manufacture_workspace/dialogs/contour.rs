@@ -18,6 +18,12 @@ pub(super) const DIRECTIONS: [(&str, &str); 2] = [("climb", "manufacture.directi
 /// The stepdown a contour takes when none is typed, as a share of the tool's diameter (the
 /// engine's own default, shown in the field).
 const STEPDOWN_SHARE: f64 = 0.5;
+/// The radius of the arcs on to the wall and off it when none is typed, as a share of the
+/// tool's diameter, and a tab's width and height, mm (the engine's own defaults, shown in the
+/// fields).
+const LEAD_SHARE: f64 = 0.1;
+const TAB_WIDTH: f64 = 6.0;
+const TAB_HEIGHT: f64 = 2.0;
 
 /// Contour: round the outside of the part.
 pub(crate) struct ContourForm {
@@ -34,6 +40,16 @@ pub(crate) struct ContourForm {
     pub typed_stepdown: bool,
     /// Stock left on the wall, mm.
     pub leave: f64,
+    /// The radius of the arcs on to the wall and off it, mm: a tenth of the tool's diameter
+    /// until it is typed. 0 is straight in and out.
+    pub lead: f64,
+    pub typed_lead: bool,
+    /// How many tabs hold each part: none until typed. Their width and height, mm.
+    pub tabs: u32,
+    pub tab_width: f64,
+    pub tab_height: f64,
+    pub typed_tab_width: bool,
+    pub typed_tab_height: bool,
     /// Spindle speed, rev/min, and cutting feed, mm/min: what the tool's cutting data gives for
     /// the setup's stock material, until typed.
     pub rpm: f64,
@@ -57,6 +73,7 @@ impl ContourForm {
         let (setups, setup) = setups(app);
         let tools = manufacture_tools(&app.session.doc, "contour");
         let stepdown = tools.first().map_or(0.0, |t| STEPDOWN_SHARE * t.diameter);
+        let lead = tools.first().map_or(0.0, |t| LEAD_SHARE * t.diameter);
         ContourForm {
             setups,
             tools,
@@ -68,6 +85,13 @@ impl ContourForm {
             stepdown,
             typed_stepdown: false,
             leave: 0.0,
+            lead,
+            typed_lead: false,
+            tabs: 0,
+            tab_width: TAB_WIDTH,
+            tab_height: TAB_HEIGHT,
+            typed_tab_width: false,
+            typed_tab_height: false,
             rpm: 0.0,
             feed: 0.0,
             typed_rpm: false,
@@ -98,6 +122,11 @@ impl ContourForm {
         (form.bottom, form.typed_bottom) = number("bottom").map_or((0.0, false), |v| (v, true));
         (form.stepdown, form.typed_stepdown) = number("stepdown").map_or((form.stepdown, false), |v| (v, true));
         form.leave = number("leave").unwrap_or(0.0);
+        (form.lead, form.typed_lead) = number("lead").map_or((form.lead, false), |v| (v, true));
+        let tabs = &base["tabs"];
+        form.tabs = tabs["count"].as_u64().map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX));
+        (form.tab_width, form.typed_tab_width) = tabs["width"].as_f64().map_or((TAB_WIDTH, false), |v| (v, true));
+        (form.tab_height, form.typed_tab_height) = tabs["height"].as_f64().map_or((TAB_HEIGHT, false), |v| (v, true));
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
         form.editing = Some(Edited { id: json!(id), title: name, base });
@@ -116,15 +145,25 @@ impl ContourForm {
     }
 
     /// The `cam.op.contour` parameters. What was not typed is left to the command, so it keeps
-    /// following the model and the tool: the bottom the part's, the stepdown the tool's diameter,
-    /// the speed and feed its cutting data. A contour being changed starts from its parameters as
-    /// kept, so what the form does not show (its top, its clearance) stays.
+    /// following the model and the tool: the bottom the part's, the stepdown and the arcs in and
+    /// out the tool's diameter, the speed and feed its cutting data. A contour being changed
+    /// starts from its parameters as kept, so what the form does not show (its top, its
+    /// clearance) stays.
     pub fn params(&self) -> Value {
         let mut contour = self.editing.as_ref().map_or_else(|| json!({}), |edited| edited.base.clone());
         contour["direction"] = json!(word(&DIRECTIONS, self.direction));
         set_or_clear(&mut contour, "bottom", self.typed_bottom.then_some(self.bottom));
         set_or_clear(&mut contour, "stepdown", self.typed_stepdown.then_some(self.stepdown));
         set_or_clear(&mut contour, "leave", (self.leave > 0.0).then_some(self.leave));
+        set_or_clear(&mut contour, "lead", self.typed_lead.then_some(self.lead));
+        if self.tabs > 0 {
+            let mut tabs = json!({"count": self.tabs});
+            set_or_clear(&mut tabs, "width", self.typed_tab_width.then_some(self.tab_width));
+            set_or_clear(&mut tabs, "height", self.typed_tab_height.then_some(self.tab_height));
+            contour["tabs"] = tabs;
+        } else if let Some(kept) = contour.as_object_mut() {
+            kept.remove("tabs");
+        }
         set_or_clear(&mut contour, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut contour, "feed", self.typed_feed.then_some(self.feed));
         json!({
@@ -149,7 +188,10 @@ impl ContourForm {
         if !self.typed_stepdown {
             self.stepdown = self.tools.get(self.tool).map_or(self.stepdown, |t| STEPDOWN_SHARE * t.diameter);
         }
-        self.leave = self.leave.max(0.0);
+        if !self.typed_lead {
+            self.lead = self.tools.get(self.tool).map_or(self.lead, |t| LEAD_SHARE * t.diameter);
+        }
+        (self.leave, self.lead) = (self.leave.max(0.0), self.lead.max(0.0));
         let params = self.params();
         if !self.worked.refresh(app, &params, || manufacture_preview(&app.session, "cam.op.contour", &params)) {
             return;
@@ -241,6 +283,22 @@ impl ContourForm {
                     self.typed_stepdown = true;
                 }
                 ui_kit::row(ui, tr("manufacture.contour_leave"), |ui| ui_kit::length_field(ui, &mut self.leave, units, decimals));
+                if ui_kit::row(ui, tr("manufacture.contour_lead"), |ui| ui_kit::length_field(ui, &mut self.lead, units, decimals)).changed() {
+                    self.typed_lead = true;
+                }
+                ui_kit::row(ui, tr("manufacture.contour_tabs"), |ui| ui_kit::whole_number_field(ui, &mut self.tabs, 0..=1000, ""));
+                if self.tabs > 0 {
+                    if ui_kit::row(ui, tr("manufacture.contour_tab_width"), |ui| ui_kit::length_field(ui, &mut self.tab_width, units, decimals))
+                        .changed()
+                    {
+                        self.typed_tab_width = true;
+                    }
+                    if ui_kit::row(ui, tr("manufacture.contour_tab_height"), |ui| ui_kit::length_field(ui, &mut self.tab_height, units, decimals))
+                        .changed()
+                    {
+                        self.typed_tab_height = true;
+                    }
+                }
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;
@@ -254,7 +312,9 @@ impl ContourForm {
                     ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_contour_engine_note"));
                 }
                 ui_kit::text(ui, tr("manufacture.contour_note"), ui_kit::Text::Note("manufacture_contour_note"));
-                ui_kit::text(ui, tr("manufacture.contour_loose"), ui_kit::Text::Note("manufacture_contour_loose"));
+                // What holds the part: its tabs, or a word that nothing does.
+                let held = if self.tabs > 0 { "manufacture.contour_tabs_note" } else { "manufacture.contour_loose" };
+                ui_kit::text(ui, tr(held), ui_kit::Text::Note("manufacture_contour_loose"));
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_contour_preview_note"));
                 }
