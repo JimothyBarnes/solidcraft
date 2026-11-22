@@ -498,7 +498,7 @@ fn a_form_previews_an_operation_before_it_is_made() {
         ("cam.op.face", json!({"setup": 5}), "parameters:"),
         ("cam.op.face", json!(null), "parameters:"),
         ("cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": {"holes": []}}), "drill:"),
-        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill, face, contour or pocket operation"),
+        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill, face, contour, pocket or chamfer operation"),
     ] {
         let said = why(&s, command, params.clone());
         assert!(said.contains(expect), "{command} {params}: {said:?} does not say {expect:?}");
@@ -1544,4 +1544,70 @@ fn a_tap_cuts_its_holes_in_step_with_the_spindle_and_posts_as_g84() {
     run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": slow}));
     let n = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"].clone();
     assert_eq!((n["rpm"].as_f64(), n["feed"].as_f64()), (Some(300.0), Some(300.0)));
+}
+
+/// A 10 mm chamfer mill, 90 degrees at its point, as tool 6, with data for aluminium.
+fn chamfer10() -> Value {
+    json!({
+        "number": 6, "name": "10 mm chamfer mill", "kind": "chamfer_mill",
+        "geometry": {"diameter": 10.0, "corner_radius": 0.0, "flute_length": 10.0, "shoulder_length": 0.0, "overall_length": 60.0,
+                     "shank_diameter": 10.0, "tip_angle": std::f64::consts::FRAC_PI_2, "tip_diameter": 0.0, "thread_pitch": 0.0},
+        "flutes": 4, "holder": {"stick_out": 30.0, "segments": []}, "length_offset": 6, "diameter_offset": 6, "coolant": "flood",
+        "cutting_data": [{"material": "aluminium", "surface_speed": 100.0, "chip_load": 0.05, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+        "overrides": {"rpm": null, "feed": null}
+    })
+}
+
+#[test]
+fn a_chamfer_goes_round_the_parts_top_edge_and_the_simulation_takes_it_as_meant() {
+    use std::f64::consts::PI;
+    // The block, faced and contoured with the 20 mm tool, then its top edge broken.
+    let mut s = milling();
+    run(&mut s, "cam.tool.create", json!({"tool": chamfer10()}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    assert_eq!(run(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6}))["id"], "op-3");
+    // Half a millimetre wide with a 90 degree tool: 0.5 down the wall from the block's top at
+    // Z -1, the tip 1 below that, the axis 1 outside the wall, on and off by arcs of 1 (see the
+    // strategy's own test for every move).
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-3"}));
+    let n = &t["numbers"];
+    assert_eq!(
+        (n["top"].as_f64(), n["z"].as_f64(), n["width"].as_f64(), n["leg"].as_f64(), n["offset"].as_f64()),
+        (Some(-1.0), Some(-2.5), Some(0.5), Some(0.5), Some(1.0)),
+        "{t}"
+    );
+    assert!(about(&n["round"], 200.0 + 2.0 * PI), "{n}");
+    assert!(about(&n["entries"][0][0], 1.0) && about(&n["entries"][0][1], -22.0) && n["leads"] == json!([1.0]), "{n}");
+    // The model's edge is sharp, and the chamfer is meant: the simulation finds nothing cut into
+    // the part, and the chamfer's triangle (0.5 x 0.5 / 2) taken off round 200 mm of edge, as
+    // nearly as cells of 0.155 mm can tell.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let ops = sim["operations"].as_array().unwrap();
+    assert!(ops.len() == 3 && ops.iter().all(|op| op["skipped"].is_null() && op["gouges"] == 0), "{ops:?}");
+    let taken = ops[2]["removed"].as_f64().unwrap();
+    assert!((taken - 25.0).abs() < 8.0, "{taken} mm3 by the chamfer");
+    // It posts with its tool, and Chamfer's form is offered that tool and no other.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    assert!(posted["text"].as_str().unwrap().contains("T6 M6"), "{posted}");
+    let offered: Vec<u32> = crate::cmd::manufacture_tools(&s.doc, "chamfer").iter().map(|t| t.number).collect();
+    assert_eq!(offered, vec![6]);
+    // The same toolpath made by hand has no such meaning: every move along the wall cuts into
+    // the part.
+    let by_hand = t["toolpath"].clone();
+    run(&mut s, "cam.op.delete", json!({"id": "op-3"}));
+    run(&mut s, "cam.op.manual", json!({"setup": "setup-1", "tool": 6, "toolpath": by_hand}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert!(sim["gouge_count"].as_u64().unwrap() >= 8 && sim["gouges"][0]["depth"].as_f64().unwrap() <= 0.5 + 1e-9, "{sim:#}");
+    // What can't be chamfered is refused with the reason; another kind's parameters too.
+    assert!(refused(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 4})).contains("does not cut a chamfer"));
+    let too_wide = refused(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6, "chamfer": {"width": 4.5}}));
+    assert!(too_wide.contains("is cut 11 mm across on the tool, and tool 6 is 10 mm"), "{too_wide}");
+    run(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6}));
+    let id = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][3]["id"].as_str().unwrap().to_string();
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": id, "face": {}})).contains("is a chamfer: it takes `chamfer`, not `face`"));
+    run(&mut s, "cam.op.edit", json!({"id": id, "chamfer": {"width": 1.0, "tip_below": 0.5}}));
+    let n = run(&mut s, "cam.op.toolpath", json!({"id": id}))["numbers"].clone();
+    assert_eq!((n["z"].as_f64(), n["offset"].as_f64(), n["leads"].clone()), (Some(-2.5), Some(0.5), json!([1.5])));
 }

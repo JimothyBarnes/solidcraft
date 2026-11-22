@@ -319,6 +319,9 @@ pub struct CamOpEditParams {
     /// A pocket operation's parameters, whole, as `cam.op.pocket` takes them.
     #[serde(default)]
     pub pocket: Option<Value>,
+    /// A chamfer's parameters, whole, as `cam.op.chamfer` takes them.
+    #[serde(default)]
+    pub chamfer: Option<Value>,
     /// A hand-made operation's toolpath, whole, as `cam.op.manual` takes it.
     #[serde(default)]
     pub toolpath: Option<Value>,
@@ -396,6 +399,24 @@ pub struct CamOpPocketParams {
     /// half), leave?: mm of stock left on the walls (default 0), direction?: climb | conventional,
     /// ramp_angle?: radians (default 3 degrees), rpm?, feed?}`.
     pub pocket: Value,
+}
+
+/// Add a chamfer to a setup (decision 0018 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpChamferParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: a chamfer mill or a spot drill.
+    pub tool: u32,
+    /// `{width?: mm, the chamfer seen from above (default 0.5), tip_below?: mm the tool's tip is
+    /// below the chamfer's lower edge (default 1), top?: Z of the edge that is chamfered (default
+    /// the model's top), direction?: climb | conventional, lead?: mm, the radius of the arcs on to
+    /// the wall and off it, rpm?, feed?}`; every field has a default.
+    #[serde(default)]
+    pub chamfer: Option<Value>,
 }
 
 /// Work out one operation's toolpath.

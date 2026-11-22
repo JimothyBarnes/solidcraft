@@ -13,6 +13,7 @@ pub const DOCUMENTED: &[&str] = &[
     "assembly.constraint.create",
     "cam.library.export",
     "cam.library.import",
+    "cam.op.chamfer",
     "cam.op.contour",
     "cam.op.drill",
     "cam.op.face",

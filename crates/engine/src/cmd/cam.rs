@@ -6,9 +6,9 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ContourOp, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT,
-    ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath,
-    Wcs, WcsOrientation, WcsOrigin,
+    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferOp, ContourOp, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER,
+    MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock,
+    Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
 use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
@@ -16,11 +16,12 @@ use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
-    CamData, CamDataParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams, CamOpManualParams,
-    CamOpPocketParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams,
-    CamSetupEditParams, CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupOutline, CamSetupOutlineParams,
-    CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamSimulateParams, CamSimulated, CamSimulatedHit, CamSimulatedOperation,
-    CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, FoundPocket, HoleBottom, HoleGroup, OutlineLoop,
+    CamData, CamDataParams, CamOpChamferParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams,
+    CamOpManualParams, CamOpPocketParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams,
+    CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupOutline,
+    CamSetupOutlineParams, CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamSimulateParams, CamSimulated, CamSimulatedHit,
+    CamSimulatedOperation, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, FoundPocket, HoleBottom, HoleGroup,
+    OutlineLoop,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -74,6 +75,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpPocketParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring"),
+    CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("edit").doc_only()
+        .contract(&TypedContract::<CamOpChamferParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge"),
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
@@ -684,8 +688,12 @@ fn op_pocket(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.pocket", "Pocket", p)
 }
 
-/// What the parameters of `cmd` (`cam.op.drill`, `cam.op.face`, `cam.op.contour` or `cam.op.pocket`)
-/// describe: the setup's id, the name given, the tool's number and the operation.
+fn op_chamfer(s: &mut Session, p: &Value) -> Result<Value> {
+    add_operation(s, "cam.op.chamfer", "Chamfer", p)
+}
+
+/// What the parameters of `cmd` (`cam.op.drill`, `cam.op.face`, `cam.op.contour`, `cam.op.pocket`
+/// or `cam.op.chamfer`) describe: the setup's id, the name given, the tool's number and the operation.
 fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, OperationKind)> {
     match cmd {
         "cam.op.drill" => {
@@ -714,7 +722,15 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             let pocket: PocketOp = parse(cmd, "pocket", &p.pocket)?;
             Ok((p.setup, p.name, p.tool, OperationKind::Pocket { pocket }))
         }
-        other => Err(bad(other, "not a command that adds a drill, face, contour or pocket operation")),
+        "cam.op.chamfer" => {
+            let p: CamOpChamferParams = parse(cmd, "parameters", p)?;
+            let chamfer: ChamferOp = match &p.chamfer {
+                Some(v) => parse(cmd, "chamfer", v)?,
+                None => ChamferOp::default(),
+            };
+            Ok((p.setup, p.name, p.tool, OperationKind::Chamfer { chamfer }))
+        }
+        other => Err(bad(other, "not a command that adds a drill, face, contour, pocket or chamfer operation")),
     }
 }
 
@@ -743,6 +759,9 @@ struct Worked {
     toolpath: Toolpath,
     numbers: Value,
     notes: Vec<String>,
+    /// How far the toolpath is meant to cut into the part as the model has it, mm: a chamfer's
+    /// depth on an edge the model may leave sharp. The simulation does not call that a gouge.
+    into_part: f64,
 }
 
 /// The tool and the setup's placement a strategy works from. The placement is measured on the
@@ -783,13 +802,13 @@ fn work(
     let material = setup.material.as_deref();
     match &op.operation {
         OperationKind::Manual { toolpath } => {
-            Ok(Worked { toolpath: toolpath.clone(), numbers: Value::Object(Default::default()), notes: Vec::new() })
+            Ok(Worked { toolpath: toolpath.clone(), numbers: Value::Object(Default::default()), notes: Vec::new(), into_part: 0.0 })
         }
         OperationKind::Drill { drill } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
             let done = drill.toolpath(start, tool, &placement, material).map_err(failed)?;
             let numbers = serde_json::json!({"rpm": done.rpm, "feed": done.feed, "bottom": done.bottom, "r": done.r, "clearance": done.clearance});
-            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
         }
         OperationKind::Face { face } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
@@ -797,7 +816,7 @@ fn work(
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "levels": done.levels, "passes": done.passes, "stepover": done.stepover
             });
-            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
         }
         OperationKind::Contour { contour } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
@@ -810,7 +829,7 @@ fn work(
                 "stepdown": done.stepdown, "offset": done.offset, "round": done.round, "entries": done.entries,
                 "leads": done.leads, "tabs": done.tabs, "tab_top": done.tab_top
             });
-            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
         }
         OperationKind::Pocket { pocket } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
@@ -824,7 +843,20 @@ fn work(
                 "levels": done.levels, "rings": done.rings.iter().map(Vec::len).collect::<Vec<_>>(), "stepdown": done.stepdown,
                 "stepover": done.stepover, "offset": done.offset
             });
-            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes })
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
+        }
+        OperationKind::Chamfer { chamfer } => {
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            // The wall is read a hair below the chamfer's lower edge, where the model has it
+            // whether or not it has the chamfer.
+            let wall = chamfer.wall_height(tool, &placement).map_err(failed)?;
+            let (_, outline) = outline_at(s, cmd, setup, &placement, Some(wall - CHAMFER_WALL_BELOW)).map_err(|e| bad(cmd, of(op, e)))?;
+            let done = chamfer.toolpath(start, tool, &placement, material, &outline).map_err(failed)?;
+            let numbers = serde_json::json!({
+                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "z": done.z, "width": done.width,
+                "leg": done.leg, "offset": done.offset, "round": done.round, "entries": done.entries, "leads": done.leads
+            });
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: done.leg })
         }
     }
 }
@@ -870,7 +902,7 @@ pub struct ToolChoice {
     pub pitch: Option<f64>,
 }
 
-/// The design's tools that can do `operation` (`face`, `drill`, `contour` or `pocket`), for a form to offer; every
+/// The design's tools that can do `operation` (`face`, `drill`, `contour`, `pocket` or `chamfer`), for a form to offer; every
 /// tool for any other word. The operations' own checks decide, so a form never offers a tool its
 /// command would refuse.
 pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec<ToolChoice> {
@@ -897,6 +929,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
         "drill" => drill.validate(tool).is_ok() || taps(tool),
         "contour" => ContourOp::default().validate(tool).is_ok(),
         "pocket" => PocketOp { pockets: vec![[0.0, 0.0]], ..PocketOp::default() }.validate(tool).is_ok(),
+        "chamfer" => ChamferOp::default().validate(tool).is_ok(),
         _ => true,
     };
     data.tools
@@ -989,7 +1022,8 @@ pub struct OperationPreview {
     pub notes: Vec<String>,
 }
 
-/// What `command` (`cam.op.face`, `cam.op.drill`, `cam.op.contour` or `cam.op.pocket`) would make from `params`, without making it:
+/// What `command` (`cam.op.face`, `cam.op.drill`, `cam.op.contour`, `cam.op.pocket` or `cam.op.chamfer`) would make from `params`,
+/// without making it:
 /// for a form to draw the toolpath and show the speed and feed it works out before OK, or to say
 /// why there would be no toolpath. It reads the design and changes nothing.
 pub fn manufacture_preview(s: &Session, command: &str, params: &Value) -> std::result::Result<OperationPreview, String> {
@@ -1066,6 +1100,8 @@ pub struct Simulated {
     pub operations: Vec<SimulatedOperation>,
 }
 
+/// How far below a chamfer's lower edge the part's wall is read for it, mm.
+const CHAMFER_WALL_BELOW: f64 = 0.01;
 /// How far below the part a cut is a gouge, and below the material's top a rapid is a hit, mm.
 const SIMULATION_TOLERANCE: f64 = 0.01;
 /// How many cells the stock's longer side is cut into when no cell is given, and the cells
@@ -1104,7 +1140,7 @@ pub fn manufacture_simulation(s: &Session, id: &str, cell: Option<f64>) -> std::
         let cut = work(s, CMD, &d, setup, op, at, &mut placed).map_err(said).and_then(|worked| {
             at = Some(worked.toolpath.moves.iter().fold(worked.toolpath.start, |p, m| m.end(p)));
             let tool = tool.ok_or_else(|| format!("the design has no tool {}", op.tool))?;
-            stock.cut(index, &worked.toolpath, tool).map_err(|e| e.to_string())
+            stock.cut_into(index, &worked.toolpath, tool, worked.into_part).map_err(|e| e.to_string())
         });
         operations.push(match cut {
             Ok(cut) => SimulatedOperation {
@@ -1227,8 +1263,11 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Face { .. } => ("a facing", "face"),
         OperationKind::Contour { .. } => ("a contour", "contour"),
         OperationKind::Pocket { .. } => ("a pocket operation", "pocket"),
+        OperationKind::Chamfer { .. } => ("a chamfer", "chamfer"),
     };
-    for (given, name) in [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face"), (&p.contour, "contour"), (&p.pocket, "pocket")] {
+    let given =
+        [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face"), (&p.contour, "contour"), (&p.pocket, "pocket"), (&p.chamfer, "chamfer")];
+    for (given, name) in given {
         if given.is_some() && name != takes {
             return Err(bad(CMD, format!("operation {} is {kind}: it takes `{takes}`, not `{name}`", op.id)));
         }
@@ -1257,6 +1296,11 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Pocket { pocket } => {
             if let Some(v) = &p.pocket {
                 *pocket = parse(CMD, "pocket", v)?;
+            }
+        }
+        OperationKind::Chamfer { chamfer } => {
+            if let Some(v) = &p.chamfer {
+                *chamfer = parse(CMD, "chamfer", v)?;
             }
         }
     }

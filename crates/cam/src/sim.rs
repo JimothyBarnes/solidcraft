@@ -204,6 +204,8 @@ pub struct RapidHit {
 struct Found {
     operation: usize,
     move_index: usize,
+    /// How far into the part the toolpath is meant to cut ([`Simulation::cut_into`]).
+    allowed: f64,
     /// Its deepest cut below the part, and where as a rapid it was furthest below the material.
     gouge: Option<Gouge>,
     hit: Option<RapidHit>,
@@ -300,6 +302,17 @@ impl Simulation {
 
     /// Cuts `toolpath` with `tool`, as toolpath number `operation` in what is reported.
     pub fn cut(&mut self, operation: usize, toolpath: &Toolpath, tool: &Tool) -> Result<CutReport> {
+        self.cut_into(operation, toolpath, tool, 0.0)
+    }
+
+    /// As [`Simulation::cut`], for a toolpath that is meant to cut up to `into_part` mm into the
+    /// part as the model has it: a chamfer on an edge the model leaves sharp. Such a cut is not
+    /// a gouge, and where it is made the part is taken to be what it leaves, so that the picture
+    /// and whatever is cut afterwards are judged against the part as it was meant.
+    pub fn cut_into(&mut self, operation: usize, toolpath: &Toolpath, tool: &Tool, into_part: f64) -> Result<CutReport> {
+        if !(0.0..=MAX_COORDINATE).contains(&into_part) {
+            return bad(format!("how far a toolpath may cut into the part must be 0 to {MAX_COORDINATE} mm, not {into_part}"));
+        }
         toolpath.validate()?;
         let cutter = Cutter::of(tool)?;
         let motion = CycleMotion::default();
@@ -312,7 +325,7 @@ impl Simulation {
                 other => plain.push(other),
             }
             let mut at = from;
-            let mut found = Found { operation, move_index: index, gouge: None, hit: None };
+            let mut found = Found { operation, move_index: index, allowed: into_part, gouge: None, hit: None };
             for step in &plain {
                 match *step {
                     Move::Rapid { to } => self.pass(at, to, &cutter, false, &mut found),
@@ -436,8 +449,16 @@ impl Simulation {
                     && !edge
                 {
                     let under = part - within;
-                    if under > self.tolerance && found.gouge.is_none_or(|worst| under > worst.depth) {
-                        found.gouge = Some(Gouge { operation, move_index, at: Vec3 { x, y, z }, depth: under });
+                    if under > self.tolerance + found.allowed {
+                        if found.gouge.is_none_or(|worst| under > worst.depth) {
+                            found.gouge = Some(Gouge { operation, move_index, at: Vec3 { x, y, z }, depth: under });
+                        }
+                    } else if under > 0.0
+                        && found.allowed > 0.0
+                        && let Some(meant) = self.part.as_mut().and_then(|part| part.get_mut(j * field.nx + i))
+                    {
+                        // Cut into, as meant: the part is what the cut leaves there.
+                        *meant = within;
                     }
                 }
             }

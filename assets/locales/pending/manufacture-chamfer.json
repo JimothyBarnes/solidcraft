@@ -1,0 +1,90 @@
+{
+  "en": {
+    "cmd.cam_op_chamfer": "Chamfer",
+    "help.cam.op.chamfer": "Breaks the top outside edge of the part with the side of a chamfer mill or a spot drill. The tool goes once round the part's wall, a little outside it and below the edge, so that its cone cuts a chamfer of the width given; how far outside and how far below follow from the tool's angle and tip. The tip is kept below the chamfer, where it does not cut. The wall is read from the model, which may have the chamfer on it or a sharp edge. Chamfer after the contour: the tool goes down close to the wall.",
+    "manufacture.chamfer_note": "Once round the top outside edge. Chamfer after the contour: the tool goes down close to the wall.",
+    "manufacture.chamfer_tip_below": "Tip below the chamfer",
+    "manufacture.chamfer_tip_z": "Tip at Z",
+    "manufacture.chamfer_width": "Chamfer width",
+    "manufacture.kind_chamfer_mill": "Chamfer mill",
+    "manufacture.no_tool_for_chamfer": "Add a chamfer mill or a spot drill first, with Add Tool.",
+    "manufacture.tool_tip_flat": "Tip flat"
+  },
+  "ar": {
+    "cmd.cam_op_chamfer": "شطف الحافة",
+    "help.cam.op.chamfer": "يكسر الحافة العلوية الخارجية للقطعة بجانب قاطعة شطف أو مثقاب تمركز. تدور الأداة مرة واحدة حول جدار القطعة، خارجه قليلًا وتحت الحافة، فيقطع مخروطها شطفة بالعرض المحدد؛ ويتحدد بُعدها عن الجدار ونزولها تحت الحافة من زاوية الأداة ورأسها. يبقى رأس الأداة تحت الشطفة حيث لا يقطع. يُقرأ الجدار من النموذج، سواء كانت الشطفة مرسومة عليه أم كانت الحافة حادة. نفّذ الشطف بعد تفريز المحيط: تنزل الأداة قريبًا من الجدار.",
+    "manufacture.chamfer_note": "مرة واحدة حول الحافة العلوية الخارجية. نفّذ الشطف بعد تفريز المحيط: تنزل الأداة قريبًا من الجدار.",
+    "manufacture.chamfer_tip_below": "الرأس تحت الشطفة",
+    "manufacture.chamfer_tip_z": "الرأس عند Z",
+    "manufacture.chamfer_width": "عرض الشطفة",
+    "manufacture.kind_chamfer_mill": "قاطعة شطف",
+    "manufacture.no_tool_for_chamfer": "أضف قاطعة شطف أو مثقاب تمركز أولًا عبر «إضافة أداة».",
+    "manufacture.tool_tip_flat": "تسطيح الرأس"
+  },
+  "he": {
+    "cmd.cam_op_chamfer": "פאזה",
+    "help.cam.op.chamfer": "שובר את הקצה העליון החיצוני של החלק בצד של כרסום פאזות או מקדח מרכוז. הכלי מקיף פעם אחת את דופן החלק, מעט מחוצה לה ומתחת לקצה, כך שהקונוס שלו חותך פאזה ברוחב שניתן; המרחק מהדופן והעומק מתחת לקצה נגזרים מזווית הכלי ומהחוד שלו. חוד הכלי נשאר מתחת לפאזה, במקום שבו אינו חותך. הדופן נקראת מהמודל, בין אם הפאזה מופיעה בו ובין אם הקצה חד. בצע את הפאזה אחרי הקונטור: הכלי יורד קרוב לדופן.",
+    "manufacture.chamfer_note": "פעם אחת סביב הקצה העליון החיצוני. בצע את הפאזה אחרי הקונטור: הכלי יורד קרוב לדופן.",
+    "manufacture.chamfer_tip_below": "החוד מתחת לפאזה",
+    "manufacture.chamfer_tip_z": "החוד ב-Z",
+    "manufacture.chamfer_width": "רוחב הפאזה",
+    "manufacture.kind_chamfer_mill": "כרסום פאזות",
+    "manufacture.no_tool_for_chamfer": "הוסף תחילה כרסום פאזות או מקדח מרכוז, באמצעות \"הוספת כלי\".",
+    "manufacture.tool_tip_flat": "שטח בחוד"
+  },
+  "ja": {
+    "cmd.cam_op_chamfer": "面取り",
+    "help.cam.op.chamfer": "面取りカッターまたはスポットドリルの側面で、部品の上面外周のエッジを面取りします。工具は部品の壁の少し外側、エッジより下を一周し、円錐面が指定した幅の面取りを削ります。壁からの距離とエッジからの深さは、工具の角度と先端から決まります。工具の先端は切れないため、面取りより下に保たれます。壁はモデルから読み取るため、モデルに面取りがあってもシャープエッジでも構いません。面取りは輪郭加工の後に行ってください。工具は壁の近くで下降します。",
+    "manufacture.chamfer_note": "上面外周のエッジを一周します。面取りは輪郭加工の後に行ってください。工具は壁の近くで下降します。",
+    "manufacture.chamfer_tip_below": "面取りより下の先端量",
+    "manufacture.chamfer_tip_z": "先端の Z",
+    "manufacture.chamfer_width": "面取り幅",
+    "manufacture.kind_chamfer_mill": "面取りカッター",
+    "manufacture.no_tool_for_chamfer": "先に「工具を追加」で面取りカッターまたはスポットドリルを追加してください。",
+    "manufacture.tool_tip_flat": "先端の平坦部"
+  },
+  "vi": {
+    "cmd.cam_op_chamfer": "Vát mép",
+    "help.cam.op.chamfer": "Vát cạnh trên phía ngoài của chi tiết bằng cạnh bên của dao vát mép hoặc mũi khoan định tâm. Dao đi một vòng quanh thành chi tiết, hơi lệch ra ngoài và thấp hơn cạnh, để mặt côn của nó cắt một mép vát có chiều rộng đã cho; khoảng lệch ra ngoài và độ sâu dưới cạnh được tính từ góc và mũi của dao. Mũi dao được giữ thấp hơn mép vát, nơi nó không cắt. Thành được đọc từ mô hình, dù mô hình đã có mép vát hay vẫn là cạnh sắc. Hãy vát mép sau khi phay biên dạng: dao đi xuống sát thành.",
+    "manufacture.chamfer_note": "Một vòng quanh cạnh trên phía ngoài. Hãy vát mép sau khi phay biên dạng: dao đi xuống sát thành.",
+    "manufacture.chamfer_tip_below": "Mũi dao dưới mép vát",
+    "manufacture.chamfer_tip_z": "Mũi dao tại Z",
+    "manufacture.chamfer_width": "Chiều rộng mép vát",
+    "manufacture.kind_chamfer_mill": "Dao vát mép",
+    "manufacture.no_tool_for_chamfer": "Hãy thêm dao vát mép hoặc mũi khoan định tâm trước, bằng Thêm dao.",
+    "manufacture.tool_tip_flat": "Mặt phẳng ở mũi"
+  },
+  "zh": {
+    "cmd.cam_op_chamfer": "倒角",
+    "help.cam.op.chamfer": "用倒角刀或定心钻的侧刃对零件的上部外缘倒角。刀具在侧壁外侧稍远处、棱边下方绕零件一周，使其锥面切出给定宽度的倒角；离侧壁多远、在棱边下多深，由刀具的角度和刀尖决定。刀尖保持在倒角下方，那里不参与切削。侧壁从模型读取，模型上已有倒角或仍是锐边均可。请在轮廓加工之后倒角：刀具在靠近侧壁处下刀。",
+    "manufacture.chamfer_note": "绕上部外缘一周。请在轮廓加工之后倒角：刀具在靠近侧壁处下刀。",
+    "manufacture.chamfer_tip_below": "刀尖低于倒角",
+    "manufacture.chamfer_tip_z": "刀尖 Z",
+    "manufacture.chamfer_width": "倒角宽度",
+    "manufacture.kind_chamfer_mill": "倒角刀",
+    "manufacture.no_tool_for_chamfer": "请先用“添加刀具”添加倒角刀或定心钻。",
+    "manufacture.tool_tip_flat": "刀尖平面"
+  },
+  "de": {
+    "cmd.cam_op_chamfer": "Fase",
+    "help.cam.op.chamfer": "Bricht die obere Außenkante des Teils mit der Flanke eines Fasenfräsers oder Anbohrers. Das Werkzeug umrundet die Wand des Teils einmal, etwas außerhalb und unterhalb der Kante, sodass sein Kegel eine Fase der angegebenen Breite schneidet; wie weit außerhalb und wie tief unter der Kante, ergibt sich aus Winkel und Spitze des Werkzeugs. Die Spitze bleibt unterhalb der Fase, wo sie nicht schneidet. Die Wand wird aus dem Modell gelesen, ob dieses die Fase schon hat oder eine scharfe Kante. Nach der Kontur fasen: Das Werkzeug taucht dicht an der Wand ab.",
+    "manufacture.chamfer_note": "Einmal um die obere Außenkante. Nach der Kontur fasen: Das Werkzeug taucht dicht an der Wand ab.",
+    "manufacture.chamfer_tip_below": "Spitze unter der Fase",
+    "manufacture.chamfer_tip_z": "Spitze auf Z",
+    "manufacture.chamfer_width": "Fasenbreite",
+    "manufacture.kind_chamfer_mill": "Fasenfräser",
+    "manufacture.no_tool_for_chamfer": "Zuerst mit „Werkzeug hinzufügen“ einen Fasenfräser oder Anbohrer hinzufügen.",
+    "manufacture.tool_tip_flat": "Spitzenfläche"
+  },
+  "ko": {
+    "cmd.cam_op_chamfer": "모따기",
+    "help.cam.op.chamfer": "모따기 커터나 스폿 드릴의 옆날로 부품의 윗면 바깥 모서리를 모따기합니다. 공구는 부품 벽의 약간 바깥쪽, 모서리보다 아래를 한 바퀴 돌며, 원뿔면이 지정한 너비의 모따기를 가공합니다. 벽에서 떨어진 거리와 모서리 아래 깊이는 공구의 각도와 끝에서 정해집니다. 공구 끝은 절삭하지 않으므로 모따기보다 아래에 둡니다. 벽은 모델에서 읽으므로 모델에 모따기가 있든 날카로운 모서리이든 상관없습니다. 모따기는 윤곽 가공 후에 하세요. 공구는 벽 가까이에서 내려갑니다.",
+    "manufacture.chamfer_note": "윗면 바깥 모서리를 한 바퀴 돕니다. 모따기는 윤곽 가공 후에 하세요. 공구는 벽 가까이에서 내려갑니다.",
+    "manufacture.chamfer_tip_below": "모따기 아래 공구 끝",
+    "manufacture.chamfer_tip_z": "공구 끝 Z",
+    "manufacture.chamfer_width": "모따기 너비",
+    "manufacture.kind_chamfer_mill": "모따기 커터",
+    "manufacture.no_tool_for_chamfer": "먼저 공구 추가(으)로 모따기 커터 또는 스폿 드릴을 추가하세요.",
+    "manufacture.tool_tip_flat": "끝 평탄부"
+  }
+}

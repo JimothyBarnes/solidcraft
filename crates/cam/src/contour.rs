@@ -153,17 +153,27 @@ pub struct Contoured {
 }
 
 /// One loop the tool's centre goes round, ready to cut.
-struct Round {
+pub(crate) struct Round {
     /// Where the tool goes down: beside the stock.
-    entry: Vec2,
+    pub entry: Vec2,
     /// Where it meets the loop and leaves it.
-    start: Vec2,
+    pub start: Vec2,
     /// The loop from `start` back to it, the way it is cut.
-    segs: Vec<Seg2>,
+    pub segs: Vec<Seg2>,
     /// The quarter turns on to the loop at `start` and off it again, when there is room: the
     /// tool comes straight in from `entry` to the first one's start, and goes up at the end of
     /// the second. Without them it comes straight in to `start` and goes back out to `entry`.
-    leads: Option<(Seg2, Seg2)>,
+    pub leads: Option<(Seg2, Seg2)>,
+}
+
+impl Round {
+    /// The radius of its quarter turns, mm: 0 when it has none.
+    pub fn lead(&self) -> f64 {
+        match self.leads {
+            Some((Seg2::Arc { radius, .. }, _)) => radius,
+            _ => 0.0,
+        }
+    }
 }
 
 pub(crate) fn bad<T>(message: String) -> Result<T> {
@@ -380,7 +390,7 @@ impl ContourOp {
             offset,
             round: rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum::<f64>()).sum(),
             entries: rounds.iter().map(|r| [r.entry.x, r.entry.y]).collect(),
-            leads: rounds.iter().map(|r| r.leads.map_or(0.0, |(on, _)| if let Seg2::Arc { radius, .. } = on { radius } else { 0.0 })).collect(),
+            leads: rounds.iter().map(Round::lead).collect(),
             tabs,
             tab_top,
             notes,
@@ -392,7 +402,7 @@ impl ContourOp {
 /// (the height of the tabs' tops and where along the round each tab's lift begins and ends),
 /// the tool goes straight up where a lift begins, across at that height, and straight down at
 /// the plunge feed where it ends.
-fn go_round(moves: &mut Vec<Move>, r: &Round, z: f64, over: Option<(f64, &[(f64, f64)])>, feed: f64, plunge_feed: f64) {
+pub(crate) fn go_round(moves: &mut Vec<Move>, r: &Round, z: f64, over: Option<(f64, &[(f64, f64)])>, feed: f64, plunge_feed: f64) {
     let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
     let (top, lifts) = over.unwrap_or((z, &[]));
     let (mut from, mut done, mut next, mut up) = (r.start, 0.0, 0, false);
@@ -619,7 +629,7 @@ pub(crate) fn cut(moves: &mut Vec<Move>, seg: &Seg2, from: Vec2, to: Vec2, heigh
 /// (or a half or a quarter of it, where that is what fits) that touch the loop at the start:
 /// the first side that has room for them is taken, and only when none has does the tool go
 /// straight in to the first side with a clear way.
-fn round(path: &Loop2, all: &[Region2], direction: CutDirection, beside: (Vec2, Vec2), lead: f64) -> Result<Round> {
+pub(crate) fn round(path: &Loop2, all: &[Region2], direction: CutDirection, beside: (Vec2, Vec2), lead: f64) -> Result<Round> {
     // Lengths and places to a micron, so that equal sides are equal whatever their last bits.
     let micron = |v: f64| (v * 1e6).round() as i64;
     let mut sides: Vec<(usize, bool, i64, i64, i64)> = path

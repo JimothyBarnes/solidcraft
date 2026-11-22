@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
+use crate::chamfer::ChamferOp;
 use crate::contour::ContourOp;
 use crate::drill::DrillOp;
 use crate::face::FaceOp;
@@ -139,6 +140,8 @@ pub enum OperationKind {
     Contour { contour: ContourOp },
     /// Closed pockets cleared in rings, each named by a point on its floor (decision 0014).
     Pocket { pocket: PocketOp },
+    /// The top outside edge of the part broken with a chamfer mill (decision 0018).
+    Chamfer { chamfer: ChamferOp },
 }
 
 /// One operation of a setup.
@@ -342,6 +345,7 @@ impl ManufactureData {
                 OperationKind::Face { face } => face.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Contour { contour } => contour.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Pocket { pocket } => pocket.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Chamfer { chamfer } => chamfer.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())

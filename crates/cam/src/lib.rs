@@ -15,6 +15,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod chamfer;
 mod contour;
 mod cycle;
 mod drill;
@@ -31,6 +32,7 @@ mod tool;
 mod toolpath;
 mod units;
 
+pub use chamfer::{CHAMFER_TIP_ANGLES, ChamferOp, Chamfered, DEFAULT_CHAMFER_TIP_BELOW, DEFAULT_CHAMFER_WIDTH, MIN_CHAMFER_WIDTH};
 pub use contour::{
     ContourOp, Contoured, CutDirection, DEFAULT_CONTOUR_CLEAR, DEFAULT_CONTOUR_STEPDOWN, DEFAULT_LEAD_RADIUS, DEFAULT_TAB_HEIGHT, DEFAULT_TAB_WIDTH,
     MAX_CONTOUR_LEVELS, MAX_TABS, Tabs,

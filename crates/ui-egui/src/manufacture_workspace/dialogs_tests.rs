@@ -45,6 +45,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Face(_)) => "face",
         Some(Dialog::Contour(_)) => "contour",
         Some(Dialog::Pocket(_)) => "pocket",
+        Some(Dialog::Chamfer(_)) => "chamfer",
         Some(Dialog::Drill(_)) => "drill",
         Some(Dialog::Simulate(_)) => "simulate",
         Some(Dialog::Post(_)) => "post",
@@ -397,6 +398,11 @@ fn add_tool_writes_the_tool_each_kind_needs() {
         (Some("6 mm Tap"), Some(1.25), Some(0.0))
     );
     assert_eq!(drill["geometry"]["thread_pitch"], json!(0.0));
+    // A chamfer mill has its angle and the flat at its tip.
+    let chamfer = of("chamfer_mill", &|f| (f.tip_angle, f.tip_flat) = (f.usual_tip_angle(), 1.0));
+    assert!((chamfer["geometry"]["tip_angle"].as_f64().unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    assert_eq!((chamfer["name"].as_str(), chamfer["geometry"]["tip_diameter"].as_f64()), (Some("10 mm Chamfer mill"), Some(1.0)));
+    assert_eq!(drill["geometry"]["tip_diameter"], json!(0.0));
     // A name typed is kept; cutting data comes with a material.
     let named = of("flat_end_mill", &|f| {
         f.name = "  Rougher ".into();
@@ -497,6 +503,7 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
         ("cam.op.face", "MILLING"),
         ("cam.op.contour", "MILLING"),
         ("cam.op.pocket", "MILLING"),
+        ("cam.op.chamfer", "MILLING"),
         ("cam.op.drill", "DRILLING"),
         ("cam.simulate", "ACTIONS"),
         ("cam.post", "ACTIONS"),
@@ -562,7 +569,7 @@ fn add_tool(h: &mut Harness, kind: &str, diameter: f64) {
     let mut form = ToolForm::new(&h.app);
     form.kind = KINDS.iter().position(|k| k.0 == kind).unwrap();
     form.diameter = diameter;
-    form.flutes = form.usual_flutes();
+    (form.flutes, form.tip_angle) = (form.usual_flutes(), form.usual_tip_angle());
     (form.flute_length, form.overall_length) = (40.0, 90.0);
     form.material = "aluminium".into();
     assert!(form.accept(&mut h.app).is_none(), "{:?}", h.app.status);
@@ -1396,4 +1403,81 @@ fn drill_taps_with_a_tap_at_its_pitch_and_a_speed_only() {
     h.frames(3);
     assert_eq!(drill_form(&mut h).depth, 9.0);
     press(&mut h, "Cancel");
+}
+
+fn chamfer_form(h: &mut Harness) -> &mut ChamferForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Chamfer(form)) => form,
+        _ => panic!("Chamfer is not open"),
+    }
+}
+
+#[test]
+fn chamfer_breaks_the_top_edge_and_keeps_only_what_is_typed() {
+    use std::f64::consts::PI;
+    let mut h = harness();
+    // Nothing to chamfer or with: the form says what to make first.
+    ribbon(&mut h, "cam.op.chamfer");
+    assert_eq!(open(&h), "chamfer");
+    assert!(h.widget(tr("manufacture.no_setup")).is_some());
+    press(&mut h, "Cancel");
+    block(&mut h);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    ribbon(&mut h, "cam.op.chamfer");
+    assert!(h.widget(tr("manufacture.no_tool_for_chamfer")).is_some(), "an end mill cuts no chamfer");
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("chamfer", json!([])));
+    press(&mut h, "Cancel");
+
+    // With a 10 mm, 90 degree chamfer mill (T2): half a millimetre wide, the tip 1 below it. The
+    // block's top is Z -1 under 1 mm of stock, so the tip runs at Z -2.5.
+    add_tool(&mut h, "chamfer_mill", 10.0);
+    ribbon(&mut h, "cam.op.chamfer");
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.tool, form.width, form.typed_width, form.tip_below, form.typed_tip_below, form.direction), (0, 0.5, false, 1.0, false, 0));
+    // 200 m/min on its 10 mm, the chip thinned by the cut's half millimetre of width.
+    let rpm = 200_000.0 / (10.0 * PI);
+    let feed = 0.05 / (2.0 * (0.05_f64 - 0.0025).sqrt()) * 4.0 * rpm;
+    assert!(form.rpm == rpm.round() && (form.feed - feed).abs() < 1e-6, "{} rev/min, {} mm/min: {:?}", form.rpm, form.feed, form.worked.trouble());
+    assert!(h.widget("-2.50 mm").is_some(), "where the tip runs");
+    assert!(h.widget(tr("manufacture.chamfer_note")).is_some() && h.widget(tr("manufacture.preview_note")).is_some());
+    assert!(scene::counts(&h.app).2 > 0, "drawn before it exists");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    // Nothing was typed, so only the direction is kept.
+    assert_eq!(
+        data(&mut h)["setups"][0]["operations"][0]["operation"],
+        json!({"kind": "chamfer", "chamfer": {"width": null, "tip_below": null, "top": null, "direction": "climb", "lead": null, "rpm": null, "feed": null}})
+    );
+    let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
+    assert_eq!((made["numbers"]["z"].as_f64(), made["numbers"]["offset"].as_f64()), (Some(-2.5), Some(1.0)));
+
+    // What is typed is kept: 2 mm wide with the tip half a millimetre below, the other way round.
+    ribbon(&mut h, "cam.op.chamfer");
+    let form = chamfer_form(&mut h);
+    (form.width, form.typed_width, form.tip_below, form.typed_tip_below, form.direction) = (2.0, true, 0.5, true, 1);
+    h.frames(3);
+    assert!(h.widget("-3.50 mm").is_some(), "2 down the wall and half a millimetre more");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][1]["operation"]["chamfer"].clone();
+    assert_eq!(
+        (kept["width"].as_f64(), kept["tip_below"].as_f64(), kept["direction"].as_str(), kept["rpm"].clone()),
+        (Some(2.0), Some(0.5), Some("conventional"), Value::Null)
+    );
+    // A chamfer too wide for the tool says which number to change, and nothing is made.
+    ribbon(&mut h, "cam.op.chamfer");
+    let form = chamfer_form(&mut h);
+    (form.width, form.typed_width) = (4.5, true);
+    h.frames(3);
+    let why = chamfer_form(&mut h).worked.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("a narrower chamfer, the tip less far below, or a bigger tool"), "{why:?}");
+    assert!(h.widget(&why).is_some());
+    press(&mut h, "Cancel");
+    // Its row's Edit opens the form on what it keeps.
+    let form = ChamferForm::edit(&h.app, "op-2").unwrap();
+    assert_eq!((form.width, form.typed_width, form.tip_below, form.direction, form.typed_rpm), (2.0, true, 0.5, 1, false));
+    assert_eq!(form.params()["chamfer"], json!({"width": 2.0, "tip_below": 0.5, "top": null, "direction": "conventional", "lead": null}));
+    assert!(ChamferForm::edit(&h.app, "op-9").is_err());
 }

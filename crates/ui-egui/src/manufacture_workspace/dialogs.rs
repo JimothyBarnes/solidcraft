@@ -24,9 +24,11 @@ use solidcraft_ui_text::{tr, tr_label};
 use crate::SolveApp;
 use crate::ui_kit;
 
+mod chamfer;
 mod contour;
 mod pocket;
 mod simulate;
+pub(crate) use chamfer::ChamferForm;
 pub(crate) use contour::ContourForm;
 pub(crate) use pocket::PocketForm;
 pub(crate) use simulate::SimForm;
@@ -39,6 +41,7 @@ pub(crate) enum Dialog {
     Face(FaceForm),
     Contour(ContourForm),
     Pocket(PocketForm),
+    Chamfer(ChamferForm),
     Drill(DrillForm),
     Simulate(SimForm),
     Post(PostForm),
@@ -79,6 +82,7 @@ impl Dialog {
             Dialog::Face(FaceForm { editing: Some(edited), .. })
             | Dialog::Contour(ContourForm { editing: Some(edited), .. })
             | Dialog::Pocket(PocketForm { editing: Some(edited), .. })
+            | Dialog::Chamfer(ChamferForm { editing: Some(edited), .. })
             | Dialog::Drill(DrillForm { editing: Some(edited), .. }) => edited.id.as_str(),
             _ => None,
         }
@@ -91,6 +95,7 @@ impl Dialog {
             Dialog::Face(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Contour(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Pocket(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
+            Dialog::Chamfer(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Drill(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Simulate(form) => form.worked.get().map(|(key, simulated)| (key, Shown::Stock(simulated))),
             _ => None,
@@ -99,7 +104,7 @@ impl Dialog {
 }
 
 /// The tool kinds Add Tool offers: the command's word and the label.
-const KINDS: [(&str, &str); 8] = [
+const KINDS: [(&str, &str); 9] = [
     ("flat_end_mill", "manufacture.kind_flat_end_mill"),
     ("face_mill", "manufacture.kind_face_mill"),
     ("bull_nose_end_mill", "manufacture.kind_bull_nose_end_mill"),
@@ -108,6 +113,7 @@ const KINDS: [(&str, &str); 8] = [
     ("spot_drill", "manufacture.kind_spot_drill"),
     ("reamer", "manufacture.kind_reamer"),
     ("tap", "manufacture.kind_tap"),
+    ("chamfer_mill", "manufacture.kind_chamfer_mill"),
 ];
 const COOLANTS: [(&str, &str); 3] =
     [("flood", "manufacture.coolant_flood"), ("mist", "manufacture.coolant_mist"), ("off", "manufacture.coolant_off")];
@@ -300,8 +306,11 @@ pub(crate) struct ToolForm {
     typed_flutes: bool,
     pub flute_length: f64,
     pub overall_length: f64,
-    /// Degrees, for a drill or a spot drill.
+    /// Degrees, for a drill, a spot drill or a chamfer mill: the kind's usual angle until typed.
     pub tip_angle: f64,
+    typed_tip_angle: bool,
+    /// The flat at a chamfer mill's tip, mm across.
+    pub tip_flat: f64,
     /// mm a turn, for a tap.
     pub pitch: f64,
     pub coolant: usize,
@@ -334,6 +343,8 @@ impl ToolForm {
             flute_length,
             overall_length,
             tip_angle: 118.0,
+            typed_tip_angle: false,
+            tip_flat: 0.0,
             // 20 threads an inch, or 1 mm.
             pitch: if inch { 1.27 } else { 1.0 },
             coolant: 0,
@@ -367,6 +378,8 @@ impl ToolForm {
             flute_length: tool.geometry.flute_length,
             overall_length: tool.geometry.overall_length,
             tip_angle: if tool.geometry.tip_angle > 0.0 { tool.geometry.tip_angle.to_degrees() } else { 118.0 },
+            typed_tip_angle: true,
+            tip_flat: tool.geometry.tip_diameter,
             pitch: if tool.geometry.thread_pitch > 0.0 { tool.geometry.thread_pitch } else { 1.0 },
             coolant,
             material: data.map(|c| c.material.clone()).unwrap_or_default(),
@@ -378,13 +391,19 @@ impl ToolForm {
     }
 
     fn pointed(&self) -> bool {
-        matches!(word(&KINDS, self.kind), "drill" | "spot_drill")
+        matches!(word(&KINDS, self.kind), "drill" | "spot_drill" | "chamfer_mill")
+    }
+
+    /// The angle at the tip a tool of this kind usually has, degrees, until one is typed.
+    fn usual_tip_angle(&self) -> f64 {
+        if word(&KINDS, self.kind) == "chamfer_mill" { 90.0 } else { 118.0 }
     }
 
     /// The flutes a tool of this kind usually has, until the number is typed.
     fn usual_flutes(&self) -> u32 {
         match word(&KINDS, self.kind) {
             "drill" | "spot_drill" => 2,
+            "chamfer_mill" => 4,
             "face_mill" => 5,
             "reamer" => 6,
             _ => 3,
@@ -423,7 +442,8 @@ impl ToolForm {
                 "geometry": {
                     "diameter": self.diameter, "corner_radius": corner_radius, "flute_length": self.flute_length, "shoulder_length": 0.0,
                     "overall_length": self.overall_length, "shank_diameter": self.diameter,
-                    "tip_angle": if self.pointed() { self.tip_angle.to_radians() } else { 0.0 }, "tip_diameter": 0.0,
+                    "tip_angle": if self.pointed() { self.tip_angle.to_radians() } else { 0.0 },
+                    "tip_diameter": if kind == "chamfer_mill" { self.tip_flat } else { 0.0 },
                     "thread_pitch": if kind == "tap" { self.pitch } else { 0.0 }
                 },
                 "flutes": self.flutes,
@@ -458,6 +478,11 @@ impl ToolForm {
             (true, None) => json!(self.tip_angle.to_radians()),
             (false, _) if same_kind => was["tip_angle"].clone(),
             (false, _) => json!(0.0),
+        };
+        geometry["tip_diameter"] = match kind {
+            "chamfer_mill" => json!(self.tip_flat),
+            _ if same_kind => was["tip_diameter"].clone(),
+            _ => json!(0.0),
         };
         geometry["thread_pitch"] = match kind {
             "tap" => json!(self.pitch),
@@ -520,12 +545,19 @@ impl ToolForm {
                 if self.kind != kind && !self.typed_flutes {
                     self.flutes = self.usual_flutes();
                 }
+                if self.kind != kind && !self.typed_tip_angle {
+                    self.tip_angle = self.usual_tip_angle();
+                }
                 ui_kit::row(ui, tr("ui.diameter"), |ui| ui_kit::length_field(ui, &mut self.diameter, units, decimals));
                 if word(&KINDS, self.kind) == "bull_nose_end_mill" {
                     ui_kit::row(ui, tr("manufacture.tool_corner_radius"), |ui| ui_kit::length_field(ui, &mut self.corner_radius, units, decimals));
                 }
                 if self.pointed() {
-                    ui_kit::row(ui, tr("manufacture.tool_tip_angle"), |ui| ui_kit::angle_field(ui, &mut self.tip_angle));
+                    self.typed_tip_angle |=
+                        ui_kit::row(ui, tr("manufacture.tool_tip_angle"), |ui| ui_kit::angle_field(ui, &mut self.tip_angle)).changed();
+                }
+                if word(&KINDS, self.kind) == "chamfer_mill" {
+                    ui_kit::row(ui, tr("manufacture.tool_tip_flat"), |ui| ui_kit::length_field(ui, &mut self.tip_flat, units, decimals));
                 }
                 if word(&KINDS, self.kind) == "tap" {
                     ui_kit::row(ui, tr("manufacture.tool_thread_pitch"), |ui| ui_kit::length_field(ui, &mut self.pitch, units, decimals));
@@ -1700,6 +1732,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
             | "cam.op.face"
             | "cam.op.contour"
             | "cam.op.pocket"
+            | "cam.op.chamfer"
             | "cam.op.drill"
             | "cam.simulate"
             | "cam.post"
@@ -1724,6 +1757,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         "cam.op.face" => Dialog::Face(FaceForm::new(app)),
         "cam.op.contour" => Dialog::Contour(ContourForm::new(app)),
         "cam.op.pocket" => Dialog::Pocket(PocketForm::new(app)),
+        "cam.op.chamfer" => Dialog::Chamfer(ChamferForm::new(app)),
         "cam.op.drill" => Dialog::Drill(DrillForm::new(app)),
         "cam.simulate" => Dialog::Simulate(SimForm::new(app)),
         _ => Dialog::Post(PostForm::new(app)),
@@ -1742,6 +1776,7 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
             "face" => FaceForm::edit(app, id).map(Dialog::Face),
             "contour" => ContourForm::edit(app, id).map(Dialog::Contour),
             "pocket" => PocketForm::edit(app, id).map(Dialog::Pocket),
+            "chamfer" => ChamferForm::edit(app, id).map(Dialog::Chamfer),
             "drill" => DrillForm::edit(app, id).map(Dialog::Drill),
             _ => Err(tr("manufacture.edit_unsupported_operation").to_string()),
         }),
@@ -1767,6 +1802,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Face(form) => form.show(app, ctx, &units, decimals).map(Dialog::Face),
         Dialog::Contour(form) => form.show(app, ctx, &units, decimals).map(Dialog::Contour),
         Dialog::Pocket(form) => form.show(app, ctx, &units, decimals).map(Dialog::Pocket),
+        Dialog::Chamfer(form) => form.show(app, ctx, &units, decimals).map(Dialog::Chamfer),
         Dialog::Drill(form) => form.show(app, ctx, &units, decimals).map(Dialog::Drill),
         Dialog::Simulate(form) => form.show(app, ctx, &units, decimals).map(Dialog::Simulate),
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
