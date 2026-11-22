@@ -231,9 +231,48 @@ fn a_rapid_through_material_is_a_hit_and_a_cut_below_the_stock_is_measured() {
     let slot = vec![feed(20.0, 10.0, -5.0), feed(80.0, 10.0, -5.0), rapid(80.0, 10.0, -3.0), rapid(20.0, 10.0, -3.0), rapid(20.0, 10.0, 5.0)];
     assert_eq!(sim.cut(2, &path(p(20.0, 10.0, 5.0), slot), &flat10()).unwrap().rapid_hits, 0);
     // Through the stock's bottom (Z -20) to -22: 2 mm below it, and only the stock is removed.
-    let through = sim.cut(3, &path(p(50.0, 50.0, 5.0), vec![feed(50.0, 50.0, -22.0)]), &flat10()).unwrap();
-    assert_eq!((sim.below_stock, height(&sim, 50.0, 50.0)), (2.0, -20.0));
+    // Back up at rapid from below the stock, the tool is in the hole it made: no hit.
+    let through = sim.cut(3, &path(p(50.0, 50.0, 5.0), vec![feed(50.0, 50.0, -22.0), rapid(50.0, 50.0, 5.0)]), &flat10()).unwrap();
+    assert_eq!((sim.below_stock, height(&sim, 50.0, 50.0), through.rapid_hits), (2.0, -20.0, 0));
     assert!((through.removed - 25.0 * PI * 20.0).abs() < 0.01 * 25.0 * PI * 20.0, "{}", through.removed);
+    // A rapid below the stock's bottom under material that is still there is in it all the same.
+    let under = sim.cut(4, &path(p(50.0, 50.0, -22.0), vec![rapid(70.0, 50.0, -22.0)]), &flat10()).unwrap();
+    assert_eq!((under.rapid_hits, sim.rapid_hits.last().map(|hit| hit.depth)), (1, Some(20.0)));
+}
+
+#[test]
+fn a_drill_through_a_hole_of_the_part_cuts_into_nothing() {
+    // A plate as thick as the stock less 1 mm on top, with a hole of 10 through it at (50, 30):
+    // the part has no height there, and is marked as below the stock's bottom, as the engine
+    // marks it.
+    let sim = stock();
+    let f = sim.stock.clone();
+    let part: Vec<f64> = (0..f.nx * f.ny)
+        .map(|k| {
+            let c = f.centre(k % f.nx, k / f.nx);
+            if (c.x - 50.0).hypot(c.y - 30.0) < 5.0 { -21.0 } else { -1.0 }
+        })
+        .collect();
+    let mut sim = sim.with_part(part).unwrap();
+    // A 10 mm drill to Z -24 at its tip: its full diameter a millimetre past the bottom of the
+    // stock (the point is 5 / tan 59 = 3.004 long). It takes the hole and nothing of the part,
+    // and comes back up the hole at rapid: no gouge, no rapid through material, and the tip
+    // 4 mm below the stock, exactly.
+    let drill = tool(ToolKind::Drill, 10.0, 0.0, 118.0);
+    let hole = |x: f64| Move::Drill { to: p(x, 30.0, -24.0), r: 2.0, retract: 5.0, cycle: DrillCycle::Drill { dwell: 0.0 }, feed: 200.0 };
+    let cut = sim.cut(1, &path(p(50.0, 30.0, 10.0), vec![hole(50.0)]), &drill).unwrap();
+    assert_eq!((cut.gouges, cut.rapid_hits, sim.below_stock), (0, 0, 4.0));
+    assert!((cut.removed - PI * 25.0 * 20.0).abs() < 0.01 * PI * 25.0 * 20.0, "{}", cut.removed);
+    assert_eq!(height(&sim, 50.125, 30.125), -20.0);
+    // Pecked, it rapids back down its own hole, below the stock's bottom too: still nothing.
+    let pecked = Move::Drill { to: p(50.0, 30.0, -24.0), r: 2.0, retract: 5.0, cycle: DrillCycle::Peck { peck: 3.0 }, feed: 200.0 };
+    let again = sim.cut(2, &path(p(50.0, 30.0, 10.0), vec![pecked]), &drill).unwrap();
+    assert_eq!((again.gouges, again.rapid_hits, again.removed), (0, 0, 0.0));
+    // The same hole drilled where the part has none: a cut into the part, from its top at Z -1
+    // down to the bottom of the stock, which is as far as there is part to cut into.
+    let wrong = sim.cut(3, &path(p(70.0, 30.0, 10.0), vec![hole(70.0)]), &drill).unwrap();
+    assert_eq!((wrong.gouges, wrong.rapid_hits), (1, 0));
+    assert_eq!(sim.gouges.last().map(|gouge| (gouge.operation, gouge.depth)), Some((3, 19.0)));
 }
 
 #[test]

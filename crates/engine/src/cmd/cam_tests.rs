@@ -1406,3 +1406,27 @@ fn the_part_a_simulation_checks_against_is_read_from_its_exact_faces() {
     let part_volume = 100.0 * 80.0 * 20.0 + 100.0 * std::f64::consts::PI * 5.0 + 2.0 / 3.0 * std::f64::consts::PI * 512.0 - 0.5 * 9.0 * 100.0;
     assert!((above - (8000.0 * 29.0 - part_volume)).abs() < 0.01 * 8000.0 * 9.0, "{above} and {}", 8000.0 * 29.0 - part_volume);
 }
+
+#[test]
+fn a_drill_through_the_parts_own_hole_is_not_a_cut_into_the_part() {
+    // The block with a hole of 10 through its middle, drilled with the 10 mm drill from its top
+    // (Z -1 under 1 mm of stock) to its full diameter 1 mm past its bottom at Z -21. The drill's
+    // point (5 / tan 59 long) goes that much further: below the stock, where there is neither
+    // part nor material.
+    let mut s = drilling();
+    run(&mut s, "solid.cylinder", json!({"diameter": 10, "height": 30, "base": [30, 20, -5], "axis": "Z", "operation": "cut", "targets": ["Block"]}));
+    let through = |at: [f64; 2]| json!({"holes": [at], "top": -1, "depth": 21, "depth_to": "full_diameter", "cycle": {"type": "peck", "peck": 5}});
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": through([0.0, 0.0])}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    assert!(about(&sim["below_stock"], 1.0 + 5.0 / 59f64.to_radians().tan()), "{sim:#}");
+    // The same hole 15 mm to the side, where the part has none, cuts into it: from its top to
+    // the stock's bottom, 20 mm.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": through([15.0, 0.0])}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    assert_eq!(
+        (sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64(), sim["gouges"][0]["depth"].as_f64()),
+        (Some(1), Some(0), Some(20.0)),
+        "{sim:#}"
+    );
+}

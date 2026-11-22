@@ -406,30 +406,33 @@ impl Simulation {
                 // the part is neither cut into nor said to be, and a wall the tool stands
                 // beside is not material a rapid passes through.
                 let edge = least > inner;
+                // There is material, and part, only above the stock's bottom: a tool that has
+                // gone through (a drill past the part, a cut into a spoil board) is in air there.
+                let within = z.max(self.floor);
                 if !cutting {
-                    let under = *height - z;
+                    let under = *height - within;
                     if !edge && under > self.tolerance && found.hit.is_none_or(|worst| under > worst.depth) {
                         found.hit = Some(RapidHit { operation, move_index, at: Vec3 { x, y, z }, depth: under });
                     }
                     continue;
                 }
+                // How far the tool's tip is below the stock's bottom while it is over the cell.
+                self.below_stock = self.below_stock.max(self.floor - (a.z + t0 * dz).min(a.z + t1 * dz));
                 let part = self.part.as_ref().and_then(|part| part.get(j * field.nx + i)).copied();
                 let to = match part {
-                    Some(part) if edge => z.max(part),
-                    _ => z,
+                    Some(part) if edge => within.max(part),
+                    _ => within,
                 };
                 if to < *height {
-                    let to = to.max(self.floor);
-                    if to < *height {
-                        self.removed += (*height - to) * area;
-                        *height = to;
-                    }
-                    self.below_stock = self.below_stock.max(self.floor - z);
+                    self.removed += (*height - to) * area;
+                    *height = to;
                 }
+                // A cut into the part: where there is none (a hole through it, beside it) its
+                // height is below the stock's bottom, and nothing is cut into.
                 if let Some(part) = part
                     && !edge
                 {
-                    let under = part - z;
+                    let under = part - within;
                     if under > self.tolerance && found.gouge.is_none_or(|worst| under > worst.depth) {
                         found.gouge = Some(Gouge { operation, move_index, at: Vec3 { x, y, z }, depth: under });
                     }
