@@ -1180,15 +1180,26 @@ fn pocket_offers_the_pockets_found_and_the_widest_tool_that_fits() {
     let form = pocket_form(&mut h);
     let found: Vec<(f64, [f64; 2])> = form.pockets().iter().map(|p| (p.floor, p.size)).collect();
     assert_eq!(found, vec![(-7.0, [60.0, 40.0]), (-5.0, [16.0, 16.0])]);
-    // The big one first: the 20 mm tool fits and is the widest that does. Its centre's 40 x 20
+    // Both at once, to begin with: the widest tool that passes everywhere in both is the 10 mm
+    // one (the round pocket is 16 across), and both are previewed. Their levels and rings are
+    // each pocket's own, so the form gives none.
+    assert_eq!((form.pocket, form.picked().len(), form.tool, form.picked_tool, form.stepover, form.stepdown), (0, 2, 0, false, 4.0, 5.0));
+    assert_eq!(form.params()["pocket"]["pockets"].as_array().map(Vec::len), Some(2));
+    assert!(h.widget("All 2 pockets").is_some() && h.widget(tr("manufacture.pocket_rings")).is_none());
+    assert!(!pocket_form(&mut h).tool_too_wide() && scene::counts(&h.app).2 > 0 && h.widget(tr("manufacture.preview_note")).is_some());
+    let both = scene::counts(&h.app).2;
+    // The big one alone: the 20 mm tool fits and is the widest that does. Its centre's 40 x 20
     // and one ring 8 in; 7 mm deep in one level of at most 10.
-    assert_eq!((form.pocket, form.tool, form.picked_tool, form.stepover, form.stepdown), (0, 1, false, 8.0, 10.0));
+    pocket_form(&mut h).pocket = 1;
+    h.frames(3);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.picked().len(), form.tool, form.picked_tool, form.stepover, form.stepdown), (1, 1, false, 8.0, 10.0));
     assert!(h.widget("60.00 × 40.00 × 6.00 mm").is_some(), "the pocket by its size and its depth below the part's top");
     assert!(h.widget("1 × 7.00 mm").is_some() && !pocket_form(&mut h).tool_too_wide());
-    assert!(scene::counts(&h.app).2 > 0 && h.widget(tr("manufacture.preview_note")).is_some());
+    assert!(scene::counts(&h.app).2 > 0 && scene::counts(&h.app).2 < both);
     // The round one: only the 10 mm tool fits it. 5 mm deep under the stock's top, one level;
     // the centre's circle of radius 3 is the one ring.
-    pocket_form(&mut h).pocket = 1;
+    pocket_form(&mut h).pocket = 2;
     h.frames(3);
     let form = pocket_form(&mut h);
     assert_eq!((form.tool, form.stepover, form.stepdown), (0, 4.0, 5.0));
@@ -1207,7 +1218,7 @@ fn pocket_offers_the_pockets_found_and_the_widest_tool_that_fits() {
     assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("pocket", json!([])));
     // The 10 mm tool in the big pocket, by hand: four rings in two levels of 3.5.
     let form = pocket_form(&mut h);
-    (form.pocket, form.tool) = (0, 0);
+    (form.pocket, form.tool) = (1, 0);
     h.frames(3);
     assert!(h.widget("2 × 3.50 mm").is_some() && h.widget("4").is_some());
     press(&mut h, "Create");
@@ -1241,6 +1252,27 @@ fn pocket_offers_the_pockets_found_and_the_widest_tool_that_fits() {
         (pocket["pockets"].clone(), Some(5.0), Some(0.25), Some("conventional"))
     );
     assert!(PocketForm::edit(&h.app, "op-9").is_err());
+    // Left at its defaults, the form makes one operation of both pockets with the tool that
+    // suits both: Create is all it takes.
+    ribbon(&mut h, "cam.op.pocket");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][1].clone();
+    assert_eq!((kept["tool"].as_u64(), kept["operation"]["pocket"]["pockets"].as_array().map(Vec::len)), (Some(1), Some(2)));
+    let made = h.app.run("cam.op.toolpath", json!({"id": "op-2"})).unwrap();
+    assert_eq!(made["numbers"]["levels"], json!([[-3.5, -7.0], [-5.0]]));
+    // One pocket found is offered as it is, with no "all".
+    let mut h = harness();
+    h.app.run("solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"})).unwrap();
+    h.app
+        .run("solid.box", json!({"length": 60, "width": 40, "height": 6, "corner": [20, 20, 14], "operation": "cut", "targets": ["Plate"]}))
+        .unwrap();
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.pocket");
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picked().len(), form.pockets().len()), (0, 1, 1));
+    assert!(h.widget("60.00 × 40.00 × 6.00 mm").is_some() && h.widget("2 × 3.50 mm").is_some());
 }
 
 #[test]

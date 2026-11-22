@@ -1,6 +1,7 @@
-//! Pocket's form (decision 0014 of the CAM work): a closed pocket found on the model, cleared in
-//! rings. It builds the parameters of `cam.op.pocket` (of `cam.op.edit` for a pocket operation
-//! being changed) and shows what they would cut before OK, as the other operations' forms do.
+//! Pocket's form (decision 0014 of the CAM work): the closed pockets found on the model, cleared
+//! in rings: all of them unless one is picked. It builds the parameters of `cam.op.pocket` (of
+//! `cam.op.edit` for a pocket operation being changed) and shows what they would cut before OK,
+//! as the other operations' forms do.
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{FoundPocket, OperationPreview, ToolChoice, manufacture_pockets, manufacture_preview, manufacture_tools};
 use solidcraft_engine::doc::display_units::{format_length, length_number};
@@ -26,12 +27,14 @@ pub(crate) struct PocketForm {
     pub setup: usize,
     /// The closed pockets the setup picked can cut, as the engine found them.
     found: Worked<Vec<FoundPocket>>,
+    /// Which of the form's choices is picked: with more than one pocket found the first choice
+    /// is all of them, and the pockets follow it one by one.
     pub pocket: usize,
-    /// The pocket the tool was last suited to.
+    /// The choice the tool was last suited to.
     suited_to: Option<usize>,
     pub tool: usize,
     /// Whether the tool was picked by hand: until then it is the widest that passes everywhere
-    /// in the pocket.
+    /// in the pockets picked.
     pub picked_tool: bool,
     pub direction: usize,
     /// mm: 40% of the tool's diameter until it is typed.
@@ -59,7 +62,7 @@ pub(crate) struct PocketForm {
 }
 
 impl PocketForm {
-    /// For the setup the viewport draws, its largest pocket and the widest tool that clears it.
+    /// For the setup the viewport draws, all its pockets and the widest tool that clears them.
     pub fn new(app: &SolveApp) -> PocketForm {
         let (setups, setup) = setups(app);
         PocketForm {
@@ -115,8 +118,20 @@ impl PocketForm {
         self.found.get().map_or(&[], |(_, found)| found.as_slice())
     }
 
-    fn picked(&self) -> Option<&FoundPocket> {
-        self.pockets().get(self.pocket)
+    /// Whether the choices start with all the pockets at once: when more than one was found.
+    fn offers_all(&self) -> bool {
+        self.pockets().len() > 1
+    }
+
+    /// The pockets the choice picked stands for: all of them, or one.
+    pub fn picked(&self) -> &[FoundPocket] {
+        let all = self.pockets();
+        let one = |at: usize| all.get(at..at.saturating_add(1)).unwrap_or(&[]);
+        match (self.offers_all(), self.pocket) {
+            (true, 0) => all,
+            (true, choice) => one(choice - 1),
+            (false, choice) => one(choice),
+        }
     }
 
     /// What is missing before a pocket can be cut, if anything.
@@ -132,28 +147,32 @@ impl PocketForm {
         }
     }
 
-    /// The tool that suits a pocket: the widest that passes everywhere in it (through its necks,
-    /// round its islands), so the whole pocket is cleared; when none does, the widest that fits
-    /// in it at all; else the narrowest there is.
-    fn fitting_tool(&self, found: &FoundPocket) -> usize {
+    /// The tool that suits `pockets`: the widest that passes everywhere in every one of them
+    /// (through their necks, round their islands), so each is cleared whole; when none does, the
+    /// widest that fits in them all; else the narrowest there is.
+    fn fitting_tool(&self, pockets: &[FoundPocket]) -> usize {
         let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
         let narrower = |than: f64| self.tools.iter().enumerate().filter(move |(_, tool)| tool.diameter < than - 1e-6).max_by(by_width);
-        narrower(found.passes).or(narrower(found.widest)).or(self.tools.iter().enumerate().min_by(by_width)).map_or(0, |(at, _)| at)
+        let least = |of: fn(&FoundPocket) -> f64| pockets.iter().map(of).fold(f64::INFINITY, f64::min);
+        narrower(least(|pocket| pocket.passes))
+            .or(narrower(least(|pocket| pocket.widest)))
+            .or(self.tools.iter().enumerate().min_by(by_width))
+            .map_or(0, |(at, _)| at)
     }
 
-    /// Whether the tool picked is too wide for the pocket picked.
+    /// Whether the tool picked is too wide for one of the pockets picked.
     pub fn tool_too_wide(&self) -> bool {
-        self.editing.is_none() && self.picked().zip(self.tools.get(self.tool)).is_some_and(|(pocket, tool)| tool.diameter >= pocket.widest - 1e-6)
+        let too_wide = |tool: &ToolChoice| self.picked().iter().any(|pocket| tool.diameter >= pocket.widest - 1e-6);
+        self.editing.is_none() && self.tools.get(self.tool).is_some_and(too_wide)
     }
 
-    /// The `cam.op.pocket` parameters: the point on the floor of the pocket picked, and what was
+    /// The `cam.op.pocket` parameters: the point on the floor of each pocket picked, and what was
     /// typed. What was not typed is left to the command, so it keeps following the tool. A pocket
     /// operation being changed keeps its own pockets and the rest as kept.
     pub fn params(&self) -> Value {
-        let mut pocket = match (&self.editing, self.picked()) {
-            (Some(edited), _) => edited.base.clone(),
-            (None, Some(found)) => json!({"pockets": [found.at]}),
-            (None, None) => json!({"pockets": []}),
+        let mut pocket = match &self.editing {
+            Some(edited) => edited.base.clone(),
+            None => json!({"pockets": self.picked().iter().map(|found| found.at).collect::<Vec<_>>()}),
         };
         pocket["direction"] = json!(word(&DIRECTIONS, self.direction));
         set_or_clear(&mut pocket, "stepover", self.typed_stepover.then_some(self.stepover));
@@ -177,12 +196,11 @@ impl PocketForm {
             if self.found.refresh(app, &json!({"id": setup}), || manufacture_pockets(&app.session, &setup)) {
                 self.suited_to = None;
             }
-            self.pocket = self.pocket.min(self.pockets().len().saturating_sub(1));
-            if self.suited_to != Some(self.pocket)
-                && let Some(suits) = self.picked().map(|found| self.fitting_tool(found))
-            {
+            let choices = self.pockets().len() + usize::from(self.offers_all());
+            self.pocket = self.pocket.min(choices.saturating_sub(1));
+            if self.suited_to != Some(self.pocket) && !self.picked().is_empty() {
                 if !self.picked_tool {
-                    self.tool = suits;
+                    self.tool = self.fitting_tool(self.picked());
                 }
                 self.suited_to = Some(self.pocket);
             }
@@ -223,10 +241,11 @@ impl PocketForm {
         solidcraft_ui_text::format(key, &[("width", &width), ("height", &height), ("depth", &depth), ("islands", &islands)])
     }
 
-    /// The levels and the rings the first pocket would be cut in, as the form says them.
+    /// The levels and the rings a pocket would be cut in, as the form says them: for one
+    /// pocket, since each of several has its own.
     fn worked_out(&self, units: &str, decimals: u8) -> Option<(String, String)> {
         let (_, preview) = self.worked.get()?;
-        let levels = preview.numbers.get("levels")?.as_array()?.first()?.as_array()?;
+        let levels = preview.numbers.get("levels")?.as_array().filter(|each| each.len() == 1)?.first()?.as_array()?;
         let (top, floor) = (preview.numbers.get("top")?.as_f64()?, levels.last()?.as_f64()?);
         let each = format_length((top - floor) / levels.len().max(1) as f64, units, decimals);
         let levels = solidcraft_ui_text::format("manufacture.contour_levels_value", &[("count", &levels.len().to_string()), ("depth", &each)]);
@@ -260,7 +279,10 @@ impl PocketForm {
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
-        let pocket_labels: Vec<String> = self.pockets().iter().map(|found| Self::label(found, units, decimals)).collect();
+        // All of them first, when there is more than one; then each by its size.
+        let all = solidcraft_ui_text::format("manufacture.pocket_all", &[("count", &self.pockets().len().to_string())]);
+        let pocket_labels: Vec<String> =
+            self.offers_all().then_some(all).into_iter().chain(self.pockets().iter().map(|found| Self::label(found, units, decimals))).collect();
         let pocket_labels: Vec<&str> = pocket_labels.iter().map(String::as_str).collect();
         let kept = self.editing.as_ref().map(|edited| {
             let count = edited.base["pockets"].as_array().map_or(0, Vec::len).to_string();
