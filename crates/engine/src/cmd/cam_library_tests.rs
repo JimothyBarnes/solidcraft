@@ -112,3 +112,31 @@ fn files_are_checked_and_never_overwritten_by_surprise() {
         assert!(e.contains("tool library"), "{name}: {e}");
     }
 }
+
+#[test]
+fn a_form_lists_a_library_as_the_read_command_does_and_says_why_it_cannot() {
+    let dir = folder("form");
+    let file = dir.join("mill.json").to_string_lossy().to_string();
+    let mut shop = Session::default();
+    for (number, diameter) in [(1, 6.0), (2, 10.0)] {
+        run(&mut shop, "cam.tool.create", json!({"tool": tool(number, diameter)}));
+    }
+    run(&mut shop, "cam.library.export", json!({"path": file, "name": "Mill"}));
+    // A design with tool 2 as it is in the library and a tool 1 of its own.
+    let mut s = Session::default();
+    run(&mut s, "cam.tool.create", json!({"tool": tool(1, 8.0)}));
+    run(&mut s, "cam.tool.create", json!({"tool": tool(2, 10.0)}));
+    let listed = crate::cmd::manufacture_library(&s.doc, &file).unwrap();
+    assert_eq!(serde_json::to_value(&listed).unwrap(), run(&mut s, "cam.library.read", json!({"path": file})));
+    assert_eq!((listed.name.as_str(), listed.tools.len(), listed.tools[0].diameter), ("Mill", 2, 6.0));
+    assert_eq!(statuses(&serde_json::to_value(&listed).unwrap()), [(1, "differs".to_string()), (2, "same".to_string())]);
+    // What can't be read is said without the command's name.
+    for (path, expect) in [
+        (dir.join("none.json").to_string_lossy().to_string(), "could not read the tool library"),
+        ("tools.txt".to_string(), "a tool library is a .json file"),
+        (String::new(), "invalid library path"),
+    ] {
+        let said = crate::cmd::manufacture_library(&s.doc, &path).unwrap_err();
+        assert!(said.contains(expect) && !said.contains("cam.library.read"), "{path:?}: {said:?}");
+    }
+}

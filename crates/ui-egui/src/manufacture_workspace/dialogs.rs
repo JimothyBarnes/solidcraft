@@ -1,4 +1,4 @@
-//! Manufacture's forms: Add Tool, New Setup, Face, Drill and Post Process. Each is a front end that
+//! Manufacture's forms: Add Tool, Import Tools, New Setup, Face, Drill and Post Process. Each is a front end that
 //! builds the parameters of one `cam.*` command and runs it: every change is a command, and a
 //! script calls the command directly and sees no window. They are standalone windows, opened
 //! when the ribbon starts one of those commands ([`start`]) and drawn once a frame ([`show`]).
@@ -15,8 +15,8 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    HoleBottom, HoleGroup, OperationPreview, Placement, ToolChoice, manufacture_data, manufacture_holes, manufacture_posts, manufacture_preview,
-    manufacture_setup_preview, manufacture_tools,
+    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, ToolChoice, manufacture_data, manufacture_holes,
+    manufacture_library, manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
@@ -27,6 +27,7 @@ use crate::ui_kit;
 /// The open form.
 pub(crate) enum Dialog {
     Tool(ToolForm),
+    Import(ImportForm),
     Setup(SetupForm),
     Face(FaceForm),
     Drill(DrillForm),
@@ -507,6 +508,185 @@ impl ToolForm {
                 ui_kit::row(ui, tr("manufacture.tool_chip_load"), |ui| ui_kit::length_field(ui, &mut self.chip_load, units, decimals.max(3)));
                 refusal(ui, self.error.as_deref());
             });
+        match action {
+            ui_kit::Action::Ok => self.accept(app),
+            ui_kit::Action::None if !closed => Some(self),
+            _ => None,
+        }
+    }
+}
+
+/// A file name from `words`: letters, digits and `_` kept, every run of anything else one `-`;
+/// `fallback` when nothing is left.
+fn file_name(words: &str, fallback: &str, extension: &str) -> String {
+    let plain: String = words.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '-' }).collect();
+    let plain = plain.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+    format!("{}.{extension}", if plain.is_empty() { fallback } else { plain.as_str() })
+}
+
+/// Export Tool Library: asks where to save and writes the design's tools there as a tool library
+/// file, for another design or machine to import. The save prompt asks before replacing a file.
+fn export_library(app: &mut SolveApp) {
+    if manufacture_data(&app.session.doc).is_ok_and(|data| data.tools.is_empty()) {
+        app.set_status(tr("manufacture.library_no_tools"), true);
+        return;
+    }
+    let name = file_name(&format!("{} tools", app.session.doc.name), "tools", "json");
+    app.pick_save(&name, &["json"], |app, path| {
+        let Some(path) = path else { return };
+        // A refusal (a file that is not .json) is on the status line already.
+        if let Ok(written) = app.run("cam.library.export", json!({"path": path, "overwrite": true})) {
+            let tools = written.get("tools").and_then(Value::as_u64).unwrap_or(0).to_string();
+            app.set_status(solidcraft_ui_text::format("manufacture.library_exported", &[("tools", &tools), ("path", &path)]), false);
+        }
+    });
+}
+
+/// Import Tools: copies tools from a tool library file into the design.
+pub(crate) struct ImportForm {
+    /// The library file.
+    pub path: String,
+    /// What the file holds, each tool compared with the design's of the same number.
+    listed: Worked<CamLibraryTools>,
+    /// The numbers of the tools ticked.
+    pub picked: std::collections::BTreeSet<u32>,
+    /// The listing the ticks were last set for: a new listing ticks its new tools.
+    ticked_for: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl ImportForm {
+    pub fn new() -> ImportForm {
+        ImportForm { path: String::new(), listed: Worked::new(), picked: Default::default(), ticked_for: None, error: None }
+    }
+
+    /// The library's name and its tools, once a file is read.
+    pub fn library(&self) -> Option<&CamLibraryTools> {
+        self.listed.get().map(|(_, library)| library)
+    }
+
+    /// Reads the file again when the path or the design changed. A new listing starts with its
+    /// new tools ticked; a tool that differs from the design's is only updated when ticked by hand.
+    fn refresh(&mut self, app: &SolveApp) {
+        let path = self.path.trim().to_string();
+        let read = || if path.is_empty() { Err(String::new()) } else { manufacture_library(&app.session.doc, &path) };
+        if self.listed.refresh(app, &json!(path), read) {
+            self.error = None;
+        }
+        let listing = self.listed.get().map(|(key, _)| key);
+        if self.ticked_for != listing {
+            self.ticked_for = listing;
+            let new = |library: &CamLibraryTools| library.tools.iter().filter(|t| t.status == CamLibraryToolStatus::New).map(|t| t.number).collect();
+            self.picked = self.library().map(new).unwrap_or_default();
+        }
+    }
+
+    /// The `cam.library.import` parameters: the tools ticked that the design does not already
+    /// have as they are, updating the design's where a ticked one differs.
+    pub fn params(&self) -> Value {
+        let tools = self.library().map(|library| library.tools.as_slice()).unwrap_or_default();
+        let ticked =
+            |status: CamLibraryToolStatus| tools.iter().filter(move |t| t.status == status && self.picked.contains(&t.number)).map(|t| t.number);
+        let differing: Vec<u32> = ticked(CamLibraryToolStatus::Differs).collect();
+        let mut numbers: Vec<u32> = ticked(CamLibraryToolStatus::New).chain(differing.iter().copied()).collect();
+        numbers.sort_unstable();
+        json!({"path": self.path.trim(), "numbers": numbers, "replace": !differing.is_empty()})
+    }
+
+    fn anything_to_import(&self) -> bool {
+        self.params()["numbers"].as_array().is_some_and(|numbers| !numbers.is_empty())
+    }
+
+    /// Runs the command and says what it did on the status line: the form again, with the reason,
+    /// when it refuses.
+    pub fn accept(mut self, app: &mut SolveApp) -> Option<ImportForm> {
+        self.refresh(app);
+        if !self.anything_to_import() {
+            return Some(self);
+        }
+        match app.run("cam.library.import", self.params()) {
+            Ok(done) => {
+                let count = |key: &str| done.get(key).and_then(Value::as_array).map_or(0, Vec::len).to_string();
+                let said = solidcraft_ui_text::format("manufacture.library_imported", &[("added", &count("added")), ("updated", &count("updated"))]);
+                app.set_status(said, false);
+                None
+            }
+            Err(why) => {
+                self.error = Some(why);
+                Some(self)
+            }
+        }
+    }
+
+    fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<ImportForm> {
+        self.refresh(app);
+        // Each tool as a line: what it is, and how it compares with the design's.
+        let lines: Vec<(u32, CamLibraryToolStatus, String)> = self
+            .library()
+            .map(|library| library.tools.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|t| {
+                let status = tr(match t.status {
+                    CamLibraryToolStatus::New => "manufacture.library_new",
+                    CamLibraryToolStatus::Same => "manufacture.library_same",
+                    CamLibraryToolStatus::Differs => "manufacture.library_differs",
+                });
+                let (number, diameter) = (t.number.to_string(), format_length(t.diameter, units, decimals));
+                let line = solidcraft_ui_text::format(
+                    "manufacture.library_tool",
+                    &[("number", &number), ("name", &t.name), ("diameter", &diameter), ("status", status)],
+                );
+                (t.number, t.status, line)
+            })
+            .collect();
+        let named = self.library().map(|library| library.name.clone());
+        let ready = self.anything_to_import();
+        let mut browse = false;
+        let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_import"), "library", tr("cmd.cam_library_import"))
+            .placed(pivot, at)
+            .fields()
+            .actions(tr("manufacture.library_import"), tr("ui.cancel"), None)
+            .show(ctx, ready, |ui| {
+                ui_kit::text_row(ui, tr("manufacture.library_file"), &mut self.path, tr("manufacture.library_file_hint"));
+                browse = ui_kit::text_button(ui, tr("manufacture.library_browse"), true).clicked();
+                match (&named, self.listed.trouble()) {
+                    (Some(name), _) => {
+                        ui_kit::text(ui, name, ui_kit::Text::Heading("manufacture_library_name"));
+                        if lines.is_empty() {
+                            ui_kit::text(ui, tr("manufacture.library_empty"), ui_kit::Text::Note("manufacture_library_empty"));
+                        }
+                        for (number, status, line) in &lines {
+                            if *status == CamLibraryToolStatus::Same {
+                                ui_kit::text(ui, line, ui_kit::Text::Note("manufacture_library_same"));
+                                continue;
+                            }
+                            let mut ticked = self.picked.contains(number);
+                            if ui_kit::checkbox(ui, line, &mut ticked).changed() {
+                                if ticked {
+                                    self.picked.insert(*number);
+                                } else {
+                                    self.picked.remove(number);
+                                }
+                            }
+                        }
+                    }
+                    (None, Some(why)) if !why.is_empty() => refusal(ui, Some(why)),
+                    _ => {
+                        ui_kit::text(ui, tr("manufacture.library_choose"), ui_kit::Text::Note("manufacture_library_choose"));
+                    }
+                }
+                refusal(ui, self.error.as_deref());
+            });
+        if browse {
+            // The system's prompt: the form stays, and takes the file chosen when there is one.
+            app.pick_open_for(&["json"], |app, path| {
+                if let (Some(path), Some(Dialog::Import(form))) = (path, app.manufacture_workspace.dialog.as_mut()) {
+                    form.path = path;
+                }
+            });
+        }
         match action {
             ui_kit::Action::Ok => self.accept(app),
             ui_kit::Action::None if !closed => Some(self),
@@ -1334,9 +1514,7 @@ impl PostForm {
     /// kept and every run of anything else a `-`.
     pub fn file_name(&self, design: &str) -> String {
         let setup = self.setups.get(self.setup).map_or("", |s| s.name.as_str());
-        let plain: String = format!("{design} {setup}").chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '-' }).collect();
-        let plain = plain.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
-        format!("{}.nc", if plain.is_empty() { "program" } else { plain.as_str() })
+        file_name(&format!("{design} {setup}"), "program", "nc")
     }
 
     /// Asks where to save, then posts there and shows what was written. The form comes back as
@@ -1437,7 +1615,10 @@ impl Posted {
 /// shortcut): whether `id` has one. Started outside Manufacture, the form opens there; when
 /// Manufacture can't be entered now, the reason goes to the status line and nothing opens.
 pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
-    if !matches!(id, "cam.tool.create" | "cam.setup.create" | "cam.op.face" | "cam.op.drill" | "cam.post") {
+    if !matches!(
+        id,
+        "cam.tool.create" | "cam.library.import" | "cam.library.export" | "cam.setup.create" | "cam.op.face" | "cam.op.drill" | "cam.post"
+    ) {
         return false;
     }
     if !super::active(app)
@@ -1446,8 +1627,14 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         app.set_status(why, true);
         return true;
     }
+    if id == "cam.library.export" {
+        // No form: the save prompt is all it asks.
+        export_library(app);
+        return true;
+    }
     app.manufacture_workspace.dialog = Some(match id {
         "cam.tool.create" => Dialog::Tool(ToolForm::new(app)),
+        "cam.library.import" => Dialog::Import(ImportForm::new()),
         "cam.setup.create" => Dialog::Setup(SetupForm::new(app)),
         "cam.op.face" => Dialog::Face(FaceForm::new(app)),
         "cam.op.drill" => Dialog::Drill(DrillForm::new(app)),
@@ -1485,6 +1672,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let (units, decimals) = (app.session.doc.units.clone(), app.preferences.length_decimals);
     let kept = match dialog {
         Dialog::Tool(form) => form.show(app, ctx, &units, decimals).map(Dialog::Tool),
+        Dialog::Import(form) => form.show(app, ctx, &units, decimals).map(Dialog::Import),
         Dialog::Setup(form) => form.show(app, ctx, &units, decimals).map(Dialog::Setup),
         Dialog::Face(form) => form.show(app, ctx, &units, decimals).map(Dialog::Face),
         Dialog::Drill(form) => form.show(app, ctx, &units, decimals).map(Dialog::Drill),

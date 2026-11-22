@@ -11,6 +11,8 @@ pub const DOCUMENTED: &[&str] = &[
     "appearance.assign",
     "assembly.bom",
     "assembly.constraint.create",
+    "cam.library.export",
+    "cam.library.import",
     "cam.op.drill",
     "cam.op.face",
     "cam.post",

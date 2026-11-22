@@ -40,6 +40,7 @@ fn open(h: &Harness) -> &'static str {
     match &h.app.manufacture_workspace.dialog {
         None => "none",
         Some(Dialog::Tool(_)) => "tool",
+        Some(Dialog::Import(_)) => "import",
         Some(Dialog::Setup(_)) => "setup",
         Some(Dialog::Face(_)) => "face",
         Some(Dialog::Drill(_)) => "drill",
@@ -73,6 +74,13 @@ fn drill_form(h: &mut Harness) -> &mut DrillForm {
     match h.app.manufacture_workspace.dialog.as_mut() {
         Some(Dialog::Drill(form)) => form,
         _ => panic!("Drill is not open"),
+    }
+}
+
+fn import_form(h: &mut Harness) -> &mut ImportForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Import(form)) => form,
+        _ => panic!("Import Tools is not open"),
     }
 }
 
@@ -864,4 +872,89 @@ fn a_form_changes_only_what_it_shows() {
     assert!(h.app.status.as_ref().is_some_and(|s| s.0.contains("no operation 'op-9'")));
     edit(&mut h.app, &Target::Tool(9));
     assert!(h.app.status.as_ref().is_some_and(|s| s.0.contains("no tool 9")));
+}
+
+#[test]
+fn tools_go_out_to_a_library_file_and_back_in() {
+    let mut h = harness();
+    for id in ["cam.library.import", "cam.library.export"] {
+        assert_eq!(crate::workspace::destination(solidcraft_engine::find_command(id).unwrap()), Some(("MANUFACTURE", "MANAGE")), "{id}");
+    }
+    let status = |h: &Harness| h.app.status.as_ref().map(|s| (s.0.clone(), s.2));
+    // Nothing to export yet: said, and no file is asked for.
+    h.app.start("cam.library.export");
+    h.frames(3);
+    assert_eq!(status(&h), Some((tr("manufacture.library_no_tools").to_string(), true)));
+    // Two tools go out to the file the save prompt names.
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    add_tool(&mut h, "drill", 6.0);
+    h.app.start("cam.library.export");
+    h.frames(5);
+    let file = h.dir.join(file_name(&format!("{} tools", h.app.session.doc.name), "tools", "json"));
+    let path = file.to_string_lossy().to_string();
+    assert!(file.exists(), "{path}: {:?}", h.app.status);
+    assert_eq!(status(&h), Some((solidcraft_ui_text::format("manufacture.library_exported", &[("tools", "2"), ("path", &path)]), false)));
+
+    // Into a design without them: both are new and ticked, and Import copies them.
+    for number in [1, 2] {
+        h.app.run("cam.tool.delete", json!({"number": number})).unwrap();
+    }
+    h.app.start("cam.library.import");
+    h.frames(3);
+    assert_eq!(open(&h), "import");
+    assert!(h.widget(tr("manufacture.library_choose")).is_some());
+    import_form(&mut h).path = path.clone();
+    h.frames(3);
+    let form = import_form(&mut h);
+    assert_eq!((form.library().map(|l| l.tools.len()), form.picked.iter().copied().collect::<Vec<_>>()), (Some(2), vec![1, 2]));
+    assert_eq!(form.params(), json!({"path": path, "numbers": [1, 2], "replace": false}));
+    assert!(h.widget("T1 10 mm Flat end mill, Ø10.00 mm: new").is_some() && h.widget("T2 6 mm Drill, Ø6.00 mm: new").is_some());
+    press(&mut h, "Import");
+    assert_eq!((open(&h), data(&mut h)["tools"].as_array().map(Vec::len)), ("none", Some(2)));
+    assert_eq!(status(&h), Some((solidcraft_ui_text::format("manufacture.library_imported", &[("added", "2"), ("updated", "0")]), false)));
+
+    // Again: both are in the design as they are in the file, so there is nothing to import.
+    h.app.start("cam.library.import");
+    import_form(&mut h).path = path.clone();
+    h.frames(3);
+    assert!(import_form(&mut h).picked.is_empty());
+    assert!(h.widget("T1 10 mm Flat end mill, Ø10.00 mm: already in the design").is_some());
+    press(&mut h, "Import");
+    assert_eq!(open(&h), "import", "Import does nothing with nothing ticked");
+    press(&mut h, "Cancel");
+
+    // The design's drill changed since: it differs, and is only updated when ticked by hand.
+    let mut drill = data(&mut h)["tools"][1].clone();
+    drill["flutes"] = json!(3);
+    h.app.run("cam.tool.edit", json!({"number": 2, "tool": drill})).unwrap();
+    h.app.start("cam.library.import");
+    import_form(&mut h).path = path.clone();
+    h.frames(3);
+    let form = import_form(&mut h);
+    assert_eq!(form.params(), json!({"path": path, "numbers": [], "replace": false}));
+    assert!(h.widget(&format!("T2 6 mm Drill, Ø6.00 mm: {}", tr("manufacture.library_differs"))).is_some());
+    import_form(&mut h).picked.insert(2);
+    assert_eq!(import_form(&mut h).params(), json!({"path": path, "numbers": [2], "replace": true}));
+    press(&mut h, "Import");
+    assert_eq!((open(&h), data(&mut h)["tools"][1]["flutes"].as_u64()), ("none", Some(2)));
+    assert_eq!(status(&h), Some((solidcraft_ui_text::format("manufacture.library_imported", &[("added", "0"), ("updated", "1")]), false)));
+
+    // A file that is no tool library: the reason, in the form. Browse takes the file the system's
+    // prompt gives.
+    h.app.start("cam.library.import");
+    import_form(&mut h).path = "notes.txt".into();
+    h.frames(3);
+    let why = import_form(&mut h).listed.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("a tool library is a .json file"), "{why:?}");
+    assert!(h.widget(&why).is_some());
+    let slot = crate::picker_test_support::Slot::default();
+    crate::picker_test_support::open(&mut h.app, &slot);
+    press(&mut h, tr("manufacture.library_browse"));
+    *slot.borrow_mut() = Some(Some(path.clone()));
+    h.frames(5);
+    assert_eq!((open(&h), import_form(&mut h).path.clone()), ("import", path));
+    assert_eq!(
+        (file_name("Bracket v2 tools", "tools", "json"), file_name(" / ", "tools", "json")),
+        ("Bracket-v2-tools.json".to_string(), "tools.json".to_string())
+    );
 }

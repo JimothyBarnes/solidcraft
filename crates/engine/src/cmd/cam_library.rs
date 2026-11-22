@@ -71,11 +71,9 @@ fn status(design: &[solidcraft_cam::Tool], tool: &solidcraft_cam::Tool) -> CamLi
     }
 }
 
-fn read(s: &mut Session, p: &Value) -> Result<Value> {
-    const CMD: &str = "cam.library.read";
-    let p: CamLibraryReadParams = serde_json::from_value(p.clone()).map_err(|e| bad(CMD, e.to_string()))?;
-    let library = read_library(CMD, &p.path)?;
-    let data = load(s, CMD)?;
+/// The library file at `path`, its tools compared with the design's.
+fn listed(cmd: &str, design: &[solidcraft_cam::Tool], path: &str) -> Result<CamLibraryTools> {
+    let library = read_library(cmd, path)?;
     let tools = library
         .tools
         .iter()
@@ -84,10 +82,28 @@ fn read(s: &mut Session, p: &Value) -> Result<Value> {
             name: t.name.clone(),
             kind: serde_json::to_value(t.kind).unwrap_or(Value::Null),
             diameter: t.geometry.diameter,
-            status: status(&data.tools, t),
+            status: status(design, t),
         })
         .collect();
-    reply(CMD, CamLibraryTools { name: library.name, tools })
+    Ok(CamLibraryTools { name: library.name, tools })
+}
+
+fn read(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.library.read";
+    let p: CamLibraryReadParams = serde_json::from_value(p.clone()).map_err(|e| bad(CMD, e.to_string()))?;
+    let data = load(s, CMD)?;
+    reply(CMD, listed(CMD, &data.tools, &p.path)?)
+}
+
+/// What `cam.library.read` gives for the library file at `path`, for the Import Tools form to
+/// list while a path is typed; why not, in plain words. It reads the file and changes nothing.
+pub fn manufacture_library(doc: &solidcraft_doc::Document, path: &str) -> std::result::Result<CamLibraryTools, String> {
+    const CMD: &str = "cam.library.read";
+    let data = super::cam::manufacture_data(doc)?;
+    listed(CMD, &data.tools, path).map_err(|e| match e {
+        crate::EngineError::BadParams { msg, .. } => msg,
+        other => other.to_string(),
+    })
 }
 
 fn import(s: &mut Session, p: &Value) -> Result<Value> {
