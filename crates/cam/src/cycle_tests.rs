@@ -191,3 +191,57 @@ fn a_hole_is_plain_json() {
             .is_err()
     );
 }
+
+#[test]
+fn a_tapped_hole_feeds_in_and_back_out_to_r() {
+    // In step with the spindle down to the bottom, and (the spindle reversed, which is the
+    // control's doing) back out to R at the same feed; then up to where it started at rapid.
+    let tap = |retract: f64| Move::Drill { to: p(10.0, 0.0, -10.0), r: 2.0, retract, cycle: DrillCycle::Tap { pitch: 1.0 }, feed: 500.0 };
+    let start = Toolpath { start: p(0.0, 0.0, 5.0), moves: vec![Move::Spindle { rpm: 500.0, direction: SpindleDirection::Clockwise }, tap(5.0)] };
+    assert_eq!(
+        start.expanded(&CycleMotion::default()).unwrap().moves[1..],
+        [rapid(10.0, 0.0, 5.0), rapid(10.0, 0.0, 2.0), feed(10.0, 0.0, -10.0, 500.0), feed(10.0, 0.0, 2.0, 500.0), rapid(10.0, 0.0, 5.0)]
+    );
+    // Back to R only: it is there already when it has fed out.
+    let low = Toolpath { start: p(10.0, 0.0, 2.0), moves: vec![Move::Spindle { rpm: 500.0, direction: SpindleDirection::Clockwise }, tap(2.0)] };
+    assert_eq!(low.expanded(&CycleMotion::default()).unwrap().moves[1..], [feed(10.0, 0.0, -10.0, 500.0), feed(10.0, 0.0, 2.0, 500.0)]);
+    // 12 mm in and 12 out at 500 mm/min: 2.88 s of cutting, and the hole ends at its retract height.
+    let s = start.stats().unwrap();
+    assert!((s.feed_length - 24.0).abs() < 1e-12 && (s.feed_minutes - 24.0 / 500.0).abs() < 1e-12, "{s:?}");
+    assert_eq!(start.moves[1].end(p(0.0, 0.0, 5.0)), p(10.0, 0.0, 5.0));
+}
+
+#[test]
+fn a_tap_must_be_in_step_with_the_spindle() {
+    let tapped = |spindle: Option<Move>, pitch: f64, feed: f64| {
+        let hole = Move::Drill { to: p(0.0, 0.0, -10.0), r: 2.0, retract: 2.0, cycle: DrillCycle::Tap { pitch }, feed };
+        Toolpath { start: p(0.0, 0.0, 5.0), moves: spindle.into_iter().chain([hole]).collect() }.validate()
+    };
+    let turning = |rpm: f64, direction: SpindleDirection| Some(Move::Spindle { rpm, direction });
+    let clockwise = SpindleDirection::Clockwise;
+    // 1.25 mm a turn at 400 rev/min is 500 mm/min, and nothing else.
+    assert!(tapped(turning(400.0, clockwise), 1.25, 500.0).is_ok());
+    let refused = |made: crate::Result<()>| match made {
+        Err(Error::BadMove { index, reason }) => (index, reason),
+        other => panic!("{other:?}"),
+    };
+    let (index, why) = refused(tapped(turning(400.0, clockwise), 1.25, 501.0));
+    assert!(index == 1 && why.contains("1.25 mm a turn at 400 rev/min is 500 mm/min, not 501"), "{why}");
+    assert!(refused(tapped(turning(400.0, clockwise), 1.0, 500.0)).1.contains("pitch times the spindle speed"));
+    // The spindle stopped, or turning the other way.
+    assert!(refused(tapped(None, 1.25, 500.0)).1.contains("spindle stopped"));
+    assert!(refused(tapped(turning(400.0, SpindleDirection::CounterClockwise), 1.25, 500.0)).1.contains("clockwise"));
+    let stopped = Toolpath {
+        start: p(0.0, 0.0, 5.0),
+        moves: vec![
+            Move::Spindle { rpm: 400.0, direction: clockwise },
+            Move::SpindleStop,
+            Move::Drill { to: p(0.0, 0.0, -10.0), r: 2.0, retract: 2.0, cycle: DrillCycle::Tap { pitch: 1.25 }, feed: 500.0 },
+        ],
+    };
+    assert!(refused(stopped.validate()).1.contains("spindle stopped"));
+    // A pitch no tap has, and hostile ones.
+    for pitch in [0.0, -1.0, 0.001, 1e9, f64::NAN, f64::INFINITY] {
+        assert!(refused(tapped(turning(400.0, clockwise), pitch, 500.0)).1.contains("pitch"), "{pitch}");
+    }
+}

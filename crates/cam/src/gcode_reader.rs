@@ -9,9 +9,11 @@
 //! Drilling cycles G81, G82, G83 and G73 read into one [`Move::Drill`] per hole (§3.5.16,
 //! decision 0008), in absolute mode in the XY plane, with G98's height by
 //! [`ReadSettings::g98`]. What controls run differently is refused by name: a cycle before G98
-//! or G99, a cycle line without X or Y, a hole started below its R plane, repeats (L).
+//! or G99, a cycle line without X or Y, a hole started below its R plane, repeats (L). G84 reads
+//! into a tapped hole whose pitch is its feed over the spindle speed in force (decision 0017),
+//! with the spindle turning clockwise as NIST asks.
 //!
-//! Anything outside the subset (parameters, expressions, tapping and boring cycles, cutter
+//! Anything outside the subset (parameters, expressions, left-hand tapping, boring cycles, cutter
 //! compensation, inverse-time feed, rotary axes, machine-coordinate moves) is refused with the
 //! line and the reason, never guessed at. A program is hostile input: every line, word and number
 //! is checked.
@@ -376,7 +378,7 @@ impl Machine {
         for &g in &gs {
             let unsupported = match g {
                 382 => Some("probing (G38.2)"),
-                840..=890 => Some("tapping and boring cycles (G84-G89)"),
+                850..=890 => Some("boring cycles (G85-G89)"),
                 930 => Some("inverse-time feed (G93)"),
                 410 | 420 => Some("cutter radius compensation (G41/G42)"),
                 100 | 300 | 920..=923 => Some("moves and offsets in machine coordinates (G10, G30, G92)"),
@@ -528,14 +530,14 @@ impl Machine {
             self.motion = Motion::Cancelled;
             self.cycle = None;
         }
-        let cycle_code = gs.iter().copied().find(|g| matches!(g, 730 | 810 | 820 | 830));
+        let cycle_code = gs.iter().copied().find(|g| matches!(g, 730 | 810 | 820 | 830 | 840));
         for &g in &gs {
             self.motion = match g {
                 0 => Motion::Rapid,
                 10 => Motion::Linear,
                 20 => Motion::Arc(ArcDirection::Clockwise),
                 30 => Motion::Arc(ArcDirection::CounterClockwise),
-                730 | 810 | 820 | 830 => Motion::Cycle,
+                730 | 810 | 820 | 830 | 840 => Motion::Cycle,
                 _ => continue,
             };
             if self.motion != Motion::Cycle {
@@ -588,8 +590,8 @@ impl Machine {
         Ok(())
     }
 
-    /// One hole of a drilling cycle: a line with G73, G81, G82 or G83 (`code`), or a line with X
-    /// or Y while one is in force. `words` are R, Q, P and L.
+    /// One hole of a drilling cycle: a line with G73, G81, G82, G83 or G84 (`code`), or a line
+    /// with X or Y while one is in force. `words` are R, Q, P and L.
     fn cycle_line(
         &mut self,
         code: Option<i64>,
@@ -639,10 +641,18 @@ impl Machine {
             (None, None) => return Err("a drilling cycle with no cycle in force".into()),
         };
         let name = g_name(state.code);
-        let cycle = match state.code {
-            810 | 820 if state.q.is_some() => return Err(format!("{name} takes no Q")),
-            730 | 810 | 830 if state.p.is_some() => return Err(format!("P (a dwell) on {name} is not supported")),
+        let mut cycle = match state.code {
+            810 | 820 | 840 if state.q.is_some() => return Err(format!("{name} takes no Q")),
+            730 | 810 | 830 | 840 if state.p.is_some() => return Err(format!("P (a dwell) on {name} is not supported")),
             810 => DrillCycle::Drill { dwell: 0.0 },
+            // Its pitch is its feed over the spindle speed: worked out below, with the feed.
+            840 => match self.spindle {
+                Some(SpindleDirection::Clockwise) if self.speed > 0.0 => DrillCycle::Tap { pitch: 0.0 },
+                Some(SpindleDirection::CounterClockwise) => {
+                    return Err("G84 with the spindle turning counter-clockwise: it taps a right-hand thread, clockwise".into());
+                }
+                _ => return Err("G84 with the spindle stopped: it must be turning clockwise already (NIST IR 6556 3.5.16)".into()),
+            },
             820 => match state.p {
                 Some(p) if p >= 0.0 => DrillCycle::Drill { dwell: p },
                 Some(p) => return Err(format!("dwell P{p} may not be negative")),
@@ -672,6 +682,9 @@ impl Machine {
             (RetractMode::Initial, G98Rule::CycleStart) => state.start_z.max(state.r),
         };
         let feed = self.cutting_feed()?;
+        if let DrillCycle::Tap { pitch } = &mut cycle {
+            *pitch = feed / self.speed;
+        }
         self.push(Move::Drill { to: Vec3 { x: hole.x, y: hole.y, z: state.bottom }, r: state.r, retract, cycle, feed });
         self.cycle = Some(state);
         Ok(())

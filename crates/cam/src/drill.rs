@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
-use crate::cycle::DrillCycle;
+use crate::cycle::{DrillCycle, MAX_PITCH, MIN_PITCH};
 use crate::feeds::op_feeds;
 use crate::placement::Placement;
 use crate::tool::{Engagement, Tool, ToolKind};
@@ -128,10 +128,28 @@ impl DrillOp {
         if !self.feed.is_none_or(|f| f > 0.0 && f <= MAX_FEED) {
             return bad(format!("feed must be above 0 and at most {MAX_FEED} mm/min"));
         }
-        match tool.kind {
-            ToolKind::Drill | ToolKind::SpotDrill | ToolKind::Reamer | ToolKind::FlatEndMill => Ok(()),
-            ToolKind::Tap => bad(format!("tool {} is a tap: tapping (G84) is not supported yet", tool.number)),
-            other => bad(format!("tool {} ({other:?}) does not drill: use a drill, spot drill, reamer or flat end mill", tool.number)),
+        // A tap cuts with the tap cycle at its own pitch, and nothing else does.
+        let pitch = tool.geometry.thread_pitch;
+        match (tool.kind, self.cycle) {
+            (ToolKind::Tap, DrillCycle::Tap { pitch: asked }) => {
+                if !(MIN_PITCH..=MAX_PITCH).contains(&pitch) {
+                    return bad(format!(
+                        "tool {} is a tap with no thread pitch ({pitch} mm): give it one of {MIN_PITCH} to {MAX_PITCH} mm",
+                        tool.number
+                    ));
+                }
+                if !((asked - pitch).abs() <= 1e-9 * pitch) {
+                    return bad(format!("the cycle's pitch ({asked} mm) is not tool {}'s ({pitch} mm)", tool.number));
+                }
+                if self.feed.is_some() {
+                    return bad("a tap's feed is its pitch times its spindle speed: give the speed (rpm), not a feed".into());
+                }
+                Ok(())
+            }
+            (ToolKind::Tap, _) => bad(format!("tool {} is a tap: it cuts with the tap cycle, at its pitch of {pitch} mm", tool.number)),
+            (other, DrillCycle::Tap { .. }) => bad(format!("the tap cycle needs a tap, and tool {} is a {other:?}", tool.number)),
+            (ToolKind::Drill | ToolKind::SpotDrill | ToolKind::Reamer | ToolKind::FlatEndMill, _) => Ok(()),
+            (other, _) => bad(format!("tool {} ({other:?}) does not drill: use a drill, spot drill, reamer, tap or flat end mill", tool.number)),
         }
     }
 
@@ -190,6 +208,12 @@ impl DrillOp {
         let f = op_feeds(tool, Engagement { axial: deep.max(1e-3), radial }, material, self.rpm, self.feed)?;
         let (rpm, notes) = (f.rpm, f.notes);
         let feed = if self.feed.is_some() || tool.kind.is_axial() { f.feed } else { f.plunge_feed };
+        // A tap turns a whole number of times a minute, so that the speed and the feed a program
+        // gives say its pitch exactly, and feeds one pitch a turn.
+        let (rpm, feed) = match self.cycle {
+            DrillCycle::Tap { pitch } => (rpm.round().max(1.0), pitch * rpm.round().max(1.0)),
+            _ => (rpm, feed),
+        };
         let holes = self.ordered();
         let first = holes.first().copied().unwrap_or([0.0, 0.0]);
         let above = |h: [f64; 2]| Vec3 { x: h[0], y: h[1], z: clearance };

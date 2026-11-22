@@ -221,7 +221,19 @@ fn what_a_tool_or_the_heights_cannot_do_is_refused() {
         o
     };
     let cases: Vec<(DrillOp, Tool, &str)> = vec![
-        (base.clone(), tap, "tapping (G84)"),
+        (base.clone(), tap.clone(), "tool 3 is a tap: it cuts with the tap cycle, at its pitch of 1.5 mm"),
+        (with(&|o| o.cycle = DrillCycle::Tap { pitch: 1.5 }), drill10(), "the tap cycle needs a tap, and tool 3 is a Drill"),
+        (with(&|o| o.cycle = DrillCycle::Tap { pitch: 1.25 }), tap.clone(), "the cycle's pitch (1.25 mm) is not tool 3's (1.5 mm)"),
+        (with(&|o| (o.cycle, o.feed) = (DrillCycle::Tap { pitch: 1.5 }, Some(100.0))), tap.clone(), "give the speed (rpm), not a feed"),
+        (
+            with(&|o| o.cycle = DrillCycle::Tap { pitch: 0.0 }),
+            {
+                let mut t = tap.clone();
+                t.geometry.thread_pitch = 0.0;
+                t
+            },
+            "a tap with no thread pitch",
+        ),
         (base.clone(), ball, "does not drill"),
         (with(&|o| o.depth = 41.0), drill10(), "past tool 3's 40 mm of flutes"),
         (with(&|o| o.holes.clear()), drill10(), "1 to 10000 holes"),
@@ -260,4 +272,42 @@ fn many_holes_are_ordered_without_trouble() {
     // Each step is to a neighbour 5 mm away: 9 999 steps, 49 995 mm across at R.
     let s = d.toolpath.stats().unwrap();
     assert!(s.rapid_length > 49_995.0, "{}", s.rapid_length);
+}
+
+#[test]
+fn a_tap_turns_a_whole_number_of_times_a_minute_and_feeds_one_pitch_a_turn() {
+    // An M10 x 1.5 tap with data for aluminium at 10 m/min: 10 000 / (10 pi) = 318.3 rev/min,
+    // taken as 318, and 1.5 x 318 = 477 mm/min. 12 deep from the part's top, back to R.
+    let tap = {
+        let mut t = drill10();
+        (t.kind, t.name) = (ToolKind::Tap, "M10 x 1.5 tap".into());
+        (t.geometry.tip_angle, t.geometry.thread_pitch) = (0.0, 1.5);
+        t.cutting_data[0].surface_speed = 10.0;
+        t
+    };
+    let tapping = DrillOp { cycle: DrillCycle::Tap { pitch: 1.5 }, ..op(vec![[0.0, 0.0], [20.0, 0.0]], 12.0) };
+    let d = drilled(&tapping, &tap).unwrap();
+    assert_eq!((d.rpm, d.feed, d.bottom, d.r), (318.0, 477.0, -13.0, 5.0));
+    let hole = |x: f64| Move::Drill { to: p(x, 0.0, -13.0), r: 5.0, retract: 5.0, cycle: DrillCycle::Tap { pitch: 1.5 }, feed: 477.0 };
+    assert_eq!(
+        d.toolpath.moves,
+        vec![
+            Move::ToolChange { tool: 3 },
+            Move::Spindle { rpm: 318.0, direction: SpindleDirection::Clockwise },
+            Move::Coolant { mode: Coolant::Flood },
+            Move::Rapid { to: p(0.0, 0.0, 25.0) },
+            hole(0.0),
+            hole(20.0),
+            Move::Rapid { to: p(20.0, 0.0, 25.0) },
+            Move::Coolant { mode: Coolant::Off },
+            Move::SpindleStop,
+        ]
+    );
+    // A speed typed in is used, to the whole turn, and the feed follows it.
+    let d = drilled(&DrillOp { rpm: Some(250.4), ..tapping.clone() }, &tap).unwrap();
+    assert_eq!((d.rpm, d.feed), (250.0, 375.0));
+    // It posts as G84 and reads back as the tapped holes it is.
+    let ctx = crate::ProgramContext { program_number: 7, program_name: "Tapped".into(), units: crate::LengthUnit::Millimetre, work_offset: 1 };
+    let posted = crate::Post::builtin("haas_mill").unwrap().write(&drilled(&tapping, &tap).unwrap().toolpath, &ctx).unwrap();
+    assert!(posted.text.contains("\nS318 M3\n") && posted.text.contains("\nG99 G84 X0. Y0. Z-13. R5. F477.\nX20. Y0.\nG80\n"), "{}", posted.text);
 }

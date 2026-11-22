@@ -1,0 +1,50 @@
+{
+  "en": {
+    "manufacture.drill_depth_tap": "From the holes' top to the tap's tip. The full thread stops short of that by the tap's chamfer.",
+    "manufacture.drill_tap_feed": "A tap advances one pitch a turn: its feed follows its speed.",
+    "manufacture.kind_tap": "Tap",
+    "manufacture.tool_thread_pitch": "Thread pitch"
+  },
+  "ar": {
+    "manufacture.drill_depth_tap": "من أعلى الثقوب إلى رأس ذكر اللولبة. اللولب الكامل ينتهي قبل ذلك بمقدار شطفة الذكر.",
+    "manufacture.drill_tap_feed": "ذكر اللولبة يتقدّم خطوة واحدة في كل دورة: تغذيته تتبع سرعته.",
+    "manufacture.kind_tap": "ذكر لولبة",
+    "manufacture.tool_thread_pitch": "خطوة اللولب"
+  },
+  "he": {
+    "manufacture.drill_depth_tap": "מראש הקדחים עד לחוד המברז. התבריג המלא מסתיים לפני כן, באורך הקונוס של המברז.",
+    "manufacture.drill_tap_feed": "מברז מתקדם פסיעה אחת בכל סיבוב: ההזנה שלו נגזרת מהמהירות.",
+    "manufacture.kind_tap": "מברז",
+    "manufacture.tool_thread_pitch": "פסיעת התבריג"
+  },
+  "ja": {
+    "manufacture.drill_depth_tap": "穴の上端からタップ先端まで。完全ねじ部はタップの食付き部の分だけ手前で終わります。",
+    "manufacture.drill_tap_feed": "タップは1回転で1ピッチ進みます。送りは回転数に従います。",
+    "manufacture.kind_tap": "タップ",
+    "manufacture.tool_thread_pitch": "ねじピッチ"
+  },
+  "vi": {
+    "manufacture.drill_depth_tap": "Từ miệng lỗ đến mũi của mũi taro. Phần ren đầy đủ kết thúc trước đó một đoạn bằng phần côn dẫn hướng của mũi taro.",
+    "manufacture.drill_tap_feed": "Mũi taro tiến một bước ren mỗi vòng quay: lượng chạy dao theo tốc độ trục chính.",
+    "manufacture.kind_tap": "Mũi taro",
+    "manufacture.tool_thread_pitch": "Bước ren"
+  },
+  "zh": {
+    "manufacture.drill_depth_tap": "从孔口到丝锥尖端。完整螺纹比该位置短一个丝锥切削锥的长度。",
+    "manufacture.drill_tap_feed": "丝锥每转进给一个螺距：进给随转速而定。",
+    "manufacture.kind_tap": "丝锥",
+    "manufacture.tool_thread_pitch": "螺距"
+  },
+  "de": {
+    "manufacture.drill_depth_tap": "Von der Oberkante der Bohrungen bis zur Spitze des Gewindebohrers. Das volle Gewinde endet um den Anschnitt des Gewindebohrers davor.",
+    "manufacture.drill_tap_feed": "Ein Gewindebohrer rückt pro Umdrehung um eine Steigung vor: Sein Vorschub folgt der Drehzahl.",
+    "manufacture.kind_tap": "Gewindebohrer",
+    "manufacture.tool_thread_pitch": "Gewindesteigung"
+  },
+  "ko": {
+    "manufacture.drill_depth_tap": "구멍 윗면에서 탭 끝까지입니다. 완전 나사부는 탭의 챔퍼 길이만큼 그보다 위에서 끝납니다.",
+    "manufacture.drill_tap_feed": "탭은 한 바퀴에 한 피치씩 전진합니다. 이송은 회전 속도를 따릅니다.",
+    "manufacture.kind_tap": "탭",
+    "manufacture.tool_thread_pitch": "나사 피치"
+  }
+}

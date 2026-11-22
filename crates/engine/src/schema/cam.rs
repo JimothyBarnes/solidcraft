@@ -332,10 +332,11 @@ pub struct CamOpDrillParams {
     pub setup: String,
     #[serde(default)]
     pub name: Option<String>,
-    /// One of the design's tool numbers: a drill, spot drill, reamer or flat end mill.
+    /// One of the design's tool numbers: a drill, spot drill, reamer, tap or flat end mill.
     pub tool: u32,
     /// `{holes: [[x, y], …] in the WCS, depth, cycle: {type: drill, dwell} | {type: peck |
-    /// chip_break, peck}, order?: nearest | as_given, top?: Z (default the stock top), depth_to?:
+    /// chip_break, peck} | {type: tap, pitch} (with a tap, at its own pitch; it takes a speed and
+    /// no feed), order?: nearest | as_given, top?: Z (default the stock top), depth_to?:
     /// tip | full_diameter, r_above?: mm above the top (default the setup's retract), between?:
     /// r_plane | clearance, rpm?, feed?}`, mm and mm/min.
     pub drill: Value,

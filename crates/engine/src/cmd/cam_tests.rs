@@ -1482,3 +1482,66 @@ fn a_contour_leaves_tabs_and_the_simulation_finds_them_standing() {
     let n = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"].clone();
     assert_eq!((n["leads"].clone(), n["entries"].clone()), (json!([0.0]), json!([[0.0, -33.0]])));
 }
+
+/// An M6 x 1 tap as tool 5, with data for aluminium at 15 m/min: 795.8 rev/min on its 6 mm.
+fn tap6() -> Value {
+    json!({
+        "number": 5, "name": "M6 x 1 tap", "kind": "tap",
+        "geometry": {"diameter": 6.0, "corner_radius": 0.0, "flute_length": 20.0, "shoulder_length": 0.0, "overall_length": 80.0,
+                     "shank_diameter": 6.0, "tip_angle": 0.0, "tip_diameter": 0.0, "thread_pitch": 1.0},
+        "flutes": 3, "holder": {"stick_out": 40.0, "segments": []}, "length_offset": 5, "diameter_offset": 5, "coolant": "flood",
+        "cutting_data": [{"material": "aluminium", "surface_speed": 15.0, "chip_load": 0.1, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+        "overrides": {"rpm": null, "feed": null}
+    })
+}
+
+#[test]
+fn a_tap_cuts_its_holes_in_step_with_the_spindle_and_posts_as_g84() {
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": tap6()}));
+    let tapped = |pitch: f64| json!({"holes": [[-20, -10], [20, -10]], "depth": 12, "cycle": {"type": "tap", "pitch": pitch}});
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 5, "drill": tapped(1.0)}));
+    // A whole 796 rev/min, and one pitch a turn: 796 mm/min. 12 deep from the part's top at Z -1.
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert_eq!(
+        (n["rpm"].as_f64(), n["feed"].as_f64(), n["bottom"].as_f64(), n["r"].as_f64()),
+        (Some(796.0), Some(796.0), Some(-13.0), Some(5.0)),
+        "{t}"
+    );
+    let holes: Vec<&Value> = t["toolpath"]["moves"].as_array().unwrap().iter().filter(|m| m["kind"] == "drill").collect();
+    assert!(holes.len() == 2 && holes.iter().all(|m| m["cycle"] == json!({"type": "tap", "pitch": 1.0}) && m["feed"] == json!(796.0)), "{holes:?}");
+    // In and back out at the feed: 2 x 18 mm a hole from R 5 to Z -13.
+    assert!(about(&t["feed_length"], 72.0), "{t}");
+    // Haas and NIST write it as G84, and the program reads back as the tapped holes it is.
+    for post in ["haas_mill", "rs274"] {
+        let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": post}));
+        let text = posted["text"].as_str().unwrap();
+        assert!(text.contains("S796 M3") && text.contains("G99 G84 X-20. Y-10. Z-13. R5. F796.\nX20. Y-10.\nG80"), "{post}:\n{text}");
+    }
+    // The Fanuc-style post has no tapping set up: it says so, and writes nothing.
+    let said = refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "fanuc_mill"}));
+    assert!(said.contains("a tapped hole can't be written as plain moves") && said.contains("does not write G84"), "{said}");
+    // A thread is not simulated: the operation is left out by name.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    let skipped = sim["operations"][0]["skipped"].as_str().unwrap_or_default();
+    assert!(skipped.contains("cuts a thread") && sim["gouge_count"] == 0, "{sim:#}");
+    // Drill's form is offered the tap with its pitch, beside the drill; Contour's is not.
+    let offered: Vec<(u32, Option<f64>)> = crate::cmd::manufacture_tools(&s.doc, "drill").iter().map(|t| (t.number, t.pitch)).collect();
+    assert_eq!(offered, vec![(3, None), (5, Some(1.0))]);
+    assert!(crate::cmd::manufacture_tools(&s.doc, "contour").is_empty());
+    // A tap cuts with the tap cycle at its own pitch and takes no feed; the tap cycle needs a tap.
+    let edited = |s: &mut Session, drill: Value| refused(s, "cam.op.edit", json!({"id": "op-1", "drill": drill}));
+    assert!(edited(&mut s, tapped(1.25)).contains("the cycle's pitch (1.25 mm) is not tool 5's (1 mm)"));
+    assert!(edited(&mut s, three_holes()).contains("tool 5 is a tap: it cuts with the tap cycle, at its pitch of 1 mm"));
+    let mut fed = tapped(1.0);
+    fed["feed"] = json!(500);
+    assert!(edited(&mut s, fed).contains("give the speed (rpm), not a feed"));
+    assert!(refused(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": tapped(1.0)})).contains("the tap cycle needs a tap"));
+    // A speed given is taken to the whole turn, and the feed follows it.
+    let mut slow = tapped(1.0);
+    slow["rpm"] = json!(300.4);
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": slow}));
+    let n = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"].clone();
+    assert_eq!((n["rpm"].as_f64(), n["feed"].as_f64()), (Some(300.0), Some(300.0)));
+}

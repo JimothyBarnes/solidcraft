@@ -135,7 +135,11 @@ fn hostile_programs_are_refused_with_their_line_and_reason() {
         ("G0 X[1+2]", "expressions"),
         ("G0 X#1", "parameters"),
         ("F1\nG41 X1 D1", "line 2: G41"),
-        ("G84 X1 Z-1 R1", "tapping and boring"),
+        ("G85 X1 Z-1 R1", "boring cycles"),
+        ("F1\nG0 Z5\nG99 G84 X1 Y1 Z-1 R1", "G84 with the spindle stopped"),
+        ("F1 S100 M4\nG0 Z5\nG99 G84 X1 Y1 Z-1 R1", "G84 with the spindle turning counter-clockwise"),
+        ("S100 M3\nG0 Z5\nG99 G84 X1 Y1 Z-1 R1", "before any feed"),
+        ("F1 S100 M3\nG0 Z5\nG99 G84 X1 Y1 Z-1 R1 Q0.5", "G84 takes no Q"),
         ("G28 Z0", "G91 G28 Z0"),
         ("G91 G28 X0 Z0", "G91 G28 Z0"),
         ("G91 G28 Z1", "G91 G28 Z0"),
@@ -328,4 +332,16 @@ fn drilling_cycles_controls_disagree_on_are_refused() {
     let again = "F100\nG0 Z10\nG98 G81 X1 Y1 Z-1 R1\nG83 X2 Y2 Z-1 R1 Q1";
     assert_eq!(read_with(G98Rule::BlockStart, again).map(|m| m.len()), Ok(3));
     assert!(read_with(G98Rule::CycleStart, again).unwrap_err().contains("G80 first"));
+}
+
+#[test]
+fn g84_reads_as_a_tapped_hole_whose_pitch_is_its_feed_over_the_speed() {
+    // 500 mm/min at 400 rev/min is 1.25 mm a turn; the next line taps another hole the same.
+    let read = moves("S400 M3\nG0 X0 Y0 Z5\nG99 G84 X10 Y0 Z-10 R2 F500\nX20\nG80\nM5");
+    let tapped = |x: f64| drill(x, 0.0, -10.0, 2.0, 2.0, DrillCycle::Tap { pitch: 1.25 }, 500.0);
+    assert_eq!(read[2..], [tapped(10.0), tapped(20.0), Move::SpindleStop]);
+    // In inches: 14 threads an inch at 450 rev/min, as Haas's workbook writes it.
+    let inch = moves("G20 S450 M3\nG0 X0 Y0 Z1\nG99 G84 X0.75 Y0.75 Z-0.65 R0.1 F32.1429");
+    let Move::Drill { cycle: DrillCycle::Tap { pitch }, feed, .. } = inch[2] else { panic!("{:?}", inch[2]) };
+    assert!((pitch - MM_PER_INCH / 14.0).abs() < 1e-5 && (feed - 32.1429 * MM_PER_INCH).abs() < 1e-9, "{pitch} {feed}");
 }

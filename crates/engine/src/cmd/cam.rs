@@ -64,13 +64,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
     CommandSpec::new("cam.op.drill", "Drill", crate::checked!("cam.op.drill", op_drill)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpDrillParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a drill, spot drill, reamer or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle, order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
+        .params("setup: id, name?, tool: a drill, spot drill, reamer, tap or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle (a tap's is {type: tap, pitch}, its own pitch, and it takes a speed and no feed), order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
     CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpFaceParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
     CommandSpec::new("cam.op.contour", "Contour", crate::checked!("cam.op.contour", op_contour)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock"),
+        .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, lead?: mm (the arcs on to the wall and off it; 0 for none), tabs?: {count, width?, height?}, rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock"),
     CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpPocketParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring"),
@@ -866,6 +866,8 @@ pub struct ToolChoice {
     pub name: String,
     /// Its cutting diameter, mm.
     pub diameter: f64,
+    /// Its thread's pitch, mm, when it is a tap: it cuts holes with the tap cycle at this pitch.
+    pub pitch: Option<f64>,
 }
 
 /// The design's tools that can do `operation` (`face`, `drill`, `contour` or `pocket`), for a form to offer; every
@@ -885,14 +887,23 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
         rpm: None,
         feed: None,
     };
+    // A tap drills with the tap cycle at its own pitch.
+    let pitch = |tool: &Tool| (tool.kind == solidcraft_cam::ToolKind::Tap).then_some(tool.geometry.thread_pitch);
+    let taps = |tool: &Tool| {
+        pitch(tool).is_some_and(|pitch| DrillOp { cycle: solidcraft_cam::DrillCycle::Tap { pitch }, ..drill.clone() }.validate(tool).is_ok())
+    };
     let can = |tool: &Tool| match operation {
         "face" => FaceOp::default().validate(tool).is_ok(),
-        "drill" => drill.validate(tool).is_ok(),
+        "drill" => drill.validate(tool).is_ok() || taps(tool),
         "contour" => ContourOp::default().validate(tool).is_ok(),
         "pocket" => PocketOp { pockets: vec![[0.0, 0.0]], ..PocketOp::default() }.validate(tool).is_ok(),
         _ => true,
     };
-    data.tools.iter().filter(|t| can(t)).map(|t| ToolChoice { number: t.number, name: t.name.clone(), diameter: t.geometry.diameter }).collect()
+    data.tools
+        .iter()
+        .filter(|t| can(t))
+        .map(|t| ToolChoice { number: t.number, name: t.name.clone(), diameter: t.geometry.diameter, pitch: pitch(t) })
+        .collect()
 }
 
 /// An engine error in a view's own words: what is wrong, without the command's name.

@@ -109,6 +109,10 @@ pub struct Cycles {
     pub peck: bool,
     /// G73: pecks with a chip-breaking back-off.
     pub chip_break: bool,
+    /// G84: a hole tapped in step with the spindle. A post without it refuses a tapped hole: it
+    /// can't be written as plain moves.
+    #[serde(default)]
+    pub tap: bool,
     /// What the control's G98 returns to.
     pub g98: G98Rule,
     /// The control's own cycle distances, used to draw and simulate holes and to write them as
@@ -187,6 +191,12 @@ pub struct Posted {
     /// Things worth knowing (an arc written as lines, a move too short to write).
     pub notes: Vec<String>,
 }
+
+/// How many more decimals a tap's feed is written with than other feeds.
+const TAP_FEED_DECIMALS: u8 = 2;
+/// How far the pitch a tap's feed and spindle speed say, as written, may be from its own, as a
+/// share of it.
+const TAP_PITCH_SLOP: f64 = 1e-4;
 
 const PLACEHOLDERS: &[&str] = &["program_number", "program_name", "units_code", "work_offset", "tool"];
 
@@ -381,6 +391,8 @@ struct Writer<'a> {
     feed: Option<String>,
     plane: Option<Plane>,
     spindle_on: bool,
+    /// The spindle speed as a reader gets it back from the last S written, rev/min.
+    spindle_speed: Option<f64>,
     /// The tool whose length offset goes on the next move.
     pending_offset: Option<u32>,
     /// Whether the machine's position is known: not at the program start (the machine is
@@ -420,6 +432,7 @@ impl<'a> Writer<'a> {
             feed: None,
             plane: None,
             spindle_on: false,
+            spindle_speed: None,
             pending_offset: None,
             position_known: false,
             cycle: None,
@@ -587,11 +600,13 @@ impl<'a> Writer<'a> {
                 let code = if direction == SpindleDirection::Clockwise { "M3" } else { "M4" };
                 self.emit(format!("S{s} {code}"));
                 self.spindle_on = true;
+                self.spindle_speed = s.parse().ok();
                 self.written.push(*m);
             }
             Move::SpindleStop => {
                 self.emit("M5".into());
                 self.spindle_on = false;
+                self.spindle_speed = None;
                 self.written.push(*m);
             }
             Move::Coolant { mode } => {
@@ -626,6 +641,7 @@ impl<'a> Writer<'a> {
             DrillCycle::Drill { .. } => ("G81", c.drill),
             DrillCycle::Peck { .. } => ("G83", c.peck),
             DrillCycle::ChipBreak { .. } => ("G73", c.chip_break),
+            DrillCycle::Tap { .. } => ("G84", c.tap),
         };
         if !on {
             return Err(format!("the {} post does not write {code}", self.post.id));
@@ -654,9 +670,23 @@ impl<'a> Writer<'a> {
             }
             // Never stripped, as a dwell's P (see `Post::dwell`).
             DrillCycle::Drill { dwell } if dwell > 0.0 => tail.push(format!("P{}", format_decimal(dwell, self.post.numbers.dwell, false))),
-            DrillCycle::Drill { .. } => {}
+            DrillCycle::Drill { .. } | DrillCycle::Tap { .. } => {}
         }
-        let feed_text = format_decimal(self.ctx.units.from_mm(feed), self.feed_decimals, self.post.numbers.strip_trailing_zeros);
+        // A tap's feed says its pitch, with the spindle speed: two more decimals than other
+        // feeds (Haas's workbook writes F32.1429 for 14 threads an inch at 450 rev/min), and
+        // the two as written must still be the pitch.
+        let decimals =
+            if matches!(cycle, DrillCycle::Tap { .. }) { self.feed_decimals.saturating_add(TAP_FEED_DECIMALS).min(6) } else { self.feed_decimals };
+        let feed_text = format_decimal(self.ctx.units.from_mm(feed), decimals, self.post.numbers.strip_trailing_zeros);
+        if let DrillCycle::Tap { pitch } = cycle {
+            let written = feed_text.parse::<f64>().ok().map(|f| self.ctx.units.to_mm(f)).zip(self.spindle_speed).map(|(feed, speed)| feed / speed);
+            if !written.is_some_and(|written| (written - pitch).abs() <= TAP_PITCH_SLOP * pitch) {
+                return Err(format!(
+                    "its feed and the spindle speed as written say a pitch of {} mm, not {pitch}: give the tap a spindle speed the post writes exactly",
+                    written.unwrap_or(f64::NAN)
+                ));
+            }
+        }
         tail.push(format!("F{feed_text}"));
         Ok(CycleKey { head: [mode.to_string(), code.to_string()], tail, height })
     }
@@ -667,6 +697,13 @@ impl<'a> Writer<'a> {
         let from = self.at;
         let key = match self.cycle_key(from, to, r, retract, cycle, feed) {
             Ok(key) => key,
+            // A tapped hole is cut in step with the spindle, which plain moves can't say.
+            Err(why) if matches!(cycle, DrillCycle::Tap { .. }) => {
+                return Err(Error::BadMove {
+                    index,
+                    reason: format!("a tapped hole can't be written as plain moves, and not as a cycle because {why}"),
+                });
+            }
             Err(why) => {
                 self.end_cycle();
                 self.notes.push(format!("move {index}: hole written as plain moves because {why}"));
@@ -880,6 +917,7 @@ fn compare(written: &Toolpath, read: &Toolpath, tol: f64, w: &Writer<'_>) -> Res
                     (DrillCycle::Drill { dwell: a }, DrillCycle::Drill { dwell: b }) => (a - b).abs() <= dwell_tol,
                     (DrillCycle::Peck { peck: a }, DrillCycle::Peck { peck: b })
                     | (DrillCycle::ChipBreak { peck: a }, DrillCycle::ChipBreak { peck: b }) => (a - b).abs() <= tol,
+                    (DrillCycle::Tap { pitch: a }, DrillCycle::Tap { pitch: b }) => (a - b).abs() <= TAP_PITCH_SLOP * a,
                     _ => false,
                 };
                 near(p, q, tol) && (r1 - r2).abs() <= tol && (t1 - t2).abs() <= tol && (f - g).abs() <= feed_tol && same_cycle

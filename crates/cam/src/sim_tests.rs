@@ -140,6 +140,9 @@ fn a_ball_and_a_drill_cut_their_own_shapes() {
     assert!((height(&sim, 50.125, 30.125) + 12.0).abs() < 0.2 && (height(&sim, 54.6, 30.125) + 12.0 - point).abs() < 0.35);
     // Its pecks rapid back down the hole it has drilled: no rapid passes through material.
     assert_eq!((cut.rapid_hits, cut.gouges), (0, 0));
+    // A tap cuts a thread, which heights can't show: refused by name, as an undercutting tool is.
+    let tap = tool(ToolKind::Tap, 6.0, 0.0, 0.0);
+    assert!(sim.cut(2, &path(p(50.0, 30.0, 10.0), vec![feed(50.0, 30.0, 5.0)]), &tap).unwrap_err().to_string().contains("cuts a thread"));
     // A bull-nose with a 2 mm corner is flat for 3 mm out and rounds up to 2 at its edge.
     let bull = Cutter::of(&tool(ToolKind::BullNoseEndMill, 10.0, 2.0, 0.0)).unwrap();
     assert_eq!((bull.rise(0.0), bull.rise(3.0), bull.rise(5.0)), (0.0, 0.0, 2.0));

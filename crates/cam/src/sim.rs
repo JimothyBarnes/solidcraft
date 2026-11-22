@@ -154,6 +154,9 @@ impl Cutter {
             ToolKind::Dovetail | ToolKind::Lollipop | ToolKind::SlotCutter => {
                 return bad(format!("tool {} ({:?}) cuts under itself, which a field of heights can't show", tool.number, tool.kind));
             }
+            ToolKind::Tap | ToolKind::ThreadMill => {
+                return bad(format!("tool {} ({:?}) cuts a thread, which a field of heights can't show", tool.number, tool.kind));
+            }
             _ => Profile::Flat,
         };
         Ok(Cutter { radius, profile })

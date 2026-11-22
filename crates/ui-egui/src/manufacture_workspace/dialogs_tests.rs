@@ -390,6 +390,13 @@ fn add_tool_writes_the_tool_each_kind_needs() {
     assert!((drill["geometry"]["tip_angle"].as_f64().unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
     assert_eq!((drill["name"].as_str(), drill["geometry"]["corner_radius"].as_f64()), (Some("10 mm Drill"), Some(0.0)));
     assert_eq!(of("reamer", &|_| {})["geometry"]["tip_angle"], json!(0.0));
+    // A tap has its thread's pitch, and no other kind has one.
+    let tap = of("tap", &|f| (f.diameter, f.pitch) = (6.0, 1.25));
+    assert_eq!(
+        (tap["name"].as_str(), tap["geometry"]["thread_pitch"].as_f64(), tap["geometry"]["tip_angle"].as_f64()),
+        (Some("6 mm Tap"), Some(1.25), Some(0.0))
+    );
+    assert_eq!(drill["geometry"]["thread_pitch"], json!(0.0));
     // A name typed is kept; cutting data comes with a material.
     let named = of("flat_end_mill", &|f| {
         f.name = "  Rougher ".into();
@@ -1334,4 +1341,59 @@ fn simulate_draws_the_stock_as_it_is_left_and_says_what_it_found() {
     assert!(h.widget(&gouges).is_some() && h.widget(&rapids).is_some(), "{gouges} / {rapids}");
     assert!(h.widget(tr("manufacture.sim_no_gouge")).is_none());
     press(&mut h, "Close");
+}
+
+#[test]
+fn drill_taps_with_a_tap_at_its_pitch_and_a_speed_only() {
+    let mut h = harness();
+    holed(&mut h);
+    // T1 a 6 mm drill, T2 a tap of 7 with Add Tool's 1 mm pitch.
+    add_tool(&mut h, "drill", 6.0);
+    add_tool(&mut h, "tap", 7.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.drill");
+    // The holes of 6 get the drill: a tap is never picked for a hole's width.
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.tool, form.depth), (0, 0, 21.0));
+    assert!(h.widget(tr("manufacture.drill_cycle")).is_some() && h.widget(tr("manufacture.tool_thread_pitch")).is_none());
+    // The tap picked: its own cycle at its pitch, and through the part's 20 mm the tip goes 1 mm
+    // and three pitches further, so that its full thread is through and not only its chamfer.
+    let form = drill_form(&mut h);
+    (form.tool, form.picked_tool) = (1, true);
+    h.frames(3);
+    let form = drill_form(&mut h);
+    assert_eq!(form.depth, 24.0);
+    let drill = form.params()["drill"].clone();
+    assert_eq!(
+        (drill["cycle"].clone(), drill["depth"].as_f64(), drill["depth_to"].as_str()),
+        (json!({"type": "tap", "pitch": 1.0}), Some(24.0), Some("tip"))
+    );
+    // 200 m/min on 7 mm is 9095 rev/min, to the whole turn, and one pitch a turn.
+    assert_eq!((form.rpm, form.feed, form.worked.trouble()), (9095.0, 9095.0, None));
+    assert!(h.widget(tr("manufacture.tool_thread_pitch")).is_some() && h.widget("1.00 mm").is_some());
+    assert!(h.widget(tr("manufacture.drill_cycle")).is_none() && h.widget(tr("manufacture.drill_tool_wider")).is_none());
+    assert!(h.widget(tr("manufacture.drill_depth_tap")).is_some() && h.widget(tr("manufacture.drill_tap_feed")).is_some());
+    assert!(h.widget("9095.00 mm/min").is_some(), "the feed is shown, not typed");
+    // A speed typed is the tap's; the feed follows it and is never sent.
+    let form = drill_form(&mut h);
+    (form.rpm, form.typed_rpm, form.typed_feed) = (400.0, true, true);
+    h.frames(3);
+    let form = drill_form(&mut h);
+    assert_eq!((form.feed, form.params()["drill"].get("feed"), form.params()["drill"]["rpm"].as_f64()), (400.0, None, Some(400.0)));
+    assert!(h.widget("400.00 mm/min").is_some());
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["tool"].as_u64(), kept["operation"]["drill"]["cycle"].clone()), (Some(2), json!({"type": "tap", "pitch": 1.0})));
+    assert_eq!((kept["operation"]["drill"]["rpm"].as_f64(), kept["operation"]["drill"]["feed"].clone()), (Some(400.0), Value::Null));
+    // Opened again it is still a tapped hole: the pitch shown, no cycle to choose.
+    let form = DrillForm::edit(&h.app, "op-1").unwrap();
+    assert_eq!((form.tool, form.params()["drill"]["cycle"].clone()), (1, json!({"type": "tap", "pitch": 1.0})));
+    // Blind holes are tapped to one pitch short of their bottom: the two of 8 that are 10 deep.
+    ribbon(&mut h, "cam.op.drill");
+    let form = drill_form(&mut h);
+    (form.group, form.tool, form.picked_tool) = (1, 1, true);
+    h.frames(3);
+    assert_eq!(drill_form(&mut h).depth, 9.0);
+    press(&mut h, "Cancel");
 }

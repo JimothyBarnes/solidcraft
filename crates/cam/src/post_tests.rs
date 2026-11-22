@@ -481,3 +481,71 @@ fn post_files_without_cycles_still_read_and_bad_cycle_data_is_refused() {
     unknown["cycles"]["tapping"] = serde_json::json!(true);
     assert!(Post::from_json(&unknown.to_string()).is_err());
 }
+
+/// One hole tapped M6 x 1 at 500 rev/min (so 500 mm/min), 12 deep from R 2, back to R.
+fn tapped(rpm: f64) -> Toolpath {
+    Toolpath {
+        start: p(0.0, 0.0, 50.0),
+        moves: vec![
+            Move::ToolChange { tool: 5 },
+            Move::Spindle { rpm, direction: SpindleDirection::Clockwise },
+            Move::Rapid { to: p(10.0, 10.0, 25.0) },
+            Move::Rapid { to: p(10.0, 10.0, 2.0) },
+            Move::Drill { to: p(10.0, 10.0, -10.0), r: 2.0, retract: 2.0, cycle: DrillCycle::Tap { pitch: 1.0 }, feed: rpm },
+            Move::Rapid { to: p(10.0, 10.0, 50.0) },
+            Move::SpindleStop,
+        ],
+    }
+}
+
+#[test]
+fn a_tapped_hole_is_g84_where_the_post_has_it_and_refused_where_it_has_not() {
+    for id in ["haas_mill", "rs274"] {
+        let posted = Post::builtin(id).unwrap().write(&tapped(500.0), &ctx()).unwrap();
+        assert!(posted.text.contains("S500 M3"), "{id}:\n{}", posted.text);
+        assert!(posted.text.contains("G99 G84 X10. Y10. Z-10. R2. F500."), "{id}:\n{}", posted.text);
+        assert_eq!(posted.read_back.toolpath, tapped(500.0), "{id}");
+        assert!(posted.notes.is_empty(), "{:?}", posted.notes);
+        // In inches the feed has four decimals, so that with the speed it is still the pitch:
+        // 500 / 25.4 = 19.6850 inches a minute.
+        let inch = ProgramContext { units: LengthUnit::Inch, ..ctx() };
+        let posted = Post::builtin(id).unwrap().write(&tapped(500.0), &inch).unwrap();
+        assert!(
+            posted.text.lines().any(|line| line.starts_with("G99 G84 X0.3937 Y0.3937 Z-0.3937 R0.0787") && line.ends_with(" F19.685")),
+            "{id}:\n{}",
+            posted.text
+        );
+        let Move::Drill { cycle: DrillCycle::Tap { pitch }, .. } = posted.read_back.toolpath.moves[4] else { panic!("{id}") };
+        assert!((pitch - 1.0).abs() < 1e-5, "{id}: {pitch}");
+    }
+    // 0.7 mm a turn at 357 rev/min is 249.9 mm/min: three decimals in millimetres.
+    let fine = Toolpath {
+        moves: tapped(357.0)
+            .moves
+            .into_iter()
+            .map(|m| match m {
+                Move::Drill { to, r, retract, .. } => Move::Drill { to, r, retract, cycle: DrillCycle::Tap { pitch: 0.7 }, feed: 0.7 * 357.0 },
+                other => other,
+            })
+            .collect(),
+        ..tapped(357.0)
+    };
+    let posted = Post::builtin("haas_mill").unwrap().write(&fine, &ctx()).unwrap();
+    assert!(posted.text.contains("G99 G84 X10. Y10. Z-10. R2. F249.9\n"), "{}", posted.text);
+    // The Fanuc-style post has no tapping set up: refused, never written as plain moves.
+    let e = Post::builtin("fanuc_mill").unwrap().write(&tapped(500.0), &ctx()).unwrap_err().to_string();
+    assert!(e.contains("a tapped hole can't be written as plain moves") && e.contains("fanuc_mill post does not write G84"), "{e}");
+    // A speed the program can't say exactly (S has no decimals) would make the feed and the
+    // speed as written another pitch: refused.
+    let e = Post::builtin("haas_mill").unwrap().write(&tapped(500.4), &ctx()).unwrap_err().to_string();
+    assert!(e.contains("give the tap a spindle speed the post writes exactly"), "{e}");
+    // A hole that returns to neither R nor where it started can't be a cycle, and so can't be tapped.
+    let mut odd = tapped(500.0);
+    if let Some(Move::Drill { retract, .. }) = odd.moves.get_mut(4) {
+        *retract = 10.0;
+    }
+    assert!(Post::builtin("haas_mill").unwrap().write(&odd, &ctx()).unwrap_err().to_string().contains("neither its R plane nor where it started"));
+    // A post file from before tapping has none.
+    let old = include_str!("../posts/haas_mill.json").replace(r#""tap": true, "#, "");
+    assert!(!old.contains("\"tap\"") && !Post::from_json(&old).unwrap().cycles.tap);
+}

@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
 
-use crate::toolpath::{MAX_DWELL_SECONDS, Move};
+use crate::toolpath::{MAX_DWELL_SECONDS, Move, SpindleDirection};
 use crate::units::MAX_COORDINATE;
 
 /// The most pecks one hole may take.
@@ -23,6 +23,12 @@ pub const MIN_HOLE_DEPTH: f64 = 0.001;
 pub const MAX_CYCLE_DISTANCE: f64 = 25.0;
 /// How far below its R plane a hole may start and still count as starting at R, in mm.
 const START_SLOP: f64 = 1e-9;
+/// The finest and the coarsest thread a tap may cut, in mm a turn.
+pub const MIN_PITCH: f64 = 0.01;
+pub const MAX_PITCH: f64 = 100.0;
+/// How far a tapped hole's feed may be from its pitch times the spindle speed, as a share of it:
+/// a tap fed out of step with its spindle breaks, or cuts another thread.
+pub const TAP_FEED_SLOP: f64 = 1e-6;
 
 /// How a hole is cut from its R plane to its bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,6 +42,10 @@ pub enum DrillCycle {
     Peck { peck: f64 },
     /// Feed down `peck` at a time, backing off a little after each peck to break the chip: G73.
     ChipBreak { peck: f64 },
+    /// Feed down in step with the spindle, `pitch` mm a turn, reverse the spindle at the bottom
+    /// and feed back out to R in step with it: G84, a right-hand thread. The hole's feed is the
+    /// pitch times the spindle speed ([`check_tap`]).
+    Tap { pitch: f64 },
 }
 
 /// What G98 returns a hole to (NIST IR 6556 §3.5.20 and Haas's workbook differ, decision 0008).
@@ -125,7 +135,26 @@ pub(crate) fn check(from: Vec3, to: Vec3, r: f64, retract: f64, cycle: DrillCycl
             }
             Ok(())
         }
+        DrillCycle::Tap { pitch } if (MIN_PITCH..=MAX_PITCH).contains(&pitch) => Ok(()),
+        DrillCycle::Tap { pitch } => Err(format!("a tap's pitch must be {MIN_PITCH} to {MAX_PITCH} mm, not {pitch}")),
     }
+}
+
+/// Checks that a tapped hole of `pitch` mm a turn fed at `feed` mm/min is in step with the
+/// spindle: turning clockwise (`spindle` is its speed and direction, `None` when it is stopped)
+/// at the speed that makes the feed one pitch a turn.
+pub(crate) fn check_tap(pitch: f64, feed: f64, spindle: Option<(f64, SpindleDirection)>) -> std::result::Result<(), String> {
+    let Some((rpm, direction)) = spindle else { return Err("a tapped hole with the spindle stopped: start it before the hole".into()) };
+    if direction != SpindleDirection::Clockwise {
+        return Err("a tapped hole (G84) is cut with the spindle turning clockwise: left-hand tapping is not supported yet".into());
+    }
+    let in_step = pitch * rpm;
+    if !((feed - in_step).abs() <= TAP_FEED_SLOP * in_step) {
+        return Err(format!(
+            "a tapped hole's feed must be its pitch times the spindle speed: {pitch} mm a turn at {rpm} rev/min is {in_step} mm/min, not {feed}"
+        ));
+    }
+    Ok(())
 }
 
 /// How many pecks of `peck` cut from `r` down to `bottom`: at least one, and a last peck shorter
@@ -185,6 +214,16 @@ pub(crate) fn expand(from: Vec3, to: Vec3, r: f64, retract: f64, cycle: DrillCyc
                 }
                 out.push(Move::Rapid { to: at((depth + motion.chip_break_back_off).min(r)) });
             }
+        }
+        DrillCycle::Tap { .. } => {
+            // In, and back out to R at the same feed: the control reverses the spindle at the
+            // bottom and turns it forward again at R. Above R the tool is clear of the thread.
+            out.push(Move::Linear { to: at(to.z), feed });
+            out.push(Move::Linear { to: at(r), feed });
+            if retract > r {
+                out.push(Move::Rapid { to: at(retract) });
+            }
+            return;
         }
     }
     out.push(Move::Rapid { to: at(retract) });

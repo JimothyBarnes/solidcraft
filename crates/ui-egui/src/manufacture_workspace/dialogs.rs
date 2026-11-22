@@ -99,7 +99,7 @@ impl Dialog {
 }
 
 /// The tool kinds Add Tool offers: the command's word and the label.
-const KINDS: [(&str, &str); 7] = [
+const KINDS: [(&str, &str); 8] = [
     ("flat_end_mill", "manufacture.kind_flat_end_mill"),
     ("face_mill", "manufacture.kind_face_mill"),
     ("bull_nose_end_mill", "manufacture.kind_bull_nose_end_mill"),
@@ -107,6 +107,7 @@ const KINDS: [(&str, &str); 7] = [
     ("drill", "manufacture.kind_drill"),
     ("spot_drill", "manufacture.kind_spot_drill"),
     ("reamer", "manufacture.kind_reamer"),
+    ("tap", "manufacture.kind_tap"),
 ];
 const COOLANTS: [(&str, &str); 3] =
     [("flood", "manufacture.coolant_flood"), ("mist", "manufacture.coolant_mist"), ("off", "manufacture.coolant_off")];
@@ -123,6 +124,9 @@ const CYCLES: [(&str, &str); 3] =
     [("drill", "manufacture.cycle_drill"), ("peck", "manufacture.cycle_peck"), ("chip_break", "manufacture.cycle_chip_break")];
 /// How far past the part a through hole is drilled, at the drill's full diameter, mm.
 const BREAKTHROUGH: f64 = 1.0;
+/// How many pitches further a tap's tip goes through a through hole, so that its full thread
+/// is past the part and not only its chamfer.
+const TAP_LEAD: f64 = 3.0;
 const PATTERNS: [(&str, &str); 2] = [("zig_zag", "manufacture.pattern_zig_zag"), ("one_way", "manufacture.pattern_one_way")];
 const UNITS: [(&str, &str); 2] = [("mm", "manufacture.units_mm"), ("inch", "manufacture.units_inch")];
 const WORK_OFFSETS: [&str; 6] = ["G54", "G55", "G56", "G57", "G58", "G59"];
@@ -298,6 +302,8 @@ pub(crate) struct ToolForm {
     pub overall_length: f64,
     /// Degrees, for a drill or a spot drill.
     pub tip_angle: f64,
+    /// mm a turn, for a tap.
+    pub pitch: f64,
     pub coolant: usize,
     /// The material the cutting data is for; no cutting data when empty.
     pub material: String,
@@ -328,6 +334,8 @@ impl ToolForm {
             flute_length,
             overall_length,
             tip_angle: 118.0,
+            // 20 threads an inch, or 1 mm.
+            pitch: if inch { 1.27 } else { 1.0 },
             coolant: 0,
             material: String::new(),
             // 650 ft/min and 0.002 in a tooth, or 200 m/min and 0.05 mm.
@@ -359,6 +367,7 @@ impl ToolForm {
             flute_length: tool.geometry.flute_length,
             overall_length: tool.geometry.overall_length,
             tip_angle: if tool.geometry.tip_angle > 0.0 { tool.geometry.tip_angle.to_degrees() } else { 118.0 },
+            pitch: if tool.geometry.thread_pitch > 0.0 { tool.geometry.thread_pitch } else { 1.0 },
             coolant,
             material: data.map(|c| c.material.clone()).unwrap_or_default(),
             surface_speed: data.map_or(200.0, |c| c.surface_speed),
@@ -414,7 +423,8 @@ impl ToolForm {
                 "geometry": {
                     "diameter": self.diameter, "corner_radius": corner_radius, "flute_length": self.flute_length, "shoulder_length": 0.0,
                     "overall_length": self.overall_length, "shank_diameter": self.diameter,
-                    "tip_angle": if self.pointed() { self.tip_angle.to_radians() } else { 0.0 }, "tip_diameter": 0.0, "thread_pitch": 0.0
+                    "tip_angle": if self.pointed() { self.tip_angle.to_radians() } else { 0.0 }, "tip_diameter": 0.0,
+                    "thread_pitch": if kind == "tap" { self.pitch } else { 0.0 }
                 },
                 "flutes": self.flutes,
                 "holder": {"stick_out": self.overall_length.min(self.flute_length + 10.0), "segments": []},
@@ -448,6 +458,11 @@ impl ToolForm {
             (true, None) => json!(self.tip_angle.to_radians()),
             (false, _) if same_kind => was["tip_angle"].clone(),
             (false, _) => json!(0.0),
+        };
+        geometry["thread_pitch"] = match kind {
+            "tap" => json!(self.pitch),
+            _ if same_kind => was["thread_pitch"].clone(),
+            _ => json!(0.0),
         };
         tool["number"] = json!(self.number);
         tool["name"] = json!(name);
@@ -511,6 +526,9 @@ impl ToolForm {
                 }
                 if self.pointed() {
                     ui_kit::row(ui, tr("manufacture.tool_tip_angle"), |ui| ui_kit::angle_field(ui, &mut self.tip_angle));
+                }
+                if word(&KINDS, self.kind) == "tap" {
+                    ui_kit::row(ui, tr("manufacture.tool_thread_pitch"), |ui| ui_kit::length_field(ui, &mut self.pitch, units, decimals));
                 }
                 if ui_kit::row(ui, tr("manufacture.tool_flutes"), |ui| ui_kit::whole_number_field(ui, &mut self.flutes, 1..=1000, "")).changed() {
                     self.typed_flutes = true;
@@ -1274,19 +1292,39 @@ impl DrillForm {
     }
 
     /// The tool that suits holes of `diameter`: the widest that is no wider, else the narrowest.
+    /// A tap is never picked this way: it is wider than the hole it threads, and whether a hole
+    /// is to be tapped is not the model's to say.
     fn fitting_tool(&self, diameter: f64) -> usize {
         let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
-        let fits = self.tools.iter().enumerate().filter(|(_, tool)| tool.diameter <= diameter + 1e-6).max_by(by_width);
-        fits.or(self.tools.iter().enumerate().min_by(by_width)).map_or(0, |(at, _)| at)
+        let drills = || self.tools.iter().enumerate().filter(|(_, tool)| tool.pitch.is_none());
+        let fits = drills().filter(|(_, tool)| tool.diameter <= diameter + 1e-6).max_by(by_width);
+        fits.or(drills().min_by(by_width)).map_or(0, |(at, _)| at)
+    }
+
+    /// The pitch of the tool picked, when it is a tap.
+    fn tap(&self) -> Option<f64> {
+        self.tools.get(self.tool).and_then(|tool| tool.pitch)
+    }
+
+    /// The depth the tool picked takes `group` to when none is typed, and what it is measured
+    /// to: a drill's by the holes' bottom ([`drill_depth`]); a tap's to its tip, a few pitches
+    /// past a through hole and one pitch short of a blind one's bottom.
+    fn suited_depth(&self, group: &HoleGroup) -> (f64, &'static str) {
+        match (self.tap(), &group.bottom) {
+            (None, _) => drill_depth(group),
+            (Some(pitch), HoleBottom::Through) => (group.depth + BREAKTHROUGH + TAP_LEAD * pitch, "tip"),
+            (Some(pitch), _) => ((group.depth - pitch).max(pitch), "tip"),
+        }
     }
 
     /// The `cam.op.drill` parameters: the group's centres and top, the depth its bottom asks for
     /// or the one typed, and the cycle. A speed or feed that was not typed is left to the command.
     /// A drill operation being changed keeps its own holes, top and the rest as kept.
     pub fn params(&self) -> Value {
-        let cycle = match word(&CYCLES, self.cycle) {
-            "drill" => json!({"type": "drill", "dwell": 0.0}),
-            pecking => json!({"type": pecking, "peck": self.peck}),
+        let cycle = match (self.tap(), word(&CYCLES, self.cycle)) {
+            (Some(pitch), _) => json!({"type": "tap", "pitch": pitch}),
+            (None, "drill") => json!({"type": "drill", "dwell": 0.0}),
+            (None, pecking) => json!({"type": pecking, "peck": self.peck}),
         };
         let mut drill = match (&self.editing, self.picked()) {
             (Some(edited), _) => {
@@ -1300,14 +1338,15 @@ impl DrillForm {
                 kept
             }
             (None, Some(group)) => {
-                let (suited, to) = drill_depth(group);
+                let (suited, to) = self.suited_depth(group);
                 let depth = if self.typed_depth { self.depth } else { suited };
                 json!({"holes": group.holes, "top": group.top, "depth": depth, "depth_to": to, "cycle": cycle})
             }
             (None, None) => json!({"holes": [], "top": null, "depth": self.depth, "depth_to": "tip", "cycle": cycle}),
         };
         set_or_clear(&mut drill, "rpm", self.typed_rpm.then_some(self.rpm));
-        set_or_clear(&mut drill, "feed", self.typed_feed.then_some(self.feed));
+        // A tap's feed is its pitch times its speed: never typed.
+        set_or_clear(&mut drill, "feed", (self.typed_feed && self.tap().is_none()).then_some(self.feed));
         json!({
             "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
             "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
@@ -1335,7 +1374,7 @@ impl DrillForm {
                     self.tool = self.fitting_tool(diameter);
                 }
             }
-            if let Some(suited) = self.picked().map(|group| drill_depth(group).0).filter(|_| !self.typed_depth) {
+            if let Some(suited) = self.picked().map(|group| self.suited_depth(group).0).filter(|_| !self.typed_depth) {
                 self.depth = suited;
             }
         }
@@ -1351,7 +1390,7 @@ impl DrillForm {
             if !self.typed_rpm {
                 self.rpm = preview.rpm.round();
             }
-            if !self.typed_feed {
+            if !self.typed_feed || self.tap().is_some() {
                 self.feed = preview.feed;
             }
         }
@@ -1394,7 +1433,9 @@ impl DrillForm {
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         // How the depth is measured: for the holes picked, or as the operation being changed keeps it.
         let past = format_length(BREAKTHROUGH, units, decimals);
+        let tap = self.tap();
         let measured = match &self.editing {
+            _ if tap.is_some() => Some(tr("manufacture.drill_depth_tap").to_string()),
             Some(edited) if edited.base["depth_to"] == "full_diameter" => Some(tr("manufacture.drill_depth_point").to_string()),
             Some(_) => Some(tr("manufacture.drill_depth_tip").to_string()),
             None => self.picked().map(|group| match group.bottom {
@@ -1449,23 +1490,40 @@ impl DrillForm {
                 let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_drill_tool", &mut self.tool, &tool_labels);
                 self.picked_tool |= self.tool != tool;
-                if kept_holes.is_none() && hole_widths.get(self.group).zip(tool_widths.get(self.tool)).is_some_and(|(hole, tool)| *tool > hole + 1e-6)
-                {
+                // A tap is wider than the hole it threads, and cuts with its own cycle at its pitch.
+                let tap = self.tools.get(self.tool).and_then(|tool| tool.pitch);
+                let wider = hole_widths.get(self.group).zip(tool_widths.get(self.tool)).is_some_and(|(hole, tool)| *tool > hole + 1e-6);
+                if kept_holes.is_none() && tap.is_none() && wider {
                     ui_kit::status_line(ui, tr("manufacture.drill_tool_wider"), ui_kit::StatusTone::Warning);
                 }
-                ui_kit::choice_row(ui, tr("manufacture.drill_cycle"), "manufacture_drill_cycle", &mut self.cycle, &cycles);
-                if word(&CYCLES, self.cycle) != "drill" {
-                    self.typed_peck |=
-                        ui_kit::row(ui, tr("manufacture.drill_peck"), |ui| ui_kit::length_field(ui, &mut self.peck, units, decimals)).changed();
+                if let Some(pitch) = tap {
+                    ui_kit::value_row(ui, tr("manufacture.tool_thread_pitch"), &format_length(pitch, units, decimals));
+                } else {
+                    ui_kit::choice_row(ui, tr("manufacture.drill_cycle"), "manufacture_drill_cycle", &mut self.cycle, &cycles);
+                    if word(&CYCLES, self.cycle) != "drill" {
+                        self.typed_peck |=
+                            ui_kit::row(ui, tr("manufacture.drill_peck"), |ui| ui_kit::length_field(ui, &mut self.peck, units, decimals)).changed();
+                    }
                 }
                 self.typed_depth |=
                     ui_kit::row(ui, tr("manufacture.drill_depth"), |ui| ui_kit::length_field(ui, &mut self.depth, units, decimals)).changed();
                 if let Some(measured) = &measured {
                     ui_kit::text(ui, measured, ui_kit::Text::Note("manufacture_drill_measured"));
                 }
-                let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
-                self.typed_rpm |= rpm;
-                self.typed_feed |= feed;
+                if tap.is_some() {
+                    // A tap's speed is typed; its feed follows, one pitch a turn.
+                    self.typed_rpm |= ui_kit::row(ui, tr("manufacture.face_spindle_speed"), |ui| {
+                        ui_kit::number_field(ui, &mut self.rpm, 0.0..=MAX_RPM, 10.0, " rpm")
+                    })
+                    .changed();
+                    let (per, unit) = unit_scale(units);
+                    ui_kit::value_row(ui, tr("manufacture.face_feed"), &format!("{:.2} {unit}/min", self.feed * per));
+                    ui_kit::text(ui, tr("manufacture.drill_tap_feed"), ui_kit::Text::Note("manufacture_drill_tap_feed"));
+                } else {
+                    let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
+                    self.typed_rpm |= rpm;
+                    self.typed_feed |= feed;
+                }
                 if let Some(time) = &time {
                     ui_kit::value_row(ui, tr("manufacture.face_time"), time);
                 }

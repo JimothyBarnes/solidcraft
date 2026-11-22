@@ -272,8 +272,18 @@ impl Toolpath {
         if !finite_in_range(self.start) {
             return Err(Error::BadValue(format!("the start point must be finite and within {MAX_COORDINATE} mm")));
         }
+        // The spindle as each move finds it: a tapped hole is cut in step with it.
+        let mut spindle = None;
         for (index, (from, m)) in self.walk().enumerate() {
             Self::check_move(from, m).map_err(|reason| Error::BadMove { index, reason })?;
+            match *m {
+                Move::Spindle { rpm, direction } => spindle = Some((rpm, direction)),
+                Move::SpindleStop => spindle = None,
+                Move::Drill { cycle: DrillCycle::Tap { pitch }, feed, .. } => {
+                    cycle::check_tap(pitch, feed, spindle).map_err(|reason| Error::BadMove { index, reason })?;
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
