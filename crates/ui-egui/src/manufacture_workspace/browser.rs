@@ -48,6 +48,10 @@ pub(crate) fn show(app: &mut SolveApp, rows: &mut Rows<'_>) {
                 let key = format!("manufacture:browser:op:{}", op.id);
                 let label = format!("{} (T{})", op.name, op.tool);
                 row(rows, &key, Row { depth: 1, icon: "edit", label: &label, name: true, ..Row::default() }, NodeMenu::None);
+                // An operation whose toolpath can't be worked out says why, where it is listed.
+                if is_active && let Some(why) = super::scene::operation_trouble(app, &op.id) {
+                    crate::ui_kit::text(rows.ui(), &why, Text::Note("manufacture_operation_trouble"));
+                }
             }
         }
     }

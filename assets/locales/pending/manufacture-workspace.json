@@ -2,7 +2,7 @@
   "en": {
     "ui.workspace_manufacture_tabs": "Setup",
     "manufacture.error_finish_operation": "Finish the current operation before entering Manufacture",
-    "help.cam.setup.create": "Adds a setup: the stock, the work origin and the work offset the part is machined with. It starts as a vise setup, stock 1 mm over the model and the origin at the top centre of the stock; change it to suit how you hold the part.",
+    "help.cam.setup.create": "Adds a setup: the stock, the work origin and the work offset the part is machined with. It starts as a vise setup, stock 1 mm over the model and the origin at the top center of the stock; change it to suit how you hold the part.",
     "ui.workspace_manufacture_cam_description": "Setups, tools and toolpaths, posted as G-code for your machine",
     "ui.heading_manufacture": "MANUFACTURE",
     "manufacture.browser_empty": "Create a setup to start: New Setup, on the Manufacture tab.",

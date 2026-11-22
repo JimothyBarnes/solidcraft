@@ -92,7 +92,7 @@ fn files_are_checked_and_never_overwritten_by_surprise() {
     let mut s = Session::default();
     run(&mut s, "cam.tool.create", json!({"tool": tool(1, 6.0)}));
     run(&mut s, "cam.library.export", json!({"path": file}));
-    assert!(refused(&mut s, "cam.library.export", json!({"path": file})).contains("could not export"));
+    assert!(refused(&mut s, "cam.library.export", json!({"path": file})).contains("could not write the tool library"));
     run(&mut s, "cam.library.export", json!({"path": file, "overwrite": true}));
     let txt = dir.join("lib.txt").to_string_lossy().to_string();
     assert!(refused(&mut s, "cam.library.export", json!({"path": txt})).contains(".json"));

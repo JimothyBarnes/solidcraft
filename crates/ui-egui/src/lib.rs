@@ -2423,6 +2423,9 @@ impl SolveApp {
         if render_workspace::start_interactive(self, id) {
             return;
         }
+        if manufacture_workspace::dialogs::start(self, id) {
+            return;
+        }
         match id {
             "tab.view.pop_out" => {
                 let view = self.docs.views.active().id;
@@ -4352,6 +4355,7 @@ impl SolveApp {
         issue_report::CadInput::block(self, ui, report_input);
         file_load::show(self, ui.ctx());
         kicad_import_dialog::show(self, ui.ctx());
+        manufacture_workspace::dialogs::show(self, ui.ctx());
         open_meshing::show(self, ui.ctx());
         documents::prompt(self, ui.ctx());
         open_elsewhere::show(self, ui.ctx());

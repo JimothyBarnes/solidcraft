@@ -43,7 +43,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup.delete", "Delete Setup", crate::checked!("cam.setup.delete", setup_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamSetupDeleteParams>::new()).output(output_schema_for::<CamSetupWritten>)
         .params("id → removes the setup and its operations; refused while a later setup takes its stock from it"),
-    CommandSpec::new("cam.setup.measure", "Measure Setup", crate::checked!("cam.setup.measure", setup_measure)).icon("inspect").noundo().read_only().doc_only()
+    CommandSpec::new("cam.setup.measure", "Measure Setup", crate::checked!("cam.setup.measure", setup_measure)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSetupMeasureParams>::new()).output(output_schema_for::<CamSetupMeasured>)
         .params("id: the setup → bodies measured, model_box in model coordinates, placement: WCS origin and axes in model coordinates, model and stock boxes and clearance_z, retract_z in the WCS (mm), from the bodies' exact boxes"),
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
@@ -55,15 +55,15 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpFaceParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
-    CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only().doc_only()
+    CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
-    CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("inspect").noundo().read_only().doc_only()
+    CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamPostParams>::new()).output(output_schema_for::<CamPosted>)
-        .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
+        .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
 ];
 
 /// The built-in owner of `plugins/solidcraft-cam/`.
@@ -227,13 +227,12 @@ fn apply(cmd: &str, setup: &mut Setup, f: SetupFields) -> Result<()> {
     Ok(())
 }
 
-fn setup_create(s: &mut Session, p: &Value) -> Result<Value> {
-    const CMD: &str = "cam.setup.create";
-    let p: CamSetupCreateParams = parse(CMD, "parameters", p)?;
-    let mut d = load(s, CMD)?;
+/// The setup `cam.setup.create`'s parameters describe: the vise setup's defaults with the fields
+/// given, under the next free id of `d`.
+fn proposed_setup(cmd: &str, d: &ManufactureData, p: &Value) -> Result<Setup> {
+    let p: CamSetupCreateParams = parse(cmd, "parameters", p)?;
     let id = next_id("setup", d.setups.iter().map(|x| x.id.as_str()));
-    let name = format!("Setup {}", d.setups.len() + 1);
-    let mut setup = default_setup(id.clone(), name);
+    let mut setup = default_setup(id, format!("Setup {}", d.setups.len() + 1));
     let fields = SetupFields {
         name: p.name,
         machine: p.machine,
@@ -245,7 +244,15 @@ fn setup_create(s: &mut Session, p: &Value) -> Result<Value> {
         fixture_bodies: p.fixture_bodies,
         safe_heights: p.safe_heights,
     };
-    apply(CMD, &mut setup, fields)?;
+    apply(cmd, &mut setup, fields)?;
+    Ok(setup)
+}
+
+fn setup_create(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.create";
+    let mut d = load(s, CMD)?;
+    let setup = proposed_setup(CMD, &d, p)?;
+    let id = setup.id.clone();
     d.setups.push(setup);
     store(s, CMD, &d)?;
     reply(CMD, CamSetupWritten { id, setups: d.setups.len() })
@@ -350,34 +357,52 @@ fn op_manual(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn op_drill(s: &mut Session, p: &Value) -> Result<Value> {
-    const CMD: &str = "cam.op.drill";
-    let p: CamOpDrillParams = parse(CMD, "parameters", p)?;
-    let drill: DrillOp = parse(CMD, "drill", &p.drill)?;
-    let mut d = load(s, CMD)?;
-    let id = next_id("op", d.setups.iter().flat_map(|x| &x.operations).map(|o| o.id.as_str()));
-    let setup = d.setups.iter_mut().find(|x| x.id == p.setup).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.setup)))?;
-    let name = p.name.unwrap_or_else(|| format!("Drill {}", setup.operations.len() + 1));
-    setup.operations.push(Operation { id: id.clone(), name, tool: p.tool, suppressed: false, operation: OperationKind::Drill { drill } });
-    let operations = setup.operations.len();
-    store(s, CMD, &d)?;
-    reply(CMD, CamOpWritten { id, setup: p.setup, operations })
+    add_operation(s, "cam.op.drill", "Drill", p)
 }
 
 fn op_face(s: &mut Session, p: &Value) -> Result<Value> {
-    const CMD: &str = "cam.op.face";
-    let p: CamOpFaceParams = parse(CMD, "parameters", p)?;
-    let face: FaceOp = match &p.face {
-        Some(v) => parse(CMD, "face", v)?,
-        None => FaceOp::default(),
-    };
-    let mut d = load(s, CMD)?;
+    add_operation(s, "cam.op.face", "Face", p)
+}
+
+/// What the parameters of `cmd` (`cam.op.drill` or `cam.op.face`) describe: the setup's id, the
+/// name given, the tool's number and the operation.
+fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, OperationKind)> {
+    match cmd {
+        "cam.op.drill" => {
+            let p: CamOpDrillParams = parse(cmd, "parameters", p)?;
+            let drill: DrillOp = parse(cmd, "drill", &p.drill)?;
+            Ok((p.setup, p.name, p.tool, OperationKind::Drill { drill }))
+        }
+        "cam.op.face" => {
+            let p: CamOpFaceParams = parse(cmd, "parameters", p)?;
+            let face: FaceOp = match &p.face {
+                Some(v) => parse(cmd, "face", v)?,
+                None => FaceOp::default(),
+            };
+            Ok((p.setup, p.name, p.tool, OperationKind::Face { face }))
+        }
+        other => Err(bad(other, "not a command that adds a drill or face operation")),
+    }
+}
+
+/// Adds the operation `cmd`'s parameters describe to its setup, named `word` and its place in
+/// the setup when no name is given.
+fn add_operation(s: &mut Session, cmd: &str, word: &str, p: &Value) -> Result<Value> {
+    let (setup_id, name, tool, operation) = proposed(cmd, p)?;
+    let mut d = load(s, cmd)?;
     let id = next_id("op", d.setups.iter().flat_map(|x| &x.operations).map(|o| o.id.as_str()));
-    let setup = d.setups.iter_mut().find(|x| x.id == p.setup).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.setup)))?;
-    let name = p.name.unwrap_or_else(|| format!("Face {}", setup.operations.len() + 1));
-    setup.operations.push(Operation { id: id.clone(), name, tool: p.tool, suppressed: false, operation: OperationKind::Face { face } });
+    let setup = d.setups.iter_mut().find(|x| x.id == setup_id).ok_or_else(|| bad(cmd, format!("the design has no setup '{setup_id}'")))?;
+    let name = name.unwrap_or_else(|| format!("{word} {}", setup.operations.len() + 1));
+    setup.operations.push(Operation { id: id.clone(), name, tool, suppressed: false, operation });
     let operations = setup.operations.len();
-    store(s, CMD, &d)?;
-    reply(CMD, CamOpWritten { id, setup: p.setup, operations })
+    store(s, cmd, &d)?;
+    reply(cmd, CamOpWritten { id, setup: setup_id, operations })
+}
+
+/// A trouble with `op`, saying which operation: one not made yet (a form's preview) has no id,
+/// and its trouble is told as it is.
+fn of(op: &Operation, trouble: impl std::fmt::Display) -> String {
+    if op.id.is_empty() { trouble.to_string() } else { format!("operation {} ({}): {trouble}", op.id, op.name) }
 }
 
 /// One operation's toolpath, the numbers its strategy worked out, and its notes.
@@ -397,7 +422,7 @@ fn tool_and_placement<'a>(
     op: &Operation,
     placed: &mut Option<Placement>,
 ) -> Result<(&'a Tool, Placement)> {
-    let tool = d.tools.iter().find(|t| t.number == op.tool).ok_or_else(|| bad(cmd, format!("operation {}: no tool {}", op.id, op.tool)))?;
+    let tool = d.tools.iter().find(|t| t.number == op.tool).ok_or_else(|| bad(cmd, of(op, format!("the design has no tool {}", op.tool))))?;
     let placement = match placed {
         Some(p) => *p,
         None => {
@@ -421,7 +446,7 @@ fn work(
     start: Option<solidcore_record::Vec3>,
     placed: &mut Option<Placement>,
 ) -> Result<Worked> {
-    let failed = |e: solidcraft_cam::Error| bad(cmd, format!("operation {} ({}): {e}", op.id, op.name));
+    let failed = |e: solidcraft_cam::Error| bad(cmd, of(op, e));
     let material = setup.material.as_deref();
     match &op.operation {
         OperationKind::Manual { toolpath } => {
@@ -446,6 +471,75 @@ fn work(
 
 // The Manufacture types a view of a setup is made of, for the UI above the engine.
 pub use solidcraft_cam::{Drawn, Placement};
+
+/// Writes `bytes` to the file `path` in one step; a file already there is replaced only when
+/// `overwrite`. `what` names the content in the error.
+pub(super) fn write_file(cmd: &str, path: &str, bytes: &[u8], overwrite: bool, what: &str) -> Result<()> {
+    if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+        return Err(bad(cmd, "invalid file path"));
+    }
+    solidcraft_io::vfs::check(path).map_err(|e| bad(cmd, e.to_string()))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let result = if overwrite {
+        solidcraft_io::write_atomic(std::path::Path::new(path), bytes, false)
+    } else {
+        solidcraft_io::safe_write::create_atomic(std::path::Path::new(path), bytes)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let result = if !overwrite && solidcraft_io::vfs::exists(path) {
+        Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the file already exists"))
+    } else {
+        solidcraft_io::vfs::write(path, bytes)
+    };
+    result.map_err(|e| bad(cmd, format!("could not write {what}: {e}")))
+}
+
+/// The built-in posts for a form to offer: (id, name).
+pub fn manufacture_posts() -> Vec<(String, String)> {
+    BUILTIN_POSTS.iter().filter_map(|(id, _)| Post::builtin(id).ok().map(|post| ((*id).to_string(), post.name))).collect()
+}
+
+/// One of the design's tools for a form to offer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolChoice {
+    pub number: u32,
+    pub name: String,
+    /// Its cutting diameter, mm.
+    pub diameter: f64,
+}
+
+/// The design's tools that can do `operation` (`face` or `drill`), for a form to offer; every
+/// tool for any other word. The operations' own checks decide, so a form never offers a tool its
+/// command would refuse.
+pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec<ToolChoice> {
+    let Ok(data) = manufacture_data(doc) else { return Vec::new() };
+    let drill = DrillOp {
+        holes: vec![[0.0, 0.0]],
+        order: Default::default(),
+        top: None,
+        depth: 1.0,
+        depth_to: Default::default(),
+        r_above: None,
+        between: Default::default(),
+        cycle: solidcraft_cam::DrillCycle::Drill { dwell: 0.0 },
+        rpm: None,
+        feed: None,
+    };
+    let can = |tool: &Tool| match operation {
+        "face" => FaceOp::default().validate(tool).is_ok(),
+        "drill" => drill.validate(tool).is_ok(),
+        _ => true,
+    };
+    data.tools.iter().filter(|t| can(t)).map(|t| ToolChoice { number: t.number, name: t.name.clone(), diameter: t.geometry.diameter }).collect()
+}
+
+/// An engine error in a view's own words: what is wrong, without the command's name.
+fn said(e: crate::EngineError) -> String {
+    match e {
+        crate::EngineError::BadParams { msg, .. } => msg,
+        other => other.to_string(),
+    }
+}
 
 /// One operation as a view draws it.
 pub struct OperationView {
@@ -474,10 +568,6 @@ const VIEW_ARC_TOLERANCE: f64 = 0.02;
 /// in the posted program.
 pub fn manufacture_view(s: &Session, setup: Option<&str>) -> std::result::Result<Option<SetupView>, String> {
     const CMD: &str = "cam.view";
-    let said = |e: crate::EngineError| match e {
-        crate::EngineError::BadParams { msg, .. } => msg,
-        other => other.to_string(),
-    };
     let d = manufacture_data(&s.doc)?;
     let Some(setup) = setup.and_then(|id| d.setups.iter().find(|x| x.id == id)).or(d.setups.first()) else { return Ok(None) };
     let (model, _) = model_box(s, CMD, setup).map_err(said)?;
@@ -499,6 +589,68 @@ pub fn manufacture_view(s: &Session, setup: Option<&str>) -> std::result::Result
         operations.push(OperationView { id: op.id.clone(), name: op.name.clone(), pieces });
     }
     Ok(Some(SetupView { id: setup.id.clone(), placement, operations }))
+}
+
+/// A preview's parameters as its command would get them: none at all is the empty object.
+fn given(params: &Value) -> &Value {
+    static NONE: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| Value::Object(Default::default()));
+    if params.is_null() { &NONE } else { params }
+}
+
+/// An operation before it is made, as its form shows it.
+pub struct OperationPreview {
+    /// Where its setup sits on the model.
+    pub placement: Placement,
+    /// Its toolpath as straight pieces in the setup's WCS: how each moves and its two ends.
+    pub pieces: Vec<(Drawn, solidcore_record::Vec3, solidcore_record::Vec3)>,
+    /// Spindle speed, rev/min.
+    pub rpm: f64,
+    /// Cutting feed, mm/min.
+    pub feed: f64,
+    /// Time spent feeding and dwelling, minutes.
+    pub cut_minutes: f64,
+    /// Things worth showing beside the numbers (a capped spindle speed, a thin chip).
+    pub notes: Vec<String>,
+}
+
+/// What `command` (`cam.op.face` or `cam.op.drill`) would make from `params`, without making it:
+/// for a form to draw the toolpath and show the speed and feed it works out before OK, or to say
+/// why there would be no toolpath. It reads the design and changes nothing.
+pub fn manufacture_preview(s: &Session, command: &str, params: &Value) -> std::result::Result<OperationPreview, String> {
+    const CMD: &str = "cam.preview";
+    let (setup_id, name, tool, operation) = proposed(command, given(params)).map_err(said)?;
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == setup_id).ok_or_else(|| format!("the design has no setup '{setup_id}'"))?;
+    // No id: it is not one of the design's operations yet.
+    let op = Operation { id: String::new(), name: name.unwrap_or_default(), tool, suppressed: false, operation };
+    let mut placed = None;
+    let worked = work(s, CMD, &d, setup, &op, None, &mut placed).map_err(said)?;
+    let placement = placed.ok_or_else(|| "the setup was not placed on the model".to_string())?;
+    let stats = worked.toolpath.stats().map_err(|e| e.to_string())?;
+    let number = |key: &str| worked.numbers.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    Ok(OperationPreview {
+        placement,
+        pieces: worked.toolpath.drawn(VIEW_ARC_TOLERANCE).map_err(|e| e.to_string())?,
+        rpm: number("rpm"),
+        feed: number("feed"),
+        cut_minutes: stats.feed_minutes + stats.dwell_minutes,
+        notes: worked.notes,
+    })
+}
+
+/// Where the setup `cam.setup.create` would make from `params` sits on the model, without making
+/// it: for its form to draw the stock and the work origin before OK, or to say why the command
+/// would refuse or the setup could not be placed. It reads the design and changes nothing.
+pub fn manufacture_setup_preview(s: &Session, params: &Value) -> std::result::Result<Placement, String> {
+    const CMD: &str = "cam.preview";
+    let mut d = manufacture_data(&s.doc)?;
+    let setup = proposed_setup(CMD, &d, given(params)).map_err(said)?;
+    let (model, _) = model_box(s, CMD, &setup).map_err(said)?;
+    let placement = setup.place(model).map_err(|e| e.to_string())?;
+    // What saving it would check.
+    d.setups.push(setup);
+    d.validate().map_err(|e| e.to_string())?;
+    Ok(placement)
 }
 
 fn op_toolpath_command(s: &mut Session, p: &Value) -> Result<Value> {
@@ -591,6 +743,9 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
         work_offset: setup.work_offset,
     };
     let posted = post.write(&program, &ctx).map_err(|e| bad(CMD, e.to_string()))?;
+    if let Some(path) = &p.path {
+        write_file(CMD, path, posted.text.as_bytes(), p.overwrite, "the program")?;
+    }
     reply(
         CMD,
         CamPosted {
@@ -601,6 +756,7 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
             machine_retracts: posted.read_back.machine_retracts,
             tolerance_mm: posted.tolerance,
             notes: notes.into_iter().chain(posted.notes).collect(),
+            path: p.path,
         },
     )
 }

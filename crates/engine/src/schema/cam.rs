@@ -265,6 +265,12 @@ pub struct CamPostParams {
     /// `mm` (default) or `inch`.
     #[serde(default)]
     pub units: Option<String>,
+    /// Also write the program to this file.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Replace a file that is already there (default false).
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 /// A posted program and what reading it back found. The program is never "safe to run": it says
@@ -280,6 +286,8 @@ pub struct CamPosted {
     /// The largest position difference read-back accepted, mm.
     pub tolerance_mm: f64,
     pub notes: Vec<String>,
+    /// The file the program was written to, when a path was given.
+    pub path: Option<String>,
 }
 
 /// Write the design's tools to a tool library file.

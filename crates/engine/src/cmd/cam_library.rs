@@ -59,19 +59,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     let library = ToolLibrary { format: TOOL_LIBRARY_FORMAT, name: p.name.unwrap_or_else(|| s.doc.name.clone()), tools: data.tools };
     let json = library.to_json().map_err(|e| bad(CMD, e.to_string()))?;
     let bytes = json.into_bytes();
-    #[cfg(not(target_arch = "wasm32"))]
-    let result = if p.overwrite {
-        solidcraft_io::write_atomic(std::path::Path::new(&p.path), &bytes, false)
-    } else {
-        solidcraft_io::safe_write::create_atomic(std::path::Path::new(&p.path), &bytes)
-    };
-    #[cfg(target_arch = "wasm32")]
-    let result = if !p.overwrite && solidcraft_io::vfs::exists(&p.path) {
-        Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the tool library file already exists"))
-    } else {
-        solidcraft_io::vfs::write(&p.path, &bytes)
-    };
-    result.map_err(|e| bad(CMD, format!("could not export the tool library: {e}")))?;
+    super::cam::write_file(CMD, &p.path, &bytes, p.overwrite, "the tool library")?;
     reply(CMD, CamLibraryExported { path: p.path, tools: library.tools.len(), bytes: bytes.len() })
 }
 

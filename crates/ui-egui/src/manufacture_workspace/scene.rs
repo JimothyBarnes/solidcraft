@@ -2,7 +2,8 @@
 //! origin on the model, and its operations' toolpaths. It reads the engine's view of the setup
 //! (`solidcraft_engine::cmd::manufacture_view`), worked out once per change to the design and kept
 //! until the next. It goes into the highlight scene, which is built again only when its key
-//! changes.
+//! changes. An open form adds what it would make (`super::dialogs::Shown`): New Setup its stock
+//! and origin in place of the active setup's, an operation's form its toolpath.
 //!
 //! Colours: Manufacture has no theme tokens of its own yet (one is a line in every theme file),
 //! so it borrows tokens by meaning: the reference-geometry colours for the stock, the one X/Y/Z
@@ -13,6 +14,7 @@ use std::hash::{Hash, Hasher};
 use solidcraft_engine::cmd::{Drawn, Placement, SetupView, manufacture_view};
 use solidcraft_theme::Tokens;
 
+use super::dialogs::Shown;
 use crate::SolveApp;
 use crate::gpu::GpuScene;
 use crate::viewport::c4;
@@ -36,7 +38,13 @@ pub(crate) fn key(app: &SolveApp) -> u64 {
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     app.manufacture_workspace.active_setup.hash(&mut h);
+    form(app).map(|(key, _)| key).hash(&mut h);
     h.finish().max(1)
+}
+
+/// What the open form adds, with the number that changes when that does.
+fn form(app: &SolveApp) -> Option<(u64, Shown<'_>)> {
+    app.manufacture_workspace.dialog.as_ref().and_then(|dialog| dialog.shown())
 }
 
 /// Why the active setup can't be drawn, if it can't (no bodies to machine, a turned work
@@ -63,16 +71,39 @@ fn with_view<T>(app: &SolveApp, read: impl FnOnce(&Result<Option<SetupView>, Str
     }
 }
 
-/// Adds the active setup to the highlight scene: nothing outside Manufacture.
+/// Why an operation of the active setup has no toolpath, if it has none: for the browser to say.
+pub(crate) fn operation_trouble(app: &SolveApp, id: &str) -> Option<String> {
+    with_view(app, |view| match view {
+        Ok(Some(view)) => view.operations.iter().find(|o| o.id == id).and_then(|o| o.pieces.as_ref().err().cloned()),
+        _ => None,
+    })
+}
+
+/// Adds the active setup, and what an open form would make, to the highlight scene: nothing
+/// outside Manufacture.
 pub(crate) fn draw(app: &SolveApp, sc: &mut GpuScene) {
     if !super::active(app) {
         return;
     }
+    let form = form(app).map(|(_, shown)| shown);
+    if let Some(Shown::Setup(placement)) = form {
+        placed(sc, placement);
+        return;
+    }
+    let mut left = MAX_PIECES;
     with_view(app, |view| {
         if let Ok(Some(view)) = view {
-            paint(sc, view);
+            placed(sc, &view.placement);
+            for operation in &view.operations {
+                if let Ok(pieces) = &operation.pieces {
+                    toolpath(sc, &view.placement, pieces, &mut left);
+                }
+            }
         }
     });
+    if let Some(Shown::Operation(preview)) = form {
+        toolpath(sc, &preview.placement, &preview.pieces, &mut left);
+    }
 }
 
 /// A WCS point in the model's coordinates.
@@ -85,9 +116,9 @@ fn on_model(p: &Placement, x: f64, y: f64, z: f64) -> [f32; 3] {
     ]
 }
 
-fn paint(sc: &mut GpuScene, view: &SetupView) {
+/// A setup's stock and work origin.
+fn placed(sc: &mut GpuScene, p: &Placement) {
     let t = Tokens::get();
-    let p = &view.placement;
     // The stock: six translucent sides and twelve edges, reference geometry like a construction
     // plane (depth-tested, never cut by a section).
     let (lo, hi) = (p.stock.min, p.stock.max);
@@ -110,24 +141,25 @@ fn paint(sc: &mut GpuScene, view: &SetupView) {
         let colour = sc.color(c4(colour));
         sc.guide_line(on_model(p, 0.0, 0.0, 0.0), on_model(p, to[0], to[1], to[2]), colour, 2.5);
     }
-    // The toolpaths: rapids thin, cuts heavier; where the model hides a piece it shows faintly.
+}
+
+/// A toolpath's pieces, up to `left` of them: rapids thin, cuts heavier; where the model hides a
+/// piece it shows faintly.
+fn toolpath(sc: &mut GpuScene, p: &Placement, pieces: &[(Drawn, solidcore_record::Vec3, solidcore_record::Vec3)], left: &mut usize) {
+    let t = Tokens::get();
     let (cut, rapid, plunge) = (sc.color(c4(t.manipulator)), sc.color(c4(t.joint_manipulator)), sc.color(c4(t.preview_sketch)));
-    let mut left = MAX_PIECES;
-    for operation in &view.operations {
-        let Ok(pieces) = &operation.pieces else { continue };
-        let take = pieces.len().min(left);
-        left -= take;
-        sc.reserve_lines(take, take);
-        for (kind, a, b) in pieces.iter().take(take) {
-            let (colour, width) = match kind {
-                Drawn::Rapid => (rapid, 1.0),
-                Drawn::Cut => (cut, 1.8),
-                Drawn::Plunge => (plunge, 1.8),
-            };
-            let (a, b) = (on_model(p, a.x, a.y, a.z), on_model(p, b.x, b.y, b.z));
-            sc.line(a, b, colour, width, false);
-            sc.hidden_line(a, b, colour, 1.0);
-        }
+    let take = pieces.len().min(*left);
+    *left -= take;
+    sc.reserve_lines(take, take);
+    for (kind, a, b) in pieces.iter().take(take) {
+        let (colour, width) = match kind {
+            Drawn::Rapid => (rapid, 1.0),
+            Drawn::Cut => (cut, 1.8),
+            Drawn::Plunge => (plunge, 1.8),
+        };
+        let (a, b) = (on_model(p, a.x, a.y, a.z), on_model(p, b.x, b.y, b.z));
+        sc.line(a, b, colour, width, false);
+        sc.hidden_line(a, b, colour, 1.0);
     }
 }
 

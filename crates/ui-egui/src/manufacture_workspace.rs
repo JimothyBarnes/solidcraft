@@ -8,6 +8,7 @@ use crate::SolveApp;
 use solidcraft_viewport::Camera;
 
 pub(crate) mod browser;
+pub(crate) mod dialogs;
 pub(crate) mod scene;
 
 /// Manufacture's ribbon tabs.
@@ -41,6 +42,8 @@ pub struct State {
     pub(crate) active_setup: Option<String>,
     /// What the viewport draws of it, kept until the design changes.
     pub(crate) scene: std::sync::Mutex<scene::Cache>,
+    /// The open form (Add Tool, New Setup, Face, Post Process), if any.
+    pub(crate) dialog: Option<dialogs::Dialog>,
 }
 
 pub fn active(app: &SolveApp) -> bool {
@@ -240,6 +243,23 @@ mod tests {
         h.app.manufacture_workspace.active_setup = Some("setup-2".into());
         h.frames(3);
         assert!(h.widget(why).is_some(), "the Browser says why the active setup is not drawn");
+    }
+
+    #[test]
+    fn the_browser_says_why_an_operation_has_no_toolpath() {
+        let mut h = harness();
+        faced_block(&mut h);
+        crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+        h.frames(3);
+        assert!(scene::operation_trouble(&h.app, "op-1").is_none());
+        // Without its stock material the setup can't give the facing its feeds: the reason is
+        // under the operation's row, and its toolpath is gone from the viewport.
+        h.app.run("cam.setup.edit", json!({"id": "setup-1", "material": ""})).unwrap();
+        h.frames(3);
+        let why = scene::operation_trouble(&h.app, "op-1").unwrap();
+        assert!(why.starts_with("operation op-1 (Face 1): ") && why.contains("stock material"), "{why}");
+        assert!(h.widget(&why).is_some(), "{why}");
+        assert_eq!(scene::counts(&h.app), (12, 15, 0));
     }
 
     #[test]

@@ -419,6 +419,168 @@ fn a_view_of_a_setup_has_its_placement_and_its_operations_as_drawn_pieces() {
 }
 
 #[test]
+fn a_program_is_posted_to_a_file_and_never_over_one_by_surprise() {
+    let mut s = shop();
+    let dir = std::env::temp_dir().join(format!("solidcraft-cam-post-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("bracket.nc").to_string_lossy().to_string();
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "path": file}));
+    assert_eq!(posted["path"], json!(file));
+    // The file holds exactly the program returned.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), posted["text"].as_str().unwrap());
+    // A second post to the same file is refused unless it is asked to replace it.
+    assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274", "path": file})).contains("could not write the program"));
+    assert!(std::fs::read_to_string(&file).unwrap().starts_with("%\nO00001"), "the Haas program is still there");
+    run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274", "path": file, "overwrite": true}));
+    assert!(std::fs::read_to_string(&file).unwrap().starts_with("(Setup 1)"));
+    // Without a path nothing is written and none is reported.
+    assert_eq!(run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274"}))["path"], json!(null));
+    assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274", "path": ""})).contains("invalid file path"));
+    // A program that can't be posted writes nothing.
+    let missing = dir.join("none.nc").to_string_lossy().to_string();
+    assert!(refused(&mut s, "cam.post", json!({"setup": "setup-9", "post": "rs274", "path": missing})).contains("no setup"));
+    assert!(!std::path::Path::new(&missing).exists());
+}
+
+#[test]
+fn forms_are_offered_the_posts_and_the_tools_that_can_do_the_work() {
+    let posts = crate::cmd::manufacture_posts();
+    let ids: Vec<&str> = posts.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["fanuc_mill", "haas_mill", "rs274"]);
+    assert!(posts.iter().all(|(_, name)| !name.is_empty()));
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    let numbers = |s: &Session, operation: &str| crate::cmd::manufacture_tools(&s.doc, operation).iter().map(|t| t.number).collect::<Vec<_>>();
+    // Tool 3 is a drill, tool 4 a flat end mill: the mill faces, both drill (a flat end mill plunges).
+    assert_eq!((numbers(&s, "face"), numbers(&s, "drill"), numbers(&s, "any")), (vec![4], vec![3, 4], vec![3, 4]));
+    assert_eq!(crate::cmd::manufacture_tools(&s.doc, "face")[0].diameter, 20.0);
+    assert!(crate::cmd::manufacture_tools(&Session::default().doc, "face").is_empty());
+}
+
+#[test]
+fn a_form_previews_an_operation_before_it_is_made() {
+    use solidcraft_cam::Drawn;
+    use std::f64::consts::PI;
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    let before = run(&mut s, "cam.data", json!({}));
+    let preview = |s: &Session, command: &str, params: Value| crate::cmd::manufacture_preview(s, command, &params);
+    let count = |pieces: &[(Drawn, solidcore_record::Vec3, solidcore_record::Vec3)], kind: Drawn| pieces.iter().filter(|x| x.0 == kind).count();
+    // The facing `cam.op.face` would make (see the facing test): 200 m/min on a 20 mm tool, 0.05 mm
+    // a tooth on four teeth; three rapids, a plunge, four passes and three steps. It cuts a 6 mm
+    // plunge at half the feed and 378 mm at the feed: 1950 / rpm minutes, which is 0.195 pi.
+    let face = preview(&s, "cam.op.face", json!({"setup": "setup-1", "tool": 4})).unwrap();
+    let rpm = 200_000.0 / (20.0 * PI);
+    assert!((face.rpm - rpm).abs() < 1e-9 && (face.feed - 0.2 * rpm).abs() < 1e-9, "{} rpm, {} mm/min", face.rpm, face.feed);
+    assert_eq!((count(&face.pieces, Drawn::Rapid), count(&face.pieces, Drawn::Plunge), count(&face.pieces, Drawn::Cut)), (3, 1, 7));
+    assert!((face.cut_minutes - 0.195 * PI).abs() < 1e-9, "{}", face.cut_minutes);
+    assert_eq!((face.placement.origin.x, face.placement.origin.y, face.placement.origin.z), (30.0, 20.0, 21.0));
+    assert!(face.notes.is_empty(), "{:?}", face.notes);
+    // A speed and feed typed in are the ones used. At half the stepover the first pass is at Y 24
+    // (the stock's edge at 21, the tool's radius 10 out, 7 in) and the last at -24: 48 mm in gaps
+    // of at most 7 is eight passes and seven steps.
+    let typed = preview(&s, "cam.op.face", json!({"setup": "setup-1", "tool": 4, "face": {"rpm": 5000, "feed": 1200, "stepover": 7}})).unwrap();
+    assert_eq!((typed.rpm, typed.feed), (5000.0, 1200.0));
+    assert_eq!(count(&typed.pieces, Drawn::Cut), 8 + 7);
+    // A drill: 100 m/min on 10 mm, three holes of six pecks each.
+    let drill = preview(&s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()})).unwrap();
+    assert!((drill.rpm - 100_000.0 / (10.0 * PI)).abs() < 1e-9);
+    assert_eq!((count(&drill.pieces, Drawn::Plunge), count(&drill.pieces, Drawn::Cut)), (18, 0));
+    // What would stop the operation is said in plain words, with no operation or command named.
+    let why = |s: &Session, command: &str, params: Value| preview(s, command, params).err().unwrap_or_else(|| panic!("{command} was previewed"));
+    for (command, params, expect) in [
+        ("cam.op.face", json!({"setup": "setup-9", "tool": 4}), "the design has no setup 'setup-9'"),
+        ("cam.op.face", json!({"setup": "setup-1", "tool": 9}), "the design has no tool 9"),
+        ("cam.op.face", json!({"setup": "setup-1", "tool": 3}), "does not face"),
+        ("cam.op.face", json!({"setup": "setup-1", "tool": 4, "face": {"stepover": 0}}), "the stepover must be at least"),
+        ("cam.op.face", json!({"setup": "setup-1", "tool": 4, "face": {"rpm": 1e300}}), "rpm must be above 0"),
+        ("cam.op.face", json!({"setup": 5}), "parameters:"),
+        ("cam.op.face", json!(null), "parameters:"),
+        ("cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": {"holes": []}}), "drill:"),
+        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill or face operation"),
+    ] {
+        let said = why(&s, command, params.clone());
+        assert!(said.contains(expect), "{command} {params}: {said:?} does not say {expect:?}");
+        assert!(!said.starts_with("operation") && !said.contains("cam.preview"), "{said}");
+    }
+    // Without a stock material the tool's data can't be used: the two ways out are named, and a
+    // speed and feed typed in is one of them.
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": ""}));
+    let said = why(&s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    assert!(said.contains("stock material") && said.contains("rpm and feed") && !said.starts_with("operation"), "{said}");
+    assert!(preview(&s, "cam.op.face", json!({"setup": "setup-1", "tool": 4, "face": {"rpm": 5000, "feed": 1200}})).is_ok());
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": "aluminium"}));
+    // A preview adds nothing to the design.
+    assert_eq!(run(&mut s, "cam.data", json!({})), before);
+    // One of the design's own operations still says which it is.
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": ""}));
+    assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"})).contains("operation op-1 (Face 1): "));
+}
+
+#[test]
+fn a_form_previews_a_setup_before_it_is_made() {
+    let mut s = Session::default();
+    let preview = |s: &Session, params: Value| crate::cmd::manufacture_setup_preview(s, &params);
+    // Nothing to machine yet: the reason, as the setup's own commands give it.
+    assert!(preview(&s, json!({})).unwrap_err().contains("has no bodies to machine"));
+    run(&mut s, "solid.box", json!({"length": 60, "width": 40, "height": 20, "corner": [0, 0, 0], "body_name": "Block"}));
+    let before = run(&mut s, "cam.data", json!({}));
+    // The vise setup on the 60 x 40 x 20 block: 1 mm over on the sides and top, origin at the top
+    // centre of the stock.
+    let vise = preview(&s, json!({})).unwrap();
+    assert_eq!((vise.origin.x, vise.origin.y, vise.origin.z), (30.0, 20.0, 21.0));
+    assert_eq!((vise.stock.min.x, vise.stock.min.y, vise.stock.min.z), (-31.0, -21.0, -21.0));
+    assert_eq!((vise.stock.max.x, vise.stock.max.y, vise.stock.max.z), (31.0, 21.0, 0.0));
+    // No parameters at all are the defaults too, as for the command.
+    assert_eq!(preview(&s, json!(null)).unwrap(), vise);
+    // 5 mm on the sides, 2 on top, 3 underneath, origin at the front left corner of the top: the
+    // stock runs from the origin 70 along X, 50 along Y and 25 down.
+    let corner = preview(
+        &s,
+        json!({
+            "stock": {"kind": "relative_box", "offsets": {"x_min": 5, "x_max": 5, "y_min": 5, "y_max": 5, "z_min": 3, "z_max": 2}},
+            "wcs": {"origin": {"kind": "stock_box", "anchor": {"x": "min", "y": "min", "z": "max"}}, "orientation": {"kind": "model"}},
+            "work_offset": 2
+        }),
+    )
+    .unwrap();
+    assert_eq!((corner.origin.x, corner.origin.y, corner.origin.z), (-5.0, -5.0, 22.0));
+    assert_eq!((corner.stock.min.x, corner.stock.min.y, corner.stock.min.z), (0.0, 0.0, -25.0));
+    assert_eq!((corner.stock.max.x, corner.stock.max.y, corner.stock.max.z), (70.0, 50.0, 0.0));
+    // What the command would refuse, the preview refuses in the same words, without its name.
+    for (params, expect) in [
+        (json!({"work_offset": 9}), "work offset"),
+        (json!({"stock": {"kind": "relative_box", "offsets": {"x_min": -1, "x_max": 1, "y_min": 1, "y_max": 1, "z_min": 0, "z_max": 1}}}), "stock"),
+        (json!({"stock": {"kind": "round"}}), "stock:"),
+        (json!({"name": 5}), "parameters:"),
+        (json!([1, 2]), "parameters:"),
+    ] {
+        let said = preview(&s, params.clone()).err().unwrap_or_else(|| panic!("{params} was previewed"));
+        assert!(said.contains(expect) && !said.contains("cam.preview"), "{params}: {said:?} does not say {expect:?}");
+        let command = refused(&mut s, "cam.setup.create", params.clone());
+        assert!(command.contains(&said), "{params}: the command says {command:?}, the preview {said:?}");
+    }
+    // A setup that names a body the design lacks can be made (the body may come back), but there
+    // is nowhere to draw it: the preview says so.
+    assert!(preview(&s, json!({"model_bodies": ["Gone"]})).unwrap_err().contains("'Gone' is not in the design"));
+    // A preview adds nothing to the design.
+    assert_eq!(run(&mut s, "cam.data", json!({})), before);
+}
+
+#[test]
+fn commands_that_measure_the_model_bring_it_up_to_date_first() {
+    // A setup is placed on the bodies' exact boxes, so measuring it, working out a toolpath and
+    // posting read the evaluated model: the engine finishes a stale model (one left behind by a
+    // live drag) before they run. The others read and write only the design's Manufacture data.
+    for spec in super::COMMANDS {
+        let measures = matches!(spec.id, "cam.setup.measure" | "cam.op.toolpath" | "cam.post");
+        assert_eq!(spec.reads_model, measures, "{}", spec.id);
+    }
+}
+
+#[test]
 fn every_change_is_one_undo_step() {
     let mut s = Session::default();
     run(&mut s, "cam.setup.create", json!({"name": "Op 1"}));
