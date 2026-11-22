@@ -25,6 +25,7 @@ mod board_layers;
 mod bom;
 pub(crate) mod browser;
 mod cam;
+mod cam_heights;
 mod cam_holes;
 mod cam_library;
 mod cam_outline;
@@ -143,8 +144,9 @@ mod selection;
 pub mod settings;
 pub use crate::schema::cam::{CamLibraryToolStatus, CamLibraryTools, FoundPocket, HoleBottom, HoleGroup};
 pub use cam::{
-    Drawn, OperationPreview, OperationView, Placement, SetupView, ToolChoice, manufacture_data, manufacture_holes, manufacture_pockets,
-    manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_tools, manufacture_view,
+    Drawn, OperationPreview, OperationView, Placement, SetupView, Simulated, SimulatedOperation, ToolChoice, manufacture_data, manufacture_holes,
+    manufacture_pockets, manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_simulation, manufacture_tools,
+    manufacture_view,
 };
 pub use cam_library::manufacture_library;
 pub(crate) use clipboard::{component_path_form, copy_keys};

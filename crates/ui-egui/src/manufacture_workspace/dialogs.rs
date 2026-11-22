@@ -1,4 +1,4 @@
-//! Manufacture's forms: Add Tool, Import Tools, New Setup, Face, Contour, Pocket, Drill and Post Process. Each is a front end that
+//! Manufacture's forms: Add Tool, Import Tools, New Setup, Face, Contour, Pocket, Drill, Simulate and Post Process. Each is a front end that
 //! builds the parameters of one `cam.*` command and runs it: every change is a command, and a
 //! script calls the command directly and sees no window. They are standalone windows, opened
 //! when the ribbon starts one of those commands ([`start`]) and drawn once a frame ([`show`]).
@@ -15,8 +15,8 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, ToolChoice, manufacture_data, manufacture_holes,
-    manufacture_library, manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_tools,
+    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, Simulated, ToolChoice, manufacture_data,
+    manufacture_holes, manufacture_library, manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
@@ -26,8 +26,10 @@ use crate::ui_kit;
 
 mod contour;
 mod pocket;
+mod simulate;
 pub(crate) use contour::ContourForm;
 pub(crate) use pocket::PocketForm;
+pub(crate) use simulate::SimForm;
 
 /// The open form.
 pub(crate) enum Dialog {
@@ -38,6 +40,7 @@ pub(crate) enum Dialog {
     Contour(ContourForm),
     Pocket(PocketForm),
     Drill(DrillForm),
+    Simulate(SimForm),
     Post(PostForm),
     Posted(Posted),
 }
@@ -64,6 +67,8 @@ pub(crate) enum Shown<'a> {
     Setup(&'a Placement),
     /// An operation not made yet: its toolpath, with the active setup.
     Operation(&'a OperationPreview),
+    /// A simulation: the stock as the setup's operations leave it, in place of the stock box.
+    Stock(&'a Simulated),
 }
 
 impl Dialog {
@@ -87,6 +92,7 @@ impl Dialog {
             Dialog::Contour(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Pocket(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Drill(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
+            Dialog::Simulate(form) => form.worked.get().map(|(key, simulated)| (key, Shown::Stock(simulated))),
             _ => None,
         }
     }
@@ -1637,6 +1643,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
             | "cam.op.contour"
             | "cam.op.pocket"
             | "cam.op.drill"
+            | "cam.simulate"
             | "cam.post"
     ) {
         return false;
@@ -1660,6 +1667,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         "cam.op.contour" => Dialog::Contour(ContourForm::new(app)),
         "cam.op.pocket" => Dialog::Pocket(PocketForm::new(app)),
         "cam.op.drill" => Dialog::Drill(DrillForm::new(app)),
+        "cam.simulate" => Dialog::Simulate(SimForm::new(app)),
         _ => Dialog::Post(PostForm::new(app)),
     });
     true
@@ -1702,6 +1710,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Contour(form) => form.show(app, ctx, &units, decimals).map(Dialog::Contour),
         Dialog::Pocket(form) => form.show(app, ctx, &units, decimals).map(Dialog::Pocket),
         Dialog::Drill(form) => form.show(app, ctx, &units, decimals).map(Dialog::Drill),
+        Dialog::Simulate(form) => form.show(app, ctx, &units, decimals).map(Dialog::Simulate),
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),
     };

@@ -434,6 +434,75 @@ pub struct CamOpWritten {
     pub operations: usize,
 }
 
+/// Simulate a setup's operations on its stock (decision 0015 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSimulateParams {
+    /// The setup's id.
+    pub setup: String,
+    /// The side of a cell of the grid the stock is held on, mm; left out, the stock's longer
+    /// side over 400, kept between 0.05 and 1.
+    #[serde(default)]
+    pub cell: Option<f64>,
+}
+
+/// What one operation did to the stock in a simulation.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct CamSimulatedOperation {
+    pub id: String,
+    pub name: String,
+    /// The volume it removed, mm³.
+    pub removed: f64,
+    /// How many of its moves cut into the part, and how many of its rapids passed through
+    /// material.
+    pub gouges: usize,
+    pub rapid_hits: usize,
+    /// Why it was left out, when its toolpath could not be worked out or its tool can't be shown.
+    pub skipped: Option<String>,
+}
+
+/// A place a simulation found a cut into the part, or a rapid through material.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct CamSimulatedHit {
+    /// The operation's id and which of its moves (from 0).
+    pub operation: String,
+    #[serde(rename = "move")]
+    pub move_index: usize,
+    /// Where, `[x, y, z]` in the setup's WCS: the tool's height over the cell where it was
+    /// deepest.
+    pub at: [f64; 3],
+    /// How far below the part (a gouge) or below the material's top (a rapid), mm.
+    pub depth: f64,
+}
+
+/// A setup's operations cut from its stock on a grid of heights, and what was found: a check as
+/// fine as its cells, never a proof that a program is safe to run.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSimulated {
+    pub setup: String,
+    /// The side of a cell, mm, the cells along X and Y, and how far below the part or the
+    /// material's top counts, mm.
+    pub cell: f64,
+    pub cells: [usize; 2],
+    pub tolerance: f64,
+    /// The stock's volume before, and the volume removed, mm³.
+    pub stock_volume: f64,
+    pub removed: f64,
+    /// The volume still standing above the part where there is part under it, and standing
+    /// where there is none, mm³.
+    pub over_part: f64,
+    pub beside_part: f64,
+    /// How far below the stock's bottom the lowest cut went, mm (0 when none did).
+    pub below_stock: f64,
+    pub operations: Vec<CamSimulatedOperation>,
+    /// How many moves cut into the part, and the first hundred of them.
+    pub gouge_count: usize,
+    pub gouges: Vec<CamSimulatedHit>,
+    /// How many rapids passed through material, and the first hundred of them.
+    pub rapid_hit_count: usize,
+    pub rapid_hits: Vec<CamSimulatedHit>,
+}
+
 /// Post a setup's operations as one program.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

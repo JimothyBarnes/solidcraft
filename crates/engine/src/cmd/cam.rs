@@ -19,8 +19,8 @@ use crate::schema::cam::{
     CamData, CamDataParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams, CamOpManualParams,
     CamOpPocketParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams,
     CamSetupEditParams, CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupOutline, CamSetupOutlineParams,
-    CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
-    FoundPocket, HoleBottom, HoleGroup, OutlineLoop,
+    CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamSimulateParams, CamSimulated, CamSimulatedHit, CamSimulatedOperation,
+    CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, FoundPocket, HoleBottom, HoleGroup, OutlineLoop,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -83,6 +83,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
+    CommandSpec::new("cam.simulate", "Simulate", crate::checked!("cam.simulate", simulate)).icon("inspect").noundo().read_only()
+        .contract(&TypedContract::<CamSimulateParams>::new()).output(output_schema_for::<CamSimulated>)
+        .params("setup: id, cell?: mm → the setup's operations cut from its stock on a grid of heights: stock_volume, removed, over_part, beside_part (mm3), operations: [{id, name, removed, gouges, rapid_hits, skipped?}], gouges and rapid_hits: [{operation, move, at: [x, y, z], depth}] with their counts, below_stock; the part's heights are read from the bodies' exact faces; a check as fine as its cells (cell, cells, tolerance), never a proof that a program is safe to run"),
     CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamPostParams>::new()).output(output_schema_for::<CamPosted>)
         .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
@@ -1025,6 +1028,136 @@ pub fn manufacture_setup_preview(s: &Session, command: &str, params: &Value) -> 
     // What saving it would check.
     d.validate().map_err(|e| e.to_string())?;
     Ok(placement)
+}
+
+/// What one operation did to the stock in a simulation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimulatedOperation {
+    pub id: String,
+    pub name: String,
+    /// The volume it removed, mm³.
+    pub removed: f64,
+    pub gouges: usize,
+    pub rapid_hits: usize,
+    /// Why it was left out, when its toolpath could not be worked out or its tool can't be shown.
+    pub skipped: Option<String>,
+}
+
+/// A setup's operations cut from its stock (decision 0015 of the CAM work).
+pub struct Simulated {
+    /// Where the setup sits on the model.
+    pub placement: Placement,
+    /// The stock as it is left and what was found while cutting it, in the setup's WCS.
+    pub stock: solidcraft_cam::Simulation,
+    /// The stock's volume before, mm³.
+    pub stock_volume: f64,
+    pub operations: Vec<SimulatedOperation>,
+}
+
+/// How far below the part a cut is a gouge, and below the material's top a rapid is a hit, mm.
+const SIMULATION_TOLERANCE: f64 = 0.01;
+/// How many cells the stock's longer side is cut into when no cell is given, and the cells
+/// that may give.
+const SIMULATION_CELLS: f64 = 400.0;
+const SIMULATION_CELL: (f64, f64) = (0.05, 1.0);
+
+/// The setup `id`'s operations (but those switched off) cut in turn from its stock, on a grid
+/// of cells `cell` mm a side (`None`: the stock's longer side over 400, between 0.05 and 1), and
+/// checked against the part, whose heights are read from the bodies' exact faces. An operation
+/// whose toolpath can't be worked out is left out, with the reason. It reads the design and
+/// changes nothing.
+pub fn manufacture_simulation(s: &Session, id: &str, cell: Option<f64>) -> std::result::Result<Simulated, String> {
+    const CMD: &str = "cam.simulate";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let placement = setup.place(model).map_err(|e| e.to_string())?;
+    let size = placement.stock.size();
+    let cell = cell.unwrap_or_else(|| (size.x.max(size.y) / SIMULATION_CELLS).clamp(SIMULATION_CELL.0, SIMULATION_CELL.1));
+    let stock = solidcraft_cam::Simulation::new(placement.stock, cell, SIMULATION_TOLERANCE).map_err(|e| e.to_string())?;
+    let stock_volume = size.x * size.y * size.z;
+    // The part over the stock's cells, in the WCS: anything below the stock where there is none.
+    let plane = solidcore_record::Plane { origin: placement.origin, x: placement.x_axis, y: placement.y_axis };
+    let part = with_bodies(s, CMD, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        super::cam_heights::part_heights(&named, &plane, &stock.stock, placement.model.max.z, placement.stock.min.z - 1.0).map_err(|e| bad(CMD, e))
+    })
+    .map_err(said)?;
+    let mut stock = stock.with_part(part).map_err(|e| e.to_string())?;
+    let mut placed = Some(placement);
+    let mut at = None;
+    let mut operations = Vec::new();
+    for (index, op) in setup.operations.iter().filter(|o| !o.suppressed).enumerate() {
+        let tool = d.tools.iter().find(|t| t.number == op.tool);
+        let cut = work(s, CMD, &d, setup, op, at, &mut placed).map_err(said).and_then(|worked| {
+            at = Some(worked.toolpath.moves.iter().fold(worked.toolpath.start, |p, m| m.end(p)));
+            let tool = tool.ok_or_else(|| format!("the design has no tool {}", op.tool))?;
+            stock.cut(index, &worked.toolpath, tool).map_err(|e| e.to_string())
+        });
+        operations.push(match cut {
+            Ok(cut) => SimulatedOperation {
+                id: op.id.clone(),
+                name: op.name.clone(),
+                removed: cut.removed,
+                gouges: cut.gouges,
+                rapid_hits: cut.rapid_hits,
+                skipped: None,
+            },
+            Err(why) => {
+                at = None;
+                SimulatedOperation { id: op.id.clone(), name: op.name.clone(), removed: 0.0, gouges: 0, rapid_hits: 0, skipped: Some(why) }
+            }
+        });
+    }
+    Ok(Simulated { placement, stock, stock_volume, operations })
+}
+
+fn simulate(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.simulate";
+    let p: CamSimulateParams = parse(CMD, "parameters", p)?;
+    let done = manufacture_simulation(s, &p.setup, p.cell).map_err(|e| bad(CMD, e))?;
+    let (over_part, beside_part) = done.stock.leftover();
+    let id_of = |index: usize| done.operations.get(index).map_or_else(String::new, |op| op.id.clone());
+    reply(
+        CMD,
+        CamSimulated {
+            setup: p.setup,
+            cell: done.stock.stock.cell,
+            cells: [done.stock.stock.nx, done.stock.stock.ny],
+            tolerance: done.stock.tolerance,
+            stock_volume: done.stock_volume,
+            removed: done.stock.removed,
+            over_part,
+            beside_part,
+            below_stock: done.stock.below_stock,
+            operations: done
+                .operations
+                .iter()
+                .map(|op| CamSimulatedOperation {
+                    id: op.id.clone(),
+                    name: op.name.clone(),
+                    removed: op.removed,
+                    gouges: op.gouges,
+                    rapid_hits: op.rapid_hits,
+                    skipped: op.skipped.clone(),
+                })
+                .collect(),
+            gouge_count: done.stock.gouge_count,
+            gouges: done
+                .stock
+                .gouges
+                .iter()
+                .map(|g| CamSimulatedHit { operation: id_of(g.operation), move_index: g.move_index, at: [g.at.x, g.at.y, g.at.z], depth: g.depth })
+                .collect(),
+            rapid_hit_count: done.stock.rapid_hit_count,
+            rapid_hits: done
+                .stock
+                .rapid_hits
+                .iter()
+                .map(|h| CamSimulatedHit { operation: id_of(h.operation), move_index: h.move_index, at: [h.at.x, h.at.y, h.at.z], depth: h.depth })
+                .collect(),
+        },
+    )
 }
 
 fn op_toolpath_command(s: &mut Session, p: &Value) -> Result<Value> {

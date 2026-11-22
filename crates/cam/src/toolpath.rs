@@ -255,7 +255,7 @@ fn check_feed(feed: f64) -> std::result::Result<(), String> {
 
 impl Toolpath {
     /// Every move with the point it starts from.
-    fn walk(&self) -> impl Iterator<Item = (Vec3, &Move)> {
+    pub(crate) fn walk(&self) -> impl Iterator<Item = (Vec3, &Move)> {
         self.moves.iter().scan(self.start, |at, m| {
             let from = *at;
             *at = m.end(from);

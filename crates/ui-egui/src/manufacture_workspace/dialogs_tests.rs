@@ -46,6 +46,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Contour(_)) => "contour",
         Some(Dialog::Pocket(_)) => "pocket",
         Some(Dialog::Drill(_)) => "drill",
+        Some(Dialog::Simulate(_)) => "simulate",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
     }
@@ -83,6 +84,13 @@ fn pocket_form(h: &mut Harness) -> &mut PocketForm {
     match h.app.manufacture_workspace.dialog.as_mut() {
         Some(Dialog::Pocket(form)) => form,
         _ => panic!("Pocket is not open"),
+    }
+}
+
+fn simulate_form(h: &mut Harness) -> &mut SimForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Simulate(form)) => form,
+        _ => panic!("Simulate is not open"),
     }
 }
 
@@ -483,6 +491,7 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
         ("cam.op.contour", "MILLING"),
         ("cam.op.pocket", "MILLING"),
         ("cam.op.drill", "DRILLING"),
+        ("cam.simulate", "ACTIONS"),
         ("cam.post", "ACTIONS"),
         ("cam.tool.create", "MANAGE"),
     ];
@@ -1209,4 +1218,65 @@ fn pocket_offers_the_pockets_found_and_the_widest_tool_that_fits() {
         (pocket["pockets"].clone(), Some(5.0), Some(0.25), Some("conventional"))
     );
     assert!(PocketForm::edit(&h.app, "op-9").is_err());
+}
+
+#[test]
+fn simulate_draws_the_stock_as_it_is_left_and_says_what_it_found() {
+    let mut h = harness();
+    // Nothing to simulate yet: the window says what to make first.
+    ribbon(&mut h, "cam.simulate");
+    assert_eq!(open(&h), "simulate");
+    assert!(h.widget(tr("manufacture.no_setup")).is_some());
+    press(&mut h, "Close");
+    assert_eq!(open(&h), "none");
+
+    // The plate with its two pockets, faced with the 20 mm tool (T2) and the big pocket cut
+    // with the 10 mm one (T1).
+    pocketed_plate(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 2})).unwrap();
+    h.app.run("cam.op.pocket", json!({"setup": "setup-1", "tool": 1, "pocket": {"pockets": [[0, 0]]}})).unwrap();
+    h.frames(3);
+    assert_eq!((scene::counts(&h.app).0, scene::stock_triangles(&h.app)), (12, 0), "the stock's box, and no simulated stock");
+    ribbon(&mut h, "cam.simulate");
+    let simulated = simulate_form(&mut h).simulated().expect("a simulation");
+    assert_eq!((simulated.stock.gouge_count, simulated.stock.rapid_hit_count, simulated.operations.len()), (0, 0, 2));
+    // The stock is 102 x 82 x 21: 175.64 cm3. Facing takes the 1 mm on top, 8.36 cm3.
+    assert!(h.widget("175.64 cm³").is_some() && h.widget("8.36 cm³").is_some());
+    assert!(h.widget("Face 1").is_some() && h.widget("Pocket 2").is_some());
+    assert!(h.widget(tr("manufacture.sim_no_gouge")).is_some() && h.widget(tr("manufacture.sim_no_rapid")).is_some());
+    assert!(h.widget(tr("manufacture.sim_note")).is_some(), "a check, not a proof");
+    // On the model: the stock as it is left, in place of its box (whose edges stay) and of the
+    // toolpaths that left it so.
+    assert_eq!(scene::counts(&h.app), (0, 15, 0));
+    assert!(scene::stock_triangles(&h.app) > 100_000, "{}", scene::stock_triangles(&h.app));
+    press(&mut h, "Close");
+    assert_eq!((open(&h), scene::counts(&h.app).0, scene::stock_triangles(&h.app)), ("none", 12, 0));
+
+    // A toolpath made by hand that goes 9 mm into the plate and then rapids through the stock:
+    // the window says how many moves, how deep and in which operation.
+    let at = |x: f64, y: f64, z: f64| json!([x, y, z]);
+    let path = json!({"start": at(-30.0, -30.0, 25.0), "moves": [
+        {"kind": "tool_change", "tool": 1},
+        {"kind": "spindle", "rpm": 4000.0, "direction": "clockwise"},
+        {"kind": "rapid", "to": at(-30.0, -30.0, 5.0)},
+        {"kind": "linear", "to": at(-30.0, -30.0, -10.0), "feed": 200.0},
+        {"kind": "linear", "to": at(30.0, -30.0, -10.0), "feed": 400.0},
+        {"kind": "rapid", "to": at(30.0, -30.0, 5.0)},
+        {"kind": "rapid", "to": at(30.0, 30.0, 5.0)},
+        {"kind": "rapid", "to": at(30.0, 30.0, -4.0)},
+        {"kind": "rapid", "to": at(30.0, 30.0, 25.0)},
+        {"kind": "spindle_stop"}
+    ]});
+    h.app.run("cam.op.manual", json!({"setup": "setup-1", "tool": 1, "toolpath": path, "name": "By hand"})).unwrap();
+    ribbon(&mut h, "cam.simulate");
+    let simulated = simulate_form(&mut h).simulated().expect("a simulation");
+    assert_eq!((simulated.stock.gouge_count, simulated.stock.rapid_hit_count), (2, 2));
+    let gouges = solidcraft_ui_text::format("manufacture.sim_gouges", &[("count", "2"), ("depth", "9.00 mm"), ("operation", "By hand")]);
+    let rapids = solidcraft_ui_text::format("manufacture.sim_rapids", &[("count", "2"), ("depth", "3.00 mm"), ("operation", "By hand")]);
+    assert!(h.widget(&gouges).is_some() && h.widget(&rapids).is_some(), "{gouges} / {rapids}");
+    assert!(h.widget(tr("manufacture.sim_no_gouge")).is_none());
+    press(&mut h, "Close");
 }

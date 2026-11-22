@@ -575,8 +575,10 @@ fn commands_that_measure_the_model_bring_it_up_to_date_first() {
     // posting read the evaluated model: the engine finishes a stale model (one left behind by a
     // live drag) before they run. The others read and write only the design's Manufacture data.
     for spec in super::COMMANDS {
-        let measures =
-            matches!(spec.id, "cam.setup.measure" | "cam.setup.holes" | "cam.setup.outline" | "cam.setup.pockets" | "cam.op.toolpath" | "cam.post");
+        let measures = matches!(
+            spec.id,
+            "cam.setup.measure" | "cam.setup.holes" | "cam.setup.outline" | "cam.setup.pockets" | "cam.op.toolpath" | "cam.simulate" | "cam.post"
+        );
         assert_eq!(spec.reads_model, measures, "{}", spec.id);
     }
 }
@@ -1273,4 +1275,134 @@ fn a_pocket_the_tool_cannot_cut_straight_down_is_refused() {
         "a helix is posted as arcs that go down: {}",
         posted["text"]
     );
+}
+
+#[test]
+fn a_setup_is_simulated_on_its_stock_and_checked_against_the_part() {
+    use std::f64::consts::PI;
+    // The plate with a pocket 60 x 40, 6 deep: faced with the 20 mm tool, pocketed and
+    // contoured with the 10 mm one. In stock 1 mm bigger all round and on top.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2}));
+    let before = run(&mut s, "cam.data", json!({}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    // The stock's longer side (102) in 400 cells of 0.255 mm; its 82 in 322, a hair narrower.
+    assert_eq!((sim["cell"].as_f64(), sim["cells"].clone(), sim["tolerance"].as_f64()), (Some(0.255), json!([400, 322]), Some(0.01)));
+    assert!(about(&sim["stock_volume"], 102.0 * 82.0 * 21.0), "{sim:#}");
+    // Nothing cut into the part, no rapid through material, nothing below the stock.
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64(), sim["below_stock"].as_f64()), (Some(0), Some(0), Some(0.0)), "{sim:#}");
+    assert_eq!((sim["gouges"].clone(), sim["rapid_hits"].clone()), (json!([]), json!([])));
+    // Each operation's share, to within what the grid can tell: the 1 mm on top; the pocket's
+    // 6 mm but for the four corners a 10 mm tool can't reach; the 1 mm of stock round the plate
+    // over the 20 mm left of it.
+    let ops = sim["operations"].as_array().unwrap();
+    let removed: Vec<f64> = ops.iter().map(|op| op["removed"].as_f64().unwrap()).collect();
+    assert_eq!(ops.iter().map(|op| op["name"].as_str().unwrap()).collect::<Vec<_>>(), ["Face 1", "Pocket 2", "Contour 3"]);
+    assert!(ops.iter().all(|op| op["skipped"].is_null() && op["gouges"] == 0 && op["rapid_hits"] == 0), "{ops:?}");
+    let corners = 4.0 * (25.0 - 25.0 * PI / 4.0);
+    let want = [102.0 * 82.0, (2400.0 - corners) * 6.0, (102.0 * 82.0 - 8000.0) * 20.0];
+    for (got, want) in removed.iter().zip(want) {
+        assert!((got - want).abs() < 0.02 * want, "{removed:?}, not {want}");
+    }
+    assert!(about(&sim["removed"], removed.iter().sum()), "{sim:#}");
+    // What stands above the part is those corners; beside the part nothing to speak of.
+    assert!((sim["over_part"].as_f64().unwrap() - corners * 6.0).abs() < 0.3 * corners * 6.0, "{}", sim["over_part"]);
+    assert!(sim["beside_part"].as_f64().unwrap() < 0.02 * want[2], "{}", sim["beside_part"]);
+    // A coarser grid on request; simulating changes nothing.
+    let coarse = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 1}));
+    assert_eq!((coarse["cells"].clone(), coarse["gouge_count"].as_u64()), (json!([102, 82]), Some(0)));
+    assert_eq!(run(&mut s, "cam.data", json!({})), before);
+    assert!(refused(&mut s, "cam.simulate", json!({"setup": "setup-9"})).contains("no setup 'setup-9'"));
+    assert!(refused(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.001})).contains("at least 0.01 mm"));
+}
+
+#[test]
+fn a_simulation_finds_a_cut_into_the_part_and_a_rapid_through_the_stock() {
+    let mut s = plate();
+    // By hand: down to Z -10 (9 mm into the plate, whose top is at -1) and 60 mm along X; then
+    // a rapid back at Z -3 beside the slot it cut, through the stock.
+    let path = json!({"start": p(-30.0, 0.0, 25.0), "moves": [
+        {"kind": "tool_change", "tool": 2},
+        {"kind": "spindle", "rpm": 4000.0, "direction": "clockwise"},
+        {"kind": "rapid", "to": p(-30.0, 0.0, 5.0)},
+        {"kind": "linear", "to": p(-30.0, 0.0, -10.0), "feed": 200.0},
+        {"kind": "linear", "to": p(30.0, 0.0, -10.0), "feed": 400.0},
+        {"kind": "rapid", "to": p(30.0, 0.0, 5.0)},
+        {"kind": "rapid", "to": p(30.0, 20.0, 5.0)},
+        {"kind": "rapid", "to": p(30.0, 20.0, -3.0)},
+        {"kind": "rapid", "to": p(-30.0, 20.0, -3.0)},
+        {"kind": "rapid", "to": p(-30.0, 20.0, 25.0)},
+        {"kind": "spindle_stop"}
+    ]});
+    run(&mut s, "cam.op.manual", json!({"setup": "setup-1", "tool": 2, "toolpath": path, "name": "By hand"}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    // Two moves cut into the part (the plunge and the slot), 9 mm below its top.
+    assert_eq!(sim["gouge_count"].as_u64(), Some(2), "{sim:#}");
+    let deepest = &sim["gouges"][1];
+    assert_eq!(
+        (deepest["operation"].as_str(), deepest["move"].as_u64(), deepest["depth"].as_f64(), deepest["at"][2].as_f64()),
+        (Some("op-1"), Some(4), Some(9.0), Some(-10.0))
+    );
+    // Three rapids pass through material: straight down into it, across at Z -3, and back up
+    // out of it.
+    assert_eq!(sim["rapid_hit_count"].as_u64(), Some(3), "{sim:#}");
+    let hits: Vec<(u64, f64)> =
+        sim["rapid_hits"].as_array().unwrap().iter().map(|h| (h["move"].as_u64().unwrap(), h["depth"].as_f64().unwrap())).collect();
+    assert_eq!(hits, vec![(7, 3.0), (8, 3.0), (9, 3.0)]);
+    assert_eq!(sim["operations"][0]["gouges"].as_u64(), Some(2));
+    // An operation whose toolpath can't be worked out is left out, with the reason; the rest run.
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "material": "titanium"}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2}));
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    let skipped = sim["operations"][1]["skipped"].as_str().unwrap_or_default();
+    assert!(skipped.contains("rpm and feed") || skipped.contains("cutting data"), "{sim:#}");
+    assert_eq!(sim["operations"][0]["gouges"].as_u64(), Some(2));
+}
+
+#[test]
+fn the_part_a_simulation_checks_against_is_read_from_its_exact_faces() {
+    // The plate with a boss of 20 across standing 5 above it, a dome of radius 8 on it, and a
+    // 3 mm chamfer along the front edge of its top. The dome is the highest thing: 28 above the
+    // plate's bottom, 1 under the stock's top. In the WCS the plate's top is Z -9, the boss's
+    // -4, the dome's summit -1; the plate's middle is the origin.
+    let mut s = plate();
+    run(&mut s, "solid.cylinder", json!({"diameter": 20, "height": 5, "base": [30, 40, 20], "axis": "Z", "operation": "join", "targets": ["Plate"]}));
+    run(&mut s, "solid.sphere", json!({"radius": 8, "center": [70, 40, 20], "operation": "join", "targets": ["Plate"]}));
+    run(&mut s, "solid.chamfer", json!({"edges": [[50, 0, 20]], "distance": 3, "body": "Plate"}));
+    let done = crate::cmd::manufacture_simulation(&s, "setup-1", Some(0.5)).unwrap();
+    let (field, part) = (&done.stock.stock, done.stock.part().unwrap());
+    assert_eq!((done.placement.model.max.z, done.placement.model.min.z, done.stock.floor), (-1.0, -29.0, -29.0));
+    // The part's height over the cell nearest a place, and that cell's own centre.
+    let over = |x: f64, y: f64| {
+        let (i, j) = (((x - field.x) / field.dx - 0.5).round() as usize, ((y - field.y) / field.dy - 0.5).round() as usize);
+        (field.centre(i, j), part[j * field.nx + i])
+    };
+    // Flat faces, exactly: the plate's top, the boss's top, and nothing beside the plate.
+    assert_eq!((over(0.0, 20.0).1, over(-20.0, 0.0).1, over(-27.0, 5.0).1), (-9.0, -4.0, -4.0));
+    assert!(over(50.6, 0.0).1 < done.stock.floor && over(0.0, -40.6).1 < done.stock.floor);
+    // Just outside the boss's 10 mm radius it is the plate again.
+    assert_eq!(over(-31.0, 0.0).1, -9.0);
+    // The dome, asked with rays: over a cell d from its axis it stands sqrt(64 - d^2) above the plate.
+    for (x, y) in [(20.0, 0.0), (23.0, 2.0), (15.0, -4.0), (26.9, 0.0)] {
+        let (at, height) = over(x, y);
+        let d = (at.x - 20.0).hypot(at.y);
+        assert!((height - (-9.0 + (64.0 - d * d).sqrt())).abs() < 1e-6, "the dome {d} mm from its axis: {height}");
+    }
+    assert_eq!(over(29.0, 0.0).1, -9.0, "past the dome's foot");
+    // The chamfer: from 3 below the top at the plate's front edge (Y -40) up to the top 3 mm in.
+    for y in [-39.6, -38.6, -37.4] {
+        let (at, height) = over(0.0, y);
+        assert!((height - (-12.0 + (at.y + 40.0))).abs() < 1e-6, "the chamfer at Y {}: {height}", at.y);
+    }
+    assert_eq!(over(0.0, -36.6).1, -9.0);
+    // With nothing cut, what stands above the part is the stock less the part within its
+    // outline; the 1 mm of stock round it stands beside it.
+    let (above, beside) = done.stock.leftover();
+    assert!((beside - (102.0 * 82.0 - 8000.0) * 29.0).abs() < 0.02 * 364.0 * 29.0, "{beside}");
+    let part_volume = 100.0 * 80.0 * 20.0 + 100.0 * std::f64::consts::PI * 5.0 + 2.0 / 3.0 * std::f64::consts::PI * 512.0 - 0.5 * 9.0 * 100.0;
+    assert!((above - (8000.0 * 29.0 - part_volume)).abs() < 0.01 * 8000.0 * 9.0, "{above} and {}", 8000.0 * 29.0 - part_volume);
 }
