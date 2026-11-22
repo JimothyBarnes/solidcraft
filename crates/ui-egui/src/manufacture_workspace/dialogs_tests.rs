@@ -669,3 +669,199 @@ fn drill_says_what_is_missing_and_when_there_is_nothing_to_drill() {
     assert_eq!(drill_depth(&group(HoleBottom::Point)), (20.0, "full_diameter"));
     assert_eq!(drill_depth(&group(HoleBottom::Flat)), (20.0, "tip"));
 }
+
+/// A right click on a Browser row, and a pick from the menu it opens.
+fn row_menu(h: &mut Harness, row: &str, entry: &str) {
+    h.step(&json!({"click": {"browser": row}, "button": "right"})).unwrap_or_else(|e| panic!("{row}: {e}"));
+    h.frames(3);
+    h.step(&json!({"click": {"handle": format!("browser:menu:{entry}")}})).unwrap_or_else(|e| panic!("{row} > {entry}: {e}"));
+    h.frames(3);
+}
+
+/// The block with a 20 mm end mill (T1), the vise setup in aluminium and a facing.
+fn faced(h: &mut Harness) {
+    block(h);
+    add_tool(h, "flat_end_mill", 20.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 1})).unwrap();
+    h.frames(3);
+}
+
+#[test]
+fn the_browser_edits_and_deletes_what_its_rows_stand_for() {
+    let mut h = harness();
+    faced(&mut h);
+    assert_eq!(scene::counts(&h.app), (12, 15, 11));
+    // Edit on the facing's row opens its form on what the facing keeps: nothing typed.
+    row_menu(&mut h, "Face 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "face");
+    let form = face_form(&mut h);
+    assert_eq!((form.tool, form.stepover, form.typed_stepover, form.typed_rpm), (0, 14.0, false, false));
+    assert!(h.widget("Face 1").is_some() && h.widget("OK").is_some() && h.widget("Create").is_none(), "the window is the facing's own");
+    assert!(h.widget(tr("manufacture.preview_note_edit")).is_some() && h.widget(tr("manufacture.preview_note")).is_none());
+    // The facing is drawn as the form would leave it, once: its own toolpath gives way.
+    assert_eq!(scene::counts(&h.app), (12, 15, 11));
+    let form = face_form(&mut h);
+    (form.stepover, form.typed_stepover) = (7.0, true);
+    h.frames(3);
+    // Eight passes and seven steps at half the stepover, with the same three rapids and plunge.
+    assert_eq!(scene::counts(&h.app), (12, 15, 19));
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["id"].as_str(), kept["name"].as_str(), kept["tool"].as_u64()), (Some("op-1"), Some("Face 1"), Some(1)));
+    assert_eq!(kept["operation"]["face"]["stepover"], json!(7.0));
+    assert_eq!(scene::counts(&h.app), (12, 15, 19));
+
+    // A double click on the setup's row opens its form on the setup as it is; 3 mm on top instead
+    // of 1 raises the origin with the stock's top, and the setup keeps its id and its operation.
+    h.step(&json!({"click": {"browser": "Setup 1 (G54)"}, "double": true})).unwrap();
+    h.frames(3);
+    assert_eq!(open(&h), "setup");
+    let form = setup_form(&mut h);
+    assert_eq!(
+        (form.name.as_str(), form.material.as_str(), form.side, form.top, form.bottom, form.origin, form.work_offset),
+        ("Setup 1", "aluminium", 1.0, 1.0, 0.0, 0, 0)
+    );
+    form.top = 3.0;
+    form.work_offset = 1;
+    h.frames(3);
+    assert!(h.widget("62.00 × 42.00 × 23.00 mm").is_some());
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let setup = data(&mut h)["setups"][0].clone();
+    assert_eq!(
+        (setup["id"].as_str(), setup["work_offset"].as_u64(), setup["stock"]["offsets"]["z_max"].as_f64()),
+        (Some("setup-1"), Some(2), Some(3.0))
+    );
+    assert_eq!((setup["material"].as_str(), setup["operations"].as_array().map(Vec::len)), (Some("aluminium"), Some(1)));
+
+    // The tool: a tool an operation uses can't be deleted (the command says so, on the status
+    // line), but it can be changed.
+    h.step(&json!({"click": {"chevron": "Tools"}})).unwrap();
+    h.frames(3);
+    row_menu(&mut h, "T1 20 mm Flat end mill", "cam.tool.delete");
+    assert_eq!(data(&mut h)["tools"].as_array().map(Vec::len), Some(1));
+    assert!(h.app.status.as_ref().is_some_and(|s| s.2 && s.0.contains("uses tool 1")), "{:?}", h.app.status);
+    row_menu(&mut h, "T1 20 mm Flat end mill", "manufacture.edit");
+    assert_eq!(open(&h), "tool");
+    let form = tool_form(&mut h);
+    assert_eq!(
+        (form.number, form.name.as_str(), form.diameter, form.flutes, form.material.as_str()),
+        (1, "20 mm Flat end mill", 20.0, 3, "aluminium")
+    );
+    form.flutes = 4;
+    form.name = "Rougher".into();
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let tool = data(&mut h)["tools"][0].clone();
+    assert_eq!(
+        (tool["name"].as_str(), tool["flutes"].as_u64(), tool["holder"]["stick_out"].as_f64(), tool["length_offset"].as_u64()),
+        (Some("Rougher"), Some(4), Some(50.0), Some(1))
+    );
+    // Four teeth instead of three: the facing, which follows its tool, feeds a third faster. At
+    // 0.05 mm a tooth that is a fifth of the speed in mm/min, raised because 7 mm of a 20 mm tool
+    // thins the chip to 2 sqrt(0.35 x 0.65) of the feed per tooth.
+    let rpm = 200_000.0 / (20.0 * std::f64::consts::PI);
+    let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
+    let feed = 0.2 * rpm / (2.0 * (0.35f64 * 0.65).sqrt());
+    assert!((made["numbers"]["feed"].as_f64().unwrap() - feed).abs() < 1e-9, "{}", made["numbers"]);
+
+    // Delete on the rows: the facing, then its tool, then the setup. Each is one undo step.
+    row_menu(&mut h, "Face 1 (T1)", "cam.op.delete");
+    assert_eq!(data(&mut h)["setups"][0]["operations"], json!([]));
+    row_menu(&mut h, "T1 Rougher", "cam.tool.delete");
+    assert_eq!(data(&mut h)["tools"], json!([]));
+    row_menu(&mut h, "Setup 1 (G55)", "cam.setup.delete");
+    assert_eq!(data(&mut h)["setups"], json!([]));
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(data(&mut h)["setups"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn a_form_changes_only_what_it_shows() {
+    let mut h = harness();
+    holed(&mut h);
+    add_tool(&mut h, "drill", 6.0);
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    // A setup and operations made by a script, with parts the forms do not show: safe heights, a
+    // facing's own heights, a drill's order, dwell and R plane, a tool's holder and second material.
+    h.app.run("cam.setup.create", json!({"name": "Top", "material": "aluminium", "safe_heights": {"clearance": 40.0, "retract": 3.0}})).unwrap();
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 2, "face": {"bottom": -1.5, "clear": 4.0, "stepover": 12.0}})).unwrap();
+    let drill = json!({
+        "holes": [[20.0, -10.0], [20.0, 10.0]], "order": "as_given", "top": -1.0, "depth": 9.0, "depth_to": "full_diameter",
+        "r_above": 2.0, "between": "clearance", "cycle": {"type": "drill", "dwell": 0.5}, "rpm": 2000.0
+    });
+    h.app.run("cam.op.drill", json!({"setup": "setup-1", "tool": 1, "drill": drill})).unwrap();
+    let mut tool = data(&mut h)["tools"][0].clone();
+    tool["holder"] = json!({"stick_out": 45.0, "segments": [{"length": 30.0, "lower_diameter": 20.0, "upper_diameter": 32.0}]});
+    tool["cutting_data"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"material": "steel", "surface_speed": 80.0, "chip_load": 0.03, "plunge_factor": 0.4, "ramp_factor": 0.4}));
+    tool["length_offset"] = json!(21);
+    h.app.run("cam.tool.edit", json!({"number": 1, "tool": tool})).unwrap();
+    let kept = data(&mut h);
+    // Opened and left alone, each form gives back exactly what the design keeps.
+    assert_eq!(ToolForm::edit(&h.app, 1).unwrap().params("mm"), json!({"number": 1, "tool": kept["tools"][0]}));
+    let face = FaceForm::edit(&h.app, "op-1").unwrap();
+    assert_eq!(
+        face.params(),
+        json!({"setup": "setup-1", "tool": 2, "face": {"top": null, "bottom": -1.5, "clear": 4.0, "stepover": 12.0, "pattern": "zig_zag"}})
+    );
+    let drilled = DrillForm::edit(&h.app, "op-2").unwrap();
+    assert_eq!(drilled.params()["drill"], {
+        let mut same = kept["setups"][0]["operations"][1]["operation"]["drill"].clone();
+        same.as_object_mut().unwrap().remove("feed");
+        same
+    });
+    let setup = SetupForm::edit(&h.app, "setup-1").unwrap().params();
+    assert_eq!((setup["id"].as_str(), setup["name"].as_str(), setup["material"].as_str()), (Some("setup-1"), Some("Top"), Some("aluminium")));
+    assert_eq!((setup["stock"].clone(), setup["wcs"].clone()), (kept["setups"][0]["stock"].clone(), kept["setups"][0]["wcs"].clone()));
+    assert!(setup.get("safe_heights").is_none() && setup.get("model_bodies").is_none());
+
+    // The drill operation's form keeps its two holes and changes its depth and cycle.
+    h.frames(3);
+    row_menu(&mut h, "Drill 2 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "drill");
+    assert!(h.widget("2, as made").is_some() && h.widget(tr("manufacture.drill_depth_point")).is_some());
+    let form = drill_form(&mut h);
+    assert_eq!((form.depth, form.typed_depth, form.rpm, form.typed_rpm, form.typed_feed), (9.0, true, 2000.0, true, false));
+    form.depth = 11.0;
+    form.cycle = 1;
+    (form.peck, form.typed_peck) = (3.0, true);
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let after = data(&mut h)["setups"][0]["operations"][1]["operation"]["drill"].clone();
+    assert_eq!((after["depth"].as_f64(), after["cycle"].clone()), (Some(11.0), json!({"type": "peck", "peck": 3.0})));
+    for key in ["holes", "order", "top", "depth_to", "r_above", "between", "rpm"] {
+        assert_eq!(after[key], drill[key], "{key} is as the script made it");
+    }
+    // The setup's safe heights are still the script's after its form changed its name.
+    h.step(&json!({"click": {"browser": "Top (G54)"}, "double": true})).unwrap();
+    h.frames(3);
+    setup_form(&mut h).name = "Top side".into();
+    press(&mut h, "OK");
+    let setup = data(&mut h)["setups"][0].clone();
+    assert_eq!((setup["name"].as_str(), setup["safe_heights"].clone()), (Some("Top side"), json!({"clearance": 40.0, "retract": 3.0})));
+
+    // What a form can't show, it does not open: a fixed stock box, a hand-made toolpath. The
+    // status line says why.
+    h.app
+        .run(
+            "cam.setup.create",
+            json!({"name": "Bar", "stock": {"kind": "fixed_box", "size": [80, 50, 25], "anchor": {"x": "center", "y": "center", "z": "min"}}}),
+        )
+        .unwrap();
+    assert_eq!(SetupForm::edit(&h.app, "setup-2").err().as_deref(), Some(tr("manufacture.edit_unsupported_setup")));
+    edit(&mut h.app, &Target::Setup("setup-2".into()));
+    assert_eq!((open(&h), h.app.status.as_ref().map(|s| (s.0.as_str(), s.2))), ("none", Some((tr("manufacture.edit_unsupported_setup"), true))));
+    let path = json!({"start": [0.0, 0.0, 50.0], "moves": [{"kind": "rapid", "to": [0.0, 0.0, 5.0]}]});
+    h.app.run("cam.op.manual", json!({"setup": "setup-1", "tool": 1, "toolpath": path})).unwrap();
+    edit(&mut h.app, &Target::Operation("op-3".into()));
+    assert_eq!((open(&h), h.app.status.as_ref().map(|s| s.0.as_str())), ("none", Some(tr("manufacture.edit_unsupported_operation"))));
+    edit(&mut h.app, &Target::Operation("op-9".into()));
+    assert!(h.app.status.as_ref().is_some_and(|s| s.0.contains("no operation 'op-9'")));
+    edit(&mut h.app, &Target::Tool(9));
+    assert!(h.app.status.as_ref().is_some_and(|s| s.0.contains("no tool 9")));
+}

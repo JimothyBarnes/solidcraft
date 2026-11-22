@@ -14,10 +14,10 @@ use solidcraft_doc::plugin_data::DATA;
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
-    CamData, CamDataParams, CamOpDeleteParams, CamOpDrillParams, CamOpFaceParams, CamOpManualParams, CamOpToolpath, CamOpToolpathParams,
-    CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles, CamSetupHolesParams,
-    CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten,
-    HoleBottom, HoleGroup,
+    CamData, CamDataParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams, CamOpManualParams, CamOpToolpath,
+    CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles,
+    CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupWritten, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams,
+    CamToolWritten, HoleBottom, HoleGroup,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -62,6 +62,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
+    CommandSpec::new("cam.op.edit", "Edit Operation", crate::checked!("cam.op.edit", op_edit)).icon("edit").doc_only()
+        .contract(&TypedContract::<CamOpEditParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("id, then any of name, tool, suppressed, and the operation's own parameters whole: drill (a drill operation), face (a facing) or toolpath (a hand-made one) → replaces those; parameters of another kind of operation are refused"),
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
@@ -262,11 +265,11 @@ fn setup_create(s: &mut Session, p: &Value) -> Result<Value> {
     reply(CMD, CamSetupWritten { id, setups: d.setups.len() })
 }
 
-fn setup_edit(s: &mut Session, p: &Value) -> Result<Value> {
-    const CMD: &str = "cam.setup.edit";
-    let p: CamSetupEditParams = parse(CMD, "parameters", p)?;
-    let mut d = load(s, CMD)?;
-    let setup = d.setups.iter_mut().find(|x| x.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.id)))?;
+/// The design's setups as `cam.setup.edit`'s parameters leave them: the setup they name with the
+/// fields given replaced, in its place. Returns its id too.
+fn edited_setups(cmd: &str, d: &mut ManufactureData, p: &Value) -> Result<String> {
+    let p: CamSetupEditParams = parse(cmd, "parameters", p)?;
+    let setup = d.setups.iter_mut().find(|x| x.id == p.id).ok_or_else(|| bad(cmd, format!("the design has no setup '{}'", p.id)))?;
     let fields = SetupFields {
         name: p.name,
         machine: p.machine,
@@ -278,9 +281,16 @@ fn setup_edit(s: &mut Session, p: &Value) -> Result<Value> {
         fixture_bodies: p.fixture_bodies,
         safe_heights: p.safe_heights,
     };
-    apply(CMD, setup, fields)?;
+    apply(cmd, setup, fields)?;
+    Ok(p.id)
+}
+
+fn setup_edit(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.edit";
+    let mut d = load(s, CMD)?;
+    let id = edited_setups(CMD, &mut d, p)?;
     store(s, CMD, &d)?;
-    reply(CMD, CamSetupWritten { id: p.id, setups: d.setups.len() })
+    reply(CMD, CamSetupWritten { id, setups: d.setups.len() })
 }
 
 fn setup_delete(s: &mut Session, p: &Value) -> Result<Value> {
@@ -715,17 +725,29 @@ pub fn manufacture_preview(s: &Session, command: &str, params: &Value) -> std::r
     })
 }
 
-/// Where the setup `cam.setup.create` would make from `params` sits on the model, without making
-/// it: for its form to draw the stock and the work origin before OK, or to say why the command
-/// would refuse or the setup could not be placed. It reads the design and changes nothing.
-pub fn manufacture_setup_preview(s: &Session, params: &Value) -> std::result::Result<Placement, String> {
+/// Where the setup that `command` (`cam.setup.create` or `cam.setup.edit`) would leave from
+/// `params` sits on the model, without making or changing it: for its form to draw the stock and
+/// the work origin before OK, or to say why the command would refuse or the setup could not be
+/// placed. It reads the design and changes nothing.
+pub fn manufacture_setup_preview(s: &Session, command: &str, params: &Value) -> std::result::Result<Placement, String> {
     const CMD: &str = "cam.preview";
     let mut d = manufacture_data(&s.doc)?;
-    let setup = proposed_setup(CMD, &d, given(params)).map_err(said)?;
-    let (model, _) = model_box(s, CMD, &setup).map_err(said)?;
+    let at = match command {
+        "cam.setup.create" => {
+            let setup = proposed_setup(CMD, &d, given(params)).map_err(said)?;
+            d.setups.push(setup);
+            d.setups.len() - 1
+        }
+        "cam.setup.edit" => {
+            let id = edited_setups(CMD, &mut d, given(params)).map_err(said)?;
+            d.setups.iter().position(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?
+        }
+        other => return Err(format!("`{other}` is not a command that makes or changes a setup")),
+    };
+    let setup = d.setups.get(at).ok_or_else(|| "the setup was not found again".to_string())?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
     let placement = setup.place(model).map_err(|e| e.to_string())?;
     // What saving it would check.
-    d.setups.push(setup);
     d.validate().map_err(|e| e.to_string())?;
     Ok(placement)
 }
@@ -756,6 +778,58 @@ fn op_toolpath_command(s: &mut Session, p: &Value) -> Result<Value> {
             notes: worked.notes,
         },
     )
+}
+
+fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.op.edit";
+    let p: CamOpEditParams = parse(CMD, "parameters", p)?;
+    let mut d = load(s, CMD)?;
+    let setup = d
+        .setups
+        .iter_mut()
+        .find(|x| x.operations.iter().any(|o| o.id == p.id))
+        .ok_or_else(|| bad(CMD, format!("the design has no operation '{}'", p.id)))?;
+    let (setup_id, operations) = (setup.id.clone(), setup.operations.len());
+    let op = setup.operations.iter_mut().find(|o| o.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no operation '{}'", p.id)))?;
+    if let Some(name) = p.name {
+        op.name = name;
+    }
+    if let Some(tool) = p.tool {
+        op.tool = tool;
+    }
+    if let Some(suppressed) = p.suppressed {
+        op.suppressed = suppressed;
+    }
+    // Its own parameters, whole; another kind's are a mistake, not something to drop quietly.
+    let (kind, takes) = match &op.operation {
+        OperationKind::Manual { .. } => ("a hand-made toolpath", "toolpath"),
+        OperationKind::Drill { .. } => ("a drill operation", "drill"),
+        OperationKind::Face { .. } => ("a facing", "face"),
+    };
+    for (given, name) in [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face")] {
+        if given.is_some() && name != takes {
+            return Err(bad(CMD, format!("operation {} is {kind}: it takes `{takes}`, not `{name}`", op.id)));
+        }
+    }
+    match &mut op.operation {
+        OperationKind::Manual { toolpath } => {
+            if let Some(v) = &p.toolpath {
+                *toolpath = parse(CMD, "toolpath", v)?;
+            }
+        }
+        OperationKind::Drill { drill } => {
+            if let Some(v) = &p.drill {
+                *drill = parse(CMD, "drill", v)?;
+            }
+        }
+        OperationKind::Face { face } => {
+            if let Some(v) = &p.face {
+                *face = parse(CMD, "face", v)?;
+            }
+        }
+    }
+    store(s, CMD, &d)?;
+    reply(CMD, CamOpWritten { id: p.id, setup: setup_id, operations })
 }
 
 fn op_delete(s: &mut Session, p: &Value) -> Result<Value> {

@@ -91,10 +91,12 @@ pub(crate) fn draw(app: &SolveApp, sc: &mut GpuScene) {
         return;
     }
     let mut left = MAX_PIECES;
+    // An operation its form is changing is drawn as the form would leave it, not as it is.
+    let changing = app.manufacture_workspace.dialog.as_ref().and_then(|dialog| dialog.edited_operation());
     with_view(app, |view| {
         if let Ok(Some(view)) = view {
             placed(sc, &view.placement);
-            for operation in &view.operations {
+            for operation in view.operations.iter().filter(|operation| Some(operation.id.as_str()) != changing) {
                 if let Ok(pieces) = &operation.pieces {
                     toolpath(sc, &view.placement, pieces, &mut left);
                 }

@@ -218,6 +218,31 @@ pub struct CamOpDeleteParams {
     pub id: String,
 }
 
+/// Change an operation: the fields given replace the operation's.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpEditParams {
+    /// The operation's id (`op-1`, …).
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers, of a kind the operation can use.
+    #[serde(default)]
+    pub tool: Option<u32>,
+    /// Leave the operation out of toolpaths and programs (true), or put it back (false).
+    #[serde(default)]
+    pub suppressed: Option<bool>,
+    /// A drill operation's parameters, whole, as `cam.op.drill` takes them.
+    #[serde(default)]
+    pub drill: Option<Value>,
+    /// A facing operation's parameters, whole, as `cam.op.face` takes them.
+    #[serde(default)]
+    pub face: Option<Value>,
+    /// A hand-made operation's toolpath, whole, as `cam.op.manual` takes it.
+    #[serde(default)]
+    pub toolpath: Option<Value>,
+}
+
 /// Add a drill operation to a setup (decision 0009 of the CAM work).
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

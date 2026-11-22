@@ -1,0 +1,74 @@
+{
+  "en": {
+    "cmd.cam_op_edit": "Edit Operation",
+    "manufacture.drill_depth_tip": "From the holes' top to the drill's tip.",
+    "manufacture.drill_holes_kept": "{count}, as made",
+    "manufacture.edit_unsupported_operation": "A hand-made toolpath has no form.",
+    "manufacture.edit_unsupported_setup": "This setup's stock or work origin is of a kind this form does not show yet.",
+    "manufacture.edit_unsupported_tool": "This kind of tool can't be changed here yet.",
+    "manufacture.preview_note_edit": "Shown on the model as it would be after the change, until you press OK."
+  },
+  "ar": {
+    "cmd.cam_op_edit": "تعديل العملية",
+    "manufacture.drill_depth_tip": "من أعلى الثقوب إلى رأس المثقاب.",
+    "manufacture.drill_holes_kept": "{count}، كما أُنشئت",
+    "manufacture.edit_unsupported_operation": "مسار الأداة المصنوع يدويًا ليس له نموذج.",
+    "manufacture.edit_unsupported_setup": "خامة هذا الإعداد أو نقطة أصل الشغل فيه من نوع لا يعرضه هذا النموذج بعد.",
+    "manufacture.edit_unsupported_tool": "لا يمكن تعديل هذا النوع من الأدوات هنا بعد.",
+    "manufacture.preview_note_edit": "يُعرض على النموذج كما سيكون بعد التغيير، إلى أن تضغط «موافق»."
+  },
+  "he": {
+    "cmd.cam_op_edit": "עריכת פעולה",
+    "manufacture.drill_depth_tip": "מראש הקדחים עד לחוד המקדח.",
+    "manufacture.drill_holes_kept": "{count}, כפי שנוצרו",
+    "manufacture.edit_unsupported_operation": "למסלול כלי שנעשה ביד אין טופס.",
+    "manufacture.edit_unsupported_setup": "חומר הגלם או ראשית העבודה של הגדרה זו הם מסוג שהטופס הזה עדיין לא מציג.",
+    "manufacture.edit_unsupported_tool": "עדיין אי אפשר לשנות כאן כלי מסוג זה.",
+    "manufacture.preview_note_edit": "מוצג על המודל כפי שיהיה אחרי השינוי, עד שתלחץ על אישור."
+  },
+  "ja": {
+    "cmd.cam_op_edit": "加工を編集",
+    "manufacture.drill_depth_tip": "穴の上端からドリル先端まで。",
+    "manufacture.drill_holes_kept": "{count} 個（作成時のまま）",
+    "manufacture.edit_unsupported_operation": "手作りのツールパスにはフォームがありません。",
+    "manufacture.edit_unsupported_setup": "このセットアップの素材またはワーク原点は、このフォームではまだ表示できない種類です。",
+    "manufacture.edit_unsupported_tool": "この種類の工具はまだここで変更できません。",
+    "manufacture.preview_note_edit": "OK を押すまで、変更後の状態がモデル上に表示されます。"
+  },
+  "vi": {
+    "cmd.cam_op_edit": "Sửa nguyên công",
+    "manufacture.drill_depth_tip": "Từ miệng lỗ đến mũi của mũi khoan.",
+    "manufacture.drill_holes_kept": "{count}, như khi tạo",
+    "manufacture.edit_unsupported_operation": "Đường chạy dao làm thủ công không có biểu mẫu.",
+    "manufacture.edit_unsupported_setup": "Phôi hoặc gốc phôi của thiết lập này thuộc loại mà biểu mẫu này chưa hiển thị.",
+    "manufacture.edit_unsupported_tool": "Chưa thể sửa loại dao này tại đây.",
+    "manufacture.preview_note_edit": "Được hiển thị trên mô hình như sau khi thay đổi, cho đến khi bạn nhấn OK."
+  },
+  "zh": {
+    "cmd.cam_op_edit": "编辑工序",
+    "manufacture.drill_depth_tip": "从孔口到钻尖。",
+    "manufacture.drill_holes_kept": "{count} 个，保持创建时的",
+    "manufacture.edit_unsupported_operation": "手工刀路没有表单。",
+    "manufacture.edit_unsupported_setup": "此设置的毛坯或工件原点属于此表单尚未显示的类型。",
+    "manufacture.edit_unsupported_tool": "此类刀具暂时无法在此修改。",
+    "manufacture.preview_note_edit": "在按下“确定”之前，模型上显示的是更改后的样子。"
+  },
+  "de": {
+    "cmd.cam_op_edit": "Bearbeitung ändern",
+    "manufacture.drill_depth_tip": "Von der Oberkante der Bohrungen bis zur Bohrerspitze.",
+    "manufacture.drill_holes_kept": "{count}, wie erstellt",
+    "manufacture.edit_unsupported_operation": "Ein von Hand erstellter Werkzeugweg hat kein Formular.",
+    "manufacture.edit_unsupported_setup": "Rohteil oder Werkstücknullpunkt dieser Aufspannung sind von einer Art, die dieses Formular noch nicht zeigt.",
+    "manufacture.edit_unsupported_tool": "Diese Werkzeugart kann hier noch nicht geändert werden.",
+    "manufacture.preview_note_edit": "Wird am Modell so angezeigt, wie es nach der Änderung wäre, bis Sie OK drücken."
+  },
+  "ko": {
+    "cmd.cam_op_edit": "작업 편집",
+    "manufacture.drill_depth_tip": "구멍 상단에서 드릴 끝까지.",
+    "manufacture.drill_holes_kept": "{count}개, 만든 그대로",
+    "manufacture.edit_unsupported_operation": "수동으로 만든 공구 경로에는 양식이 없습니다.",
+    "manufacture.edit_unsupported_setup": "이 셋업의 소재 또는 공작물 원점은 이 양식에서 아직 표시하지 않는 종류입니다.",
+    "manufacture.edit_unsupported_tool": "이 종류의 공구는 아직 여기서 변경할 수 없습니다.",
+    "manufacture.preview_note_edit": "확인을 누르기 전까지 변경 후의 모습이 모델에 표시됩니다."
+  }
+}

@@ -522,7 +522,7 @@ fn a_form_previews_an_operation_before_it_is_made() {
 #[test]
 fn a_form_previews_a_setup_before_it_is_made() {
     let mut s = Session::default();
-    let preview = |s: &Session, params: Value| crate::cmd::manufacture_setup_preview(s, &params);
+    let preview = |s: &Session, params: Value| crate::cmd::manufacture_setup_preview(s, "cam.setup.create", &params);
     // Nothing to machine yet: the reason, as the setup's own commands give it.
     assert!(preview(&s, json!({})).unwrap_err().contains("has no bodies to machine"));
     run(&mut s, "solid.box", json!({"length": 60, "width": 40, "height": 20, "corner": [0, 0, 0], "body_name": "Block"}));
@@ -659,6 +659,89 @@ fn a_setups_holes_are_found_on_the_model_and_grouped() {
     assert!(refused(&mut empty, "cam.setup.holes", json!({"id": "setup-1"})).contains("has no bodies to machine"));
     assert!(refused(&mut s, "cam.setup.holes", json!({"id": "setup-9"})).contains("no setup 'setup-9'"));
     assert!(crate::cmd::manufacture_holes(&s, "setup-9").unwrap_err().contains("no setup 'setup-9'"));
+}
+
+#[test]
+fn an_operation_is_edited_in_place_and_keeps_its_kind() {
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    let passes = |s: &mut Session| run(s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["passes"].as_array().unwrap().len();
+    assert_eq!(passes(&mut s), 4);
+    // Half the stepover on the facing: eight passes (see the preview's test), under its own name.
+    let undo = s.undo.len();
+    let edited = run(&mut s, "cam.op.edit", json!({"id": "op-1", "name": "Face fine", "face": {"stepover": 7}}));
+    assert_eq!(edited, json!({"id": "op-1", "setup": "setup-1", "operations": 2}));
+    assert_eq!((passes(&mut s), s.undo.len()), (8, undo + 1));
+    let data = run(&mut s, "cam.data", json!({}))["data"].clone();
+    let op = &data["setups"][0]["operations"][0];
+    assert_eq!((op["name"].as_str(), op["tool"].as_u64(), op["operation"]["face"]["stepover"].as_f64()), (Some("Face fine"), Some(4), Some(7.0)));
+    // Its parameters are replaced whole: what the new ones leave out goes back to its default.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "face": {"pattern": "one_way"}}));
+    assert_eq!(passes(&mut s), 4);
+    // Switched off, it is left out of the program; switched on again, it is back.
+    let lines = |s: &mut Session| run(s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}))["lines"].as_u64().unwrap();
+    let both = lines(&mut s);
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "suppressed": true}));
+    assert!(lines(&mut s) < both);
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "suppressed": false}));
+    assert_eq!(lines(&mut s), both);
+    // The drill operation: deeper holes with another cycle.
+    run(&mut s, "cam.op.edit", json!({"id": "op-2", "drill": {"holes": [[0, 0]], "depth": 12, "cycle": {"type": "drill", "dwell": 0}}}));
+    assert_eq!(run(&mut s, "cam.op.toolpath", json!({"id": "op-2"}))["numbers"]["bottom"], json!(-13.0));
+    // Refused, and nothing changed: another kind's parameters, a tool that can't do the work, a
+    // tool or an operation the design lacks, junk.
+    let before = run(&mut s, "cam.data", json!({}));
+    let undo = s.undo.len();
+    for (params, expect) in [
+        (json!({"id": "op-1", "drill": three_holes()}), "operation op-1 is a facing: it takes `face`, not `drill`"),
+        (json!({"id": "op-2", "face": {}}), "operation op-2 is a drill operation: it takes `drill`, not `face`"),
+        (json!({"id": "op-2", "toolpath": bracket()}), "it takes `drill`, not `toolpath`"),
+        (json!({"id": "op-1", "tool": 3}), "does not face"),
+        (json!({"id": "op-1", "tool": 9}), "tool 9"),
+        (json!({"id": "op-1", "face": {"stepover": -1}}), "stepover"),
+        (json!({"id": "op-9", "name": "x"}), "no operation 'op-9'"),
+        (json!({"id": "op-1", "depth": 5}), "parameters:"),
+    ] {
+        let said = refused(&mut s, "cam.op.edit", params.clone());
+        assert!(said.contains(expect), "{params}: {said:?} does not say {expect:?}");
+    }
+    assert_eq!((run(&mut s, "cam.data", json!({})), s.undo.len()), (before, undo));
+    // A hand-made toolpath is replaced the same way: here it retracts 3 mm higher. One that no
+    // longer holds together (an arc whose start is off its circle) is refused.
+    let mut hand = shop();
+    let mut path = bracket();
+    path["moves"][5]["to"] = p(0.0, 10.0, 8.0);
+    run(&mut hand, "cam.op.edit", json!({"id": "op-1", "toolpath": path}));
+    assert_eq!(run(&mut hand, "cam.op.toolpath", json!({"id": "op-1"}))["toolpath"]["moves"][5]["to"], p(0.0, 10.0, 8.0));
+    let mut broken = bracket();
+    broken["moves"][3]["to"] = p(12.0, 0.0, -1.0);
+    assert!(refused(&mut hand, "cam.op.edit", json!({"id": "op-1", "toolpath": broken})).contains("operation op-1"));
+}
+
+#[test]
+fn a_form_previews_a_changed_setup_before_it_is_changed() {
+    let mut s = drilling();
+    let before = run(&mut s, "cam.data", json!({}));
+    let preview = |s: &Session, command: &str, params: Value| crate::cmd::manufacture_setup_preview(s, command, &params);
+    // As it is: the vise setup on the 60 x 40 x 20 block.
+    let same = preview(&s, "cam.setup.edit", json!({"id": "setup-1"})).unwrap();
+    assert_eq!((same.origin.x, same.origin.y, same.origin.z), (30.0, 20.0, 21.0));
+    // 5 mm on top instead of 1: the origin, at the stock's top, rises 4.
+    let taller = preview(
+        &s,
+        "cam.setup.edit",
+        json!({"id": "setup-1", "stock": {"kind": "relative_box", "offsets": {"x_min": 1, "x_max": 1, "y_min": 1, "y_max": 1, "z_min": 0, "z_max": 5}}}),
+    )
+    .unwrap();
+    assert_eq!((taller.origin.z, taller.stock.min.z, taller.stock.max.z), (25.0, -25.0, 0.0));
+    // What the command would refuse, and what can't be placed, in plain words.
+    assert!(preview(&s, "cam.setup.edit", json!({"id": "setup-9"})).unwrap_err().contains("no setup 'setup-9'"));
+    assert!(preview(&s, "cam.setup.edit", json!({"id": "setup-1", "work_offset": 9})).unwrap_err().contains("work offset"));
+    assert!(preview(&s, "cam.setup.edit", json!({"id": "setup-1", "model_bodies": ["Gone"]})).unwrap_err().contains("'Gone' is not in the design"));
+    assert!(preview(&s, "cam.setup.delete", json!({"id": "setup-1"})).unwrap_err().contains("not a command that makes or changes a setup"));
+    assert_eq!(run(&mut s, "cam.data", json!({})), before);
 }
 
 #[test]

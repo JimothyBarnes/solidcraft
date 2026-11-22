@@ -34,6 +34,22 @@ pub(crate) enum Dialog {
     Posted(Posted),
 }
 
+/// What the Browser asks a form to change.
+pub(crate) enum Target {
+    Tool(u32),
+    Setup(String),
+    Operation(String),
+}
+
+/// What a form in edit mode changes: the thing's id as its command takes it, the title its window
+/// carries, and its parameters as the design keeps them, so that what the form does not show stays
+/// as it is.
+struct Edited {
+    id: Value,
+    title: String,
+    base: Value,
+}
+
 /// What an open form adds to the viewport.
 pub(crate) enum Shown<'a> {
     /// A setup not made yet: its stock and work origin, in place of the active setup's.
@@ -43,6 +59,15 @@ pub(crate) enum Shown<'a> {
 }
 
 impl Dialog {
+    /// The operation the open form is changing, if it is changing one: its own toolpath gives way
+    /// to the form's preview in the viewport.
+    pub(crate) fn edited_operation(&self) -> Option<&str> {
+        match self {
+            Dialog::Face(FaceForm { editing: Some(edited), .. }) | Dialog::Drill(DrillForm { editing: Some(edited), .. }) => edited.id.as_str(),
+            _ => None,
+        }
+    }
+
     /// What the form adds to the viewport, with a number that changes when that does.
     pub(crate) fn shown(&self) -> Option<(u64, Shown<'_>)> {
         match self {
@@ -148,6 +173,32 @@ fn speed_and_feed(ui: &mut egui::Ui, rpm: &mut f64, feed: &mut f64, units: &str)
     (rpm, feed)
 }
 
+/// Sets a number an operation keeps, or takes it out so the command's own default applies.
+fn set_or_clear(object: &mut Value, key: &str, value: Option<f64>) {
+    match value {
+        Some(value) => object[key] = json!(value),
+        None => {
+            if let Some(fields) = object.as_object_mut() {
+                fields.remove(key);
+            }
+        }
+    }
+}
+
+/// The title and the OK label of a form's window: the command's own to make something, the
+/// thing's name and "OK" to change it.
+fn window_words(editing: &Option<Edited>, command: &'static str) -> (String, &'static str) {
+    match editing {
+        Some(edited) => (edited.title.clone(), tr_label("OK")),
+        None => (tr(command).to_string(), tr("ui.create")),
+    }
+}
+
+/// The line that marks what is drawn on the model as a preview: of something new, or of a change.
+fn preview_note(editing: &Option<Edited>) -> &'static str {
+    tr(if editing.is_some() { "manufacture.preview_note_edit" } else { "manufacture.preview_note" })
+}
+
 /// A command's refusal, or why a preview has nothing to show, in the form.
 fn refusal(ui: &mut egui::Ui, why: Option<&str>) {
     if let Some(why) = why.filter(|why| !why.is_empty()) {
@@ -235,6 +286,8 @@ pub(crate) struct ToolForm {
     pub surface_speed: f64,
     /// mm a tooth.
     pub chip_load: f64,
+    /// The tool being changed, when the form changes one.
+    editing: Option<Edited>,
     pub error: Option<String>,
 }
 
@@ -261,8 +314,39 @@ impl ToolForm {
             // 650 ft/min and 0.002 in a tooth, or 200 m/min and 0.05 mm.
             surface_speed: if inch { 198.12 } else { 200.0 },
             chip_load: if inch { 0.0508 } else { 0.05 },
+            editing: None,
             error: None,
         }
+    }
+
+    /// The form for changing the design's tool `number`; why not, when it has no such tool or the
+    /// tool is of a kind Add Tool does not offer (one from a tool library file).
+    pub fn edit(app: &SolveApp, number: u32) -> Result<ToolForm, String> {
+        let data = manufacture_data(&app.session.doc)?;
+        let tool = data.tools.iter().find(|t| t.number == number).ok_or_else(|| format!("the design has no tool {number}"))?;
+        let base = serde_json::to_value(tool).map_err(|e| e.to_string())?;
+        let kind =
+            KINDS.iter().position(|k| Some(k.0) == base["kind"].as_str()).ok_or_else(|| tr("manufacture.edit_unsupported_tool").to_string())?;
+        let coolant = COOLANTS.iter().position(|c| Some(c.0) == base["coolant"].as_str()).unwrap_or(0);
+        let data = tool.cutting_data.first();
+        Ok(ToolForm {
+            number,
+            name: tool.name.clone(),
+            kind,
+            diameter: tool.geometry.diameter,
+            corner_radius: tool.geometry.corner_radius,
+            flutes: tool.flutes,
+            typed_flutes: true,
+            flute_length: tool.geometry.flute_length,
+            overall_length: tool.geometry.overall_length,
+            tip_angle: if tool.geometry.tip_angle > 0.0 { tool.geometry.tip_angle.to_degrees() } else { 118.0 },
+            coolant,
+            material: data.map(|c| c.material.clone()).unwrap_or_default(),
+            surface_speed: data.map_or(200.0, |c| c.surface_speed),
+            chip_load: data.map_or(0.05, |c| c.chip_load),
+            editing: Some(Edited { id: json!(number), title: format!("T{number} {}", tool.name), base }),
+            error: None,
+        })
     }
 
     fn pointed(&self) -> bool {
@@ -284,44 +368,99 @@ impl ToolForm {
         format!("{} {}", plain_length(self.diameter, units), labels(&KINDS).get(self.kind).copied().unwrap_or(""))
     }
 
-    /// The `cam.tool.create` parameters, the tool named in the design's `units` when no name is typed.
+    /// The `cam.tool.create` parameters, the tool named in the design's `units` when no name is
+    /// typed; or `cam.tool.edit`'s, the tool as the design keeps it with the form's fields put in
+    /// (its holder, offsets, other materials' cutting data and typed-in speeds stay as they are).
     pub fn params(&self, units: &str) -> Value {
         let kind = word(&KINDS, self.kind);
-        let corner_radius = match kind {
-            "bull_nose_end_mill" => self.corner_radius,
-            "ball_end_mill" => 0.5 * self.diameter,
-            _ => 0.0,
-        };
         let name = match self.name.trim() {
             "" => self.usual_name(units),
             typed => typed.to_string(),
         };
-        let cutting_data = match self.material.trim() {
-            "" => json!([]),
-            material => {
-                json!([{"material": material, "surface_speed": self.surface_speed, "chip_load": self.chip_load, "plunge_factor": 0.5, "ramp_factor": 0.5}])
-            }
+        let shown = json!({"material": self.material.trim(), "surface_speed": self.surface_speed, "chip_load": self.chip_load});
+        let Some(edited) = &self.editing else {
+            let corner_radius = match kind {
+                "bull_nose_end_mill" => self.corner_radius,
+                "ball_end_mill" => 0.5 * self.diameter,
+                _ => 0.0,
+            };
+            let cutting_data = match self.material.trim() {
+                "" => json!([]),
+                _ => {
+                    json!([{"material": shown["material"], "surface_speed": shown["surface_speed"], "chip_load": shown["chip_load"], "plunge_factor": 0.5, "ramp_factor": 0.5}])
+                }
+            };
+            return json!({"tool": {
+                "number": self.number, "name": name, "kind": kind,
+                "geometry": {
+                    "diameter": self.diameter, "corner_radius": corner_radius, "flute_length": self.flute_length, "shoulder_length": 0.0,
+                    "overall_length": self.overall_length, "shank_diameter": self.diameter,
+                    "tip_angle": if self.pointed() { self.tip_angle.to_radians() } else { 0.0 }, "tip_diameter": 0.0, "thread_pitch": 0.0
+                },
+                "flutes": self.flutes,
+                "holder": {"stick_out": self.overall_length.min(self.flute_length + 10.0), "segments": []},
+                "length_offset": self.number, "diameter_offset": self.number,
+                "coolant": word(&COOLANTS, self.coolant),
+                "cutting_data": cutting_data,
+                "overrides": {"rpm": null, "feed": null}
+            }});
         };
-        json!({"tool": {
-            "number": self.number, "name": name, "kind": kind,
-            "geometry": {
-                "diameter": self.diameter, "corner_radius": corner_radius, "flute_length": self.flute_length, "shoulder_length": 0.0,
-                "overall_length": self.overall_length, "shank_diameter": self.diameter,
-                "tip_angle": if self.pointed() { self.tip_angle.to_radians() } else { 0.0 }, "tip_diameter": 0.0, "thread_pitch": 0.0
-            },
-            "flutes": self.flutes,
-            "holder": {"stick_out": self.overall_length.min(self.flute_length + 10.0), "segments": []},
-            "length_offset": self.number, "diameter_offset": self.number,
-            "coolant": word(&COOLANTS, self.coolant),
-            "cutting_data": cutting_data,
-            "overrides": {"rpm": null, "feed": null}
-        }})
+        let mut tool = edited.base.clone();
+        let same_kind = tool["kind"].as_str() == Some(kind);
+        let was = tool["geometry"].clone();
+        let geometry = &mut tool["geometry"];
+        // A shank that was the tool's own diameter follows it.
+        if was["shank_diameter"] == was["diameter"] {
+            geometry["shank_diameter"] = json!(self.diameter);
+        }
+        geometry["diameter"] = json!(self.diameter);
+        geometry["corner_radius"] = match kind {
+            "bull_nose_end_mill" => json!(self.corner_radius),
+            "ball_end_mill" => json!(0.5 * self.diameter),
+            _ if same_kind => was["corner_radius"].clone(),
+            _ => json!(0.0),
+        };
+        geometry["flute_length"] = json!(self.flute_length);
+        geometry["overall_length"] = json!(self.overall_length);
+        // The angle as kept, unless it was changed: degrees and back would move its last digit.
+        let kept_angle = was["tip_angle"].as_f64().filter(|kept| same_kind && (kept.to_degrees() - self.tip_angle).abs() < 1e-9);
+        geometry["tip_angle"] = match (self.pointed(), kept_angle) {
+            (true, Some(kept)) => json!(kept),
+            (true, None) => json!(self.tip_angle.to_radians()),
+            (false, _) if same_kind => was["tip_angle"].clone(),
+            (false, _) => json!(0.0),
+        };
+        tool["number"] = json!(self.number);
+        tool["name"] = json!(name);
+        tool["kind"] = json!(kind);
+        tool["flutes"] = json!(self.flutes);
+        tool["coolant"] = json!(word(&COOLANTS, self.coolant));
+        if tool["holder"]["stick_out"].as_f64().is_some_and(|out| out > self.overall_length) {
+            tool["holder"]["stick_out"] = json!(self.overall_length);
+        }
+        // The cutting data shown is the tool's first; any for other materials stays.
+        let mut data = tool["cutting_data"].as_array().cloned().unwrap_or_default();
+        match (self.material.trim().is_empty(), data.first_mut()) {
+            (true, Some(_)) => {
+                data.remove(0);
+            }
+            (true, None) => {}
+            (false, Some(first)) => {
+                for key in ["material", "surface_speed", "chip_load"] {
+                    first[key] = shown[key].clone();
+                }
+            }
+            (false, None) => data.push(json!({"material": shown["material"], "surface_speed": shown["surface_speed"], "chip_load": shown["chip_load"], "plunge_factor": 0.5, "ramp_factor": 0.5})),
+        }
+        tool["cutting_data"] = Value::Array(data);
+        json!({"number": edited.id, "tool": tool})
     }
 
     /// Runs the command: the form again, with the reason, when it refuses.
     pub fn accept(mut self, app: &mut SolveApp) -> Option<ToolForm> {
         let params = self.params(&app.session.doc.units);
-        match app.run("cam.tool.create", params) {
+        let command = if self.editing.is_some() { "cam.tool.edit" } else { "cam.tool.create" };
+        match app.run(command, params) {
             Ok(_) => None,
             Err(why) => {
                 self.error = Some(why);
@@ -333,10 +472,11 @@ impl ToolForm {
     fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<ToolForm> {
         let (kinds, coolants) = (labels(&KINDS), labels(&COOLANTS));
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_tool"), "library", tr("cmd.cam_tool_create"))
+        let (title, ok) = window_words(&self.editing, "cmd.cam_tool_create");
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_tool"), "library", &title)
             .placed(pivot, at)
             .fields()
-            .actions(tr("ui.create"), tr("ui.cancel"), None)
+            .actions(ok, tr("ui.cancel"), None)
             .show(ctx, true, |ui| {
                 ui_kit::row(ui, tr("manufacture.tool_number"), |ui| ui_kit::whole_number_field(ui, &mut self.number, 1..=99_999, ""));
                 let usual_name = self.usual_name(units);
@@ -394,6 +534,8 @@ pub(crate) struct SetupForm {
     known_materials: Vec<String>,
     /// Where the setup would sit on the model.
     placed: Worked<Placement>,
+    /// The setup being changed, when the form changes one.
+    editing: Option<Edited>,
     pub error: Option<String>,
 }
 
@@ -416,11 +558,48 @@ impl SetupForm {
             usual_name: format!("Setup {}", data.setups.len() + 1),
             known_materials,
             placed: Worked::new(),
+            editing: None,
             error: None,
         }
     }
 
-    /// The `cam.setup.create` parameters.
+    /// The form for changing the setup `id`; why not, when the design has no such setup or its
+    /// stock or work origin is of a kind the form does not show (one a script made).
+    pub fn edit(app: &SolveApp, id: &str) -> Result<SetupForm, String> {
+        let data = manufacture_data(&app.session.doc)?;
+        let setup = data.setups.iter().find(|s| s.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+        let base = serde_json::to_value(setup).map_err(|e| e.to_string())?;
+        let other = || tr("manufacture.edit_unsupported_setup").to_string();
+        // A box round the model with the same stock on all four sides, and the origin at one of
+        // the stock's top points the form offers, turned as the model is.
+        let offset = |side: &str| base["stock"]["offsets"][side].as_f64();
+        let (Some(side), Some(top), Some(bottom)) = (offset("x_min"), offset("z_max"), offset("z_min")) else { return Err(other()) };
+        let even = ["x_max", "y_min", "y_max"].iter().all(|k| offset(k).is_some_and(|v| (v - side).abs() < 1e-9));
+        let anchor = &base["wcs"]["origin"]["anchor"];
+        let origin = ORIGINS.iter().position(|o| json!({"x": o.1[0], "y": o.1[1], "z": o.1[2]}) == *anchor);
+        let shown = base["stock"]["kind"] == "relative_box"
+            && even
+            && base["wcs"]["origin"]["kind"] == "stock_box"
+            && base["wcs"]["orientation"]["kind"] == "model";
+        let Some(origin) = origin.filter(|_| shown) else { return Err(other()) };
+        Ok(SetupForm {
+            name: setup.name.clone(),
+            material: setup.material.clone().unwrap_or_default(),
+            side,
+            top,
+            bottom,
+            origin,
+            work_offset: usize::from(setup.work_offset.clamp(1, 6)) - 1,
+            usual_name: setup.name.clone(),
+            known_materials: data.tools.iter().flat_map(|t| t.cutting_data.iter().map(|c| c.material.clone())).collect(),
+            placed: Worked::new(),
+            editing: Some(Edited { id: json!(id), title: setup.name.clone(), base: Value::Null }),
+            error: None,
+        })
+    }
+
+    /// The `cam.setup.create` parameters, or `cam.setup.edit`'s for the setup being changed (its
+    /// bodies and safe heights are not given, so they stay as they are).
     pub fn params(&self) -> Value {
         let [x, y, z] = ORIGINS.get(self.origin).or(ORIGINS.first()).map_or(["center", "center", "max"], |o| o.1);
         let mut params = json!({
@@ -433,30 +612,42 @@ impl SetupForm {
         if !self.name.trim().is_empty() {
             params["name"] = json!(self.name.trim());
         }
-        if !self.material.trim().is_empty() {
-            params["material"] = json!(self.material.trim());
+        match &self.editing {
+            // An empty material takes the setup's away.
+            Some(edited) => {
+                params["id"] = edited.id.clone();
+                params["material"] = json!(self.material.trim());
+            }
+            None if !self.material.trim().is_empty() => params["material"] = json!(self.material.trim()),
+            None => {}
         }
         params
     }
 
+    fn command(&self) -> &'static str {
+        if self.editing.is_some() { "cam.setup.edit" } else { "cam.setup.create" }
+    }
+
     /// Works out where the setup would sit, if its parameters or the design changed.
     fn refresh(&mut self, app: &SolveApp) {
-        let params = self.params();
-        if self.placed.refresh(app, &params, || manufacture_setup_preview(&app.session, &params)) {
+        let (command, params) = (self.command(), self.params());
+        if self.placed.refresh(app, &params, || manufacture_setup_preview(&app.session, command, &params)) {
             self.error = None;
         }
     }
 
-    /// Runs the command and makes the new setup the one drawn: the form again, with the reason,
+    /// Runs the command (a new setup becomes the one drawn): the form again, with the reason,
     /// when the setup can't be placed or the command refuses.
     pub fn accept(mut self, app: &mut SolveApp) -> Option<SetupForm> {
         self.refresh(app);
         if self.placed.result.is_err() {
             return Some(self);
         }
-        match app.run("cam.setup.create", self.params()) {
+        match app.run(self.command(), self.params()) {
             Ok(made) => {
-                app.manufacture_workspace.active_setup = made.get("id").and_then(Value::as_str).map(str::to_string);
+                if self.editing.is_none() {
+                    app.manufacture_workspace.active_setup = made.get("id").and_then(Value::as_str).map(str::to_string);
+                }
                 None
             }
             Err(why) => {
@@ -487,10 +678,11 @@ impl SetupForm {
         let size = self.stock_size(units, decimals);
         let ready = self.placed.result.is_ok();
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_setup"), "ws_manufacture", tr("cmd.cam_setup_create"))
+        let (title, ok) = window_words(&self.editing, "cmd.cam_setup_create");
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_setup"), "ws_manufacture", &title)
             .placed(pivot, at)
             .fields()
-            .actions(tr("ui.create"), tr("ui.cancel"), None)
+            .actions(ok, tr("ui.cancel"), None)
             .show(ctx, ready, |ui| {
                 ui_kit::text_row(ui, tr_label("Name"), &mut self.name, &self.usual_name);
                 ui_kit::text_row(ui, tr("manufacture.setup_material"), &mut self.material, tr("manufacture.tool_material_hint"));
@@ -506,7 +698,7 @@ impl SetupForm {
                 ui_kit::choice_row(ui, tr("manufacture.setup_origin"), "manufacture_setup_origin", &mut self.origin, &origins);
                 ui_kit::choice_row(ui, tr("manufacture.setup_work_offset"), "manufacture_setup_offset", &mut self.work_offset, &WORK_OFFSETS);
                 if ready {
-                    ui_kit::text(ui, tr("manufacture.preview_note"), ui_kit::Text::Note("manufacture_setup_preview_note"));
+                    ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_setup_preview_note"));
                 }
                 refusal(ui, self.error.as_deref().or(self.placed.trouble()));
             });
@@ -542,7 +734,29 @@ pub(crate) struct FaceForm {
     worked: Worked<OperationPreview>,
     /// The setup of the list the viewport was last told to draw.
     drawn_setup: Option<usize>,
+    /// The facing being changed, when the form changes one: its `face` parameters as kept.
+    editing: Option<Edited>,
     pub error: Option<String>,
+}
+
+/// The setup an operation is in and the operation, as the design keeps them: `(setup, name, tool,
+/// kind, parameters)`, the parameters being the `drill`, `face` or `toolpath` object.
+fn kept_operation(app: &SolveApp, id: &str) -> Result<(SetupChoice, String, u32, String, Value), String> {
+    let data = manufacture_data(&app.session.doc)?;
+    let (setup, op) = data
+        .setups
+        .iter()
+        .find_map(|s| s.operations.iter().find(|o| o.id == id).map(|o| (s, o)))
+        .ok_or_else(|| format!("the design has no operation '{id}'"))?;
+    let kept = serde_json::to_value(&op.operation).map_err(|e| e.to_string())?;
+    let kind = kept["kind"].as_str().unwrap_or_default().to_string();
+    let params = kept.get(match kind.as_str() {
+        "manual" => "toolpath",
+        other => other,
+    });
+    let choice =
+        SetupChoice { id: setup.id.clone(), name: setup.name.clone(), label: format!("{} (G{})", setup.name, 53 + u32::from(setup.work_offset)) };
+    Ok((choice, op.name.clone(), op.tool, kind, params.cloned().unwrap_or(Value::Null)))
 }
 
 impl FaceForm {
@@ -567,8 +781,32 @@ impl FaceForm {
             typed_feed: false,
             worked: Worked::new(),
             drawn_setup: None,
+            editing: None,
             error: None,
         }
+    }
+
+    /// The form for changing the facing `id`, in the setup it is in; why not, when the design has
+    /// no such facing.
+    pub fn edit(app: &SolveApp, id: &str) -> Result<FaceForm, String> {
+        let (setup, name, tool, kind, base) = kept_operation(app, id)?;
+        if kind != "face" {
+            return Err(format!("operation {id} is not a facing"));
+        }
+        let tools = manufacture_tools(&app.session.doc, "face");
+        let number = |key: &str| base[key].as_f64();
+        let mut form = FaceForm::new(app);
+        form.setups = vec![setup];
+        form.setup = 0;
+        form.tool = tools.iter().position(|t| t.number == tool).unwrap_or(0);
+        form.tools = tools;
+        form.pattern = PATTERNS.iter().position(|p| Some(p.0) == base["pattern"].as_str()).unwrap_or(0);
+        (form.stepover, form.typed_stepover) = number("stepover").map_or((form.stepover, false), |v| (v, true));
+        (form.stepdown, form.multiple_depths) = number("stepdown").map_or((form.stepdown, false), |v| (v, true));
+        (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
+        (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.editing = Some(Edited { id: json!(id), title: name, base });
+        Ok(form)
     }
 
     /// What is missing before a facing can be made, if anything.
@@ -583,21 +821,15 @@ impl FaceForm {
     }
 
     /// The `cam.op.face` parameters. What was not typed is left to the command, so it keeps
-    /// following the tool: the stepover its diameter, the speed and feed its cutting data.
+    /// following the tool: the stepover its diameter, the speed and feed its cutting data. A
+    /// facing being changed starts from its parameters as kept, so its heights and the like stay.
     pub fn params(&self) -> Value {
-        let mut face = json!({"pattern": word(&PATTERNS, self.pattern)});
-        if self.typed_stepover {
-            face["stepover"] = json!(self.stepover);
-        }
-        if self.multiple_depths {
-            face["stepdown"] = json!(self.stepdown);
-        }
-        if self.typed_rpm {
-            face["rpm"] = json!(self.rpm);
-        }
-        if self.typed_feed {
-            face["feed"] = json!(self.feed);
-        }
+        let mut face = self.editing.as_ref().map_or_else(|| json!({}), |edited| edited.base.clone());
+        face["pattern"] = json!(word(&PATTERNS, self.pattern));
+        set_or_clear(&mut face, "stepover", self.typed_stepover.then_some(self.stepover));
+        set_or_clear(&mut face, "stepdown", self.multiple_depths.then_some(self.stepdown));
+        set_or_clear(&mut face, "rpm", self.typed_rpm.then_some(self.rpm));
+        set_or_clear(&mut face, "feed", self.typed_feed.then_some(self.feed));
         json!({
             "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
             "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
@@ -633,7 +865,12 @@ impl FaceForm {
         if self.missing().is_some() || self.worked.result.is_err() {
             return Some(self);
         }
-        match app.run("cam.op.face", self.params()) {
+        let mut params = self.params();
+        let made = match &self.editing {
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "face": params["face"].take()})),
+            None => app.run("cam.op.face", params),
+        };
+        match made {
             Ok(_) => None,
             Err(why) => {
                 self.error = Some(why);
@@ -659,16 +896,25 @@ impl FaceForm {
             self.drawn_setup = Some(self.setup);
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_face"), "edit", tr("cmd.cam_op_face"))
+        let (title, ok) = window_words(&self.editing, "cmd.cam_op_face");
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_face"), "edit", &title)
             .placed(pivot, at)
             .fields()
-            .actions(tr("ui.create"), tr("ui.cancel"), None)
+            .actions(ok, tr("ui.cancel"), None)
             .show(ctx, ready, |ui| {
                 if let Some(missing) = missing {
                     ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_face_missing"));
                     return;
                 }
-                ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_face_setup", &mut self.setup, &setup_labels);
+                // An operation stays in its setup: the row is a choice only for a new one.
+                match (&self.editing, setup_labels.first()) {
+                    (Some(_), Some(label)) => {
+                        ui_kit::value_row(ui, tr("manufacture.field_setup"), label);
+                    }
+                    _ => {
+                        ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_face_setup", &mut self.setup, &setup_labels);
+                    }
+                }
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_face_tool", &mut self.tool, &tool_labels);
                 ui_kit::choice_row(ui, tr_label("Pattern"), "manufacture_face_pattern", &mut self.pattern, &patterns);
                 if ui_kit::row(ui, tr("manufacture.face_stepover"), |ui| ui_kit::length_field(ui, &mut self.stepover, units, decimals)).changed() {
@@ -689,7 +935,7 @@ impl FaceForm {
                 }
                 ui_kit::text(ui, tr("manufacture.face_note"), ui_kit::Text::Note("manufacture_face_note"));
                 if ready {
-                    ui_kit::text(ui, tr("manufacture.preview_note"), ui_kit::Text::Note("manufacture_face_preview_note"));
+                    ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_face_preview_note"));
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });
@@ -754,6 +1000,9 @@ pub(crate) struct DrillForm {
     worked: Worked<OperationPreview>,
     /// The setup of the list the viewport was last told to draw.
     drawn_setup: Option<usize>,
+    /// The drill operation being changed, when the form changes one: its `drill` parameters as
+    /// kept. Its holes stay the ones it has.
+    editing: Option<Edited>,
     pub error: Option<String>,
 }
 
@@ -781,8 +1030,29 @@ impl DrillForm {
             typed_feed: false,
             worked: Worked::new(),
             drawn_setup: None,
+            editing: None,
             error: None,
         }
+    }
+
+    /// The form for changing the drill operation `id`: its tool, cycle, depth, speed and feed, on
+    /// the holes it has. Why not, when the design has no such drill operation.
+    pub fn edit(app: &SolveApp, id: &str) -> Result<DrillForm, String> {
+        let (setup, name, tool, kind, base) = kept_operation(app, id)?;
+        if kind != "drill" {
+            return Err(format!("operation {id} is not a drill operation"));
+        }
+        let mut form = DrillForm::new(app);
+        form.setups = vec![setup];
+        form.setup = 0;
+        (form.tool, form.picked_tool) = (form.tools.iter().position(|t| t.number == tool).unwrap_or(0), true);
+        form.cycle = CYCLES.iter().position(|c| Some(c.0) == base["cycle"]["type"].as_str()).unwrap_or(0);
+        (form.peck, form.typed_peck) = base["cycle"]["peck"].as_f64().map_or((0.0, false), |v| (v, true));
+        (form.depth, form.typed_depth) = (base["depth"].as_f64().unwrap_or(0.0), true);
+        (form.rpm, form.typed_rpm) = base["rpm"].as_f64().map_or((0.0, false), |v| (v, true));
+        (form.feed, form.typed_feed) = base["feed"].as_f64().map_or((0.0, false), |v| (v, true));
+        form.editing = Some(Edited { id: json!(id), title: name, base });
+        Ok(form)
     }
 
     /// What is missing before holes can be drilled, if anything.
@@ -814,25 +1084,32 @@ impl DrillForm {
 
     /// The `cam.op.drill` parameters: the group's centres and top, the depth its bottom asks for
     /// or the one typed, and the cycle. A speed or feed that was not typed is left to the command.
+    /// A drill operation being changed keeps its own holes, top and the rest as kept.
     pub fn params(&self) -> Value {
-        let (holes, top, depth, depth_to) = match self.picked() {
-            Some(group) => {
-                let (suited, to) = drill_depth(group);
-                (json!(group.holes), json!(group.top), if self.typed_depth { self.depth } else { suited }, to)
-            }
-            None => (json!([]), Value::Null, self.depth, "tip"),
-        };
         let cycle = match word(&CYCLES, self.cycle) {
             "drill" => json!({"type": "drill", "dwell": 0.0}),
             pecking => json!({"type": pecking, "peck": self.peck}),
         };
-        let mut drill = json!({"holes": holes, "top": top, "depth": depth, "depth_to": depth_to, "cycle": cycle});
-        if self.typed_rpm {
-            drill["rpm"] = json!(self.rpm);
-        }
-        if self.typed_feed {
-            drill["feed"] = json!(self.feed);
-        }
+        let mut drill = match (&self.editing, self.picked()) {
+            (Some(edited), _) => {
+                let mut kept = edited.base.clone();
+                // A plain cycle's dwell stays as kept; the form does not show it.
+                let plain = cycle["type"] == "drill" && kept["cycle"]["type"] == "drill";
+                kept["depth"] = json!(self.depth);
+                if !plain {
+                    kept["cycle"] = cycle;
+                }
+                kept
+            }
+            (None, Some(group)) => {
+                let (suited, to) = drill_depth(group);
+                let depth = if self.typed_depth { self.depth } else { suited };
+                json!({"holes": group.holes, "top": group.top, "depth": depth, "depth_to": to, "cycle": cycle})
+            }
+            (None, None) => json!({"holes": [], "top": null, "depth": self.depth, "depth_to": "tip", "cycle": cycle}),
+        };
+        set_or_clear(&mut drill, "rpm", self.typed_rpm.then_some(self.rpm));
+        set_or_clear(&mut drill, "feed", self.typed_feed.then_some(self.feed));
         json!({
             "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
             "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
@@ -843,23 +1120,26 @@ impl DrillForm {
     /// Finds the setup's holes and works the drilling out, when the design or a field changed,
     /// and shows what was not typed as the holes and the tool give it.
     fn refresh(&mut self, app: &SolveApp) {
-        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
-        if self.found.refresh(app, &json!(setup), || manufacture_holes(&app.session, &setup)) {
-            // Other holes: start from their largest group again.
-            (self.group, self.suited_to) = (0, None);
-        }
-        if self.group >= self.groups().len() {
-            self.group = 0;
-        }
-        if self.suited_to != Some(self.group) {
-            // Another group: its own depth, and the tool that suits it unless one was picked.
-            (self.suited_to, self.typed_depth) = (Some(self.group), false);
-            if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
-                self.tool = self.fitting_tool(diameter);
+        // An operation being changed keeps its holes: nothing is looked for or suited to them.
+        if self.editing.is_none() {
+            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            if self.found.refresh(app, &json!(setup), || manufacture_holes(&app.session, &setup)) {
+                // Other holes: start from their largest group again.
+                (self.group, self.suited_to) = (0, None);
             }
-        }
-        if let Some(suited) = self.picked().map(|group| drill_depth(group).0).filter(|_| !self.typed_depth) {
-            self.depth = suited;
+            if self.group >= self.groups().len() {
+                self.group = 0;
+            }
+            if self.suited_to != Some(self.group) {
+                // Another group: its own depth, and the tool that suits it unless one was picked.
+                (self.suited_to, self.typed_depth) = (Some(self.group), false);
+                if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
+                    self.tool = self.fitting_tool(diameter);
+                }
+            }
+            if let Some(suited) = self.picked().map(|group| drill_depth(group).0).filter(|_| !self.typed_depth) {
+                self.depth = suited;
+            }
         }
         if !self.typed_peck {
             self.peck = self.tools.get(self.tool).map_or(self.peck, |tool| tool.diameter);
@@ -883,10 +1163,15 @@ impl DrillForm {
     /// or the command refuses.
     pub fn accept(mut self, app: &mut SolveApp) -> Option<DrillForm> {
         self.refresh(app);
-        if self.missing().is_some() || self.picked().is_none() || self.worked.result.is_err() {
+        if self.missing().is_some() || (self.editing.is_none() && self.picked().is_none()) || self.worked.result.is_err() {
             return Some(self);
         }
-        match app.run("cam.op.drill", self.params()) {
+        let mut params = self.params();
+        let made = match &self.editing {
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "drill": params["drill"].take()})),
+            None => app.run("cam.op.drill", params),
+        };
+        match made {
             Ok(_) => None,
             Err(why) => {
                 self.error = Some(why);
@@ -907,14 +1192,23 @@ impl DrillForm {
         let hole_widths: Vec<f64> = self.groups().iter().map(|group| group.diameter).collect();
         let tool_widths: Vec<f64> = self.tools.iter().map(|tool| tool.diameter).collect();
         let missing = self.missing();
-        let ready = missing.is_none() && self.picked().is_some() && self.worked.result.is_ok();
+        let ready = missing.is_none() && (self.editing.is_some() || self.picked().is_some()) && self.worked.result.is_ok();
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
-        // How the depth is measured, for the holes picked.
+        // How the depth is measured: for the holes picked, or as the operation being changed keeps it.
         let past = format_length(BREAKTHROUGH, units, decimals);
-        let measured = self.picked().map(|group| match group.bottom {
-            HoleBottom::Through => solidcraft_ui_text::format("manufacture.drill_depth_through", &[("past", &past)]),
-            HoleBottom::Point => tr("manufacture.drill_depth_point").to_string(),
-            HoleBottom::Flat => tr("manufacture.drill_depth_flat").to_string(),
+        let measured = match &self.editing {
+            Some(edited) if edited.base["depth_to"] == "full_diameter" => Some(tr("manufacture.drill_depth_point").to_string()),
+            Some(_) => Some(tr("manufacture.drill_depth_tip").to_string()),
+            None => self.picked().map(|group| match group.bottom {
+                HoleBottom::Through => solidcraft_ui_text::format("manufacture.drill_depth_through", &[("past", &past)]),
+                HoleBottom::Point => tr("manufacture.drill_depth_point").to_string(),
+                HoleBottom::Flat => tr("manufacture.drill_depth_flat").to_string(),
+            }),
+        };
+        // The holes of an operation being changed: how many it has.
+        let kept_holes = self.editing.as_ref().map(|edited| {
+            let count = edited.base["holes"].as_array().map_or(0, Vec::len).to_string();
+            solidcraft_ui_text::format("manufacture.drill_holes_kept", &[("count", &count)])
         });
         // The setup picked is the one the viewport draws, so the holes are seen on its own stock.
         if self.drawn_setup != Some(self.setup)
@@ -924,17 +1218,25 @@ impl DrillForm {
             self.drawn_setup = Some(self.setup);
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_drill"), "hole", tr("cmd.cam_op_drill"))
+        let (title, ok) = window_words(&self.editing, "cmd.cam_op_drill");
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_drill"), "hole", &title)
             .placed(pivot, at)
             .fields()
-            .actions(tr("ui.create"), tr("ui.cancel"), None)
+            .actions(ok, tr("ui.cancel"), None)
             .show(ctx, ready, |ui| {
                 if let Some(missing) = missing {
                     ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_drill_missing"));
                     return;
                 }
-                ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_drill_setup", &mut self.setup, &setup_labels);
-                if group_labels.is_empty() {
+                if let (Some(kept), Some(setup)) = (&kept_holes, setup_labels.first()) {
+                    // An operation stays in its setup and on its holes.
+                    ui_kit::value_row(ui, tr("manufacture.field_setup"), setup);
+                    ui_kit::value_row(ui, tr("manufacture.drill_holes"), kept);
+                } else {
+                    ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_drill_setup", &mut self.setup, &setup_labels);
+                }
+                if kept_holes.is_some() {
+                } else if group_labels.is_empty() {
                     // Why no holes could be looked for, or that there are none to drill from here.
                     match self.found.trouble().filter(|why| !why.is_empty()) {
                         Some(why) => refusal(ui, Some(why)),
@@ -943,12 +1245,14 @@ impl DrillForm {
                         }
                     }
                     return;
+                } else {
+                    ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_drill_holes", &mut self.group, &group_labels);
                 }
-                ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_drill_holes", &mut self.group, &group_labels);
                 let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_drill_tool", &mut self.tool, &tool_labels);
                 self.picked_tool |= self.tool != tool;
-                if hole_widths.get(self.group).zip(tool_widths.get(self.tool)).is_some_and(|(hole, tool)| *tool > hole + 1e-6) {
+                if kept_holes.is_none() && hole_widths.get(self.group).zip(tool_widths.get(self.tool)).is_some_and(|(hole, tool)| *tool > hole + 1e-6)
+                {
                     ui_kit::status_line(ui, tr("manufacture.drill_tool_wider"), ui_kit::StatusTone::Warning);
                 }
                 ui_kit::choice_row(ui, tr("manufacture.drill_cycle"), "manufacture_drill_cycle", &mut self.cycle, &cycles);
@@ -971,7 +1275,7 @@ impl DrillForm {
                     ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_drill_engine_note"));
                 }
                 if ready {
-                    ui_kit::text(ui, tr("manufacture.preview_note"), ui_kit::Text::Note("manufacture_drill_preview_note"));
+                    ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_drill_preview_note"));
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });
@@ -1150,6 +1454,25 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         _ => Dialog::Post(PostForm::new(app)),
     });
     true
+}
+
+/// Opens the form that changes a tool, a setup or an operation (the Browser's Edit, or a double
+/// click on its row). What has no form, or is of a kind its form does not show, says so on the
+/// status line.
+pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
+    let form = match target {
+        Target::Tool(number) => ToolForm::edit(app, *number).map(Dialog::Tool),
+        Target::Setup(id) => SetupForm::edit(app, id).map(Dialog::Setup),
+        Target::Operation(id) => kept_operation(app, id).and_then(|(.., kind, _)| match kind.as_str() {
+            "face" => FaceForm::edit(app, id).map(Dialog::Face),
+            "drill" => DrillForm::edit(app, id).map(Dialog::Drill),
+            _ => Err(tr("manufacture.edit_unsupported_operation").to_string()),
+        }),
+    };
+    match form {
+        Ok(form) => app.manufacture_workspace.dialog = Some(form),
+        Err(why) => app.set_status(why, true),
+    }
 }
 
 /// The open form, if any. Called once a frame. One command's form is open at a time: a form
