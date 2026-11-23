@@ -1485,7 +1485,7 @@ fn chamfer_breaks_the_top_edge_and_keeps_only_what_is_typed() {
     // Nothing was typed, so only the direction is kept.
     assert_eq!(
         data(&mut h)["setups"][0]["operations"][0]["operation"],
-        json!({"kind": "chamfer", "chamfer": {"width": null, "tip_below": null, "top": null, "direction": "climb", "lead": null, "rpm": null, "feed": null}})
+        json!({"kind": "chamfer", "chamfer": {"width": null, "tip_below": null, "top": null, "edges": "outside", "direction": "climb", "lead": null, "rpm": null, "feed": null}})
     );
     let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
     assert_eq!((made["numbers"]["z"].as_f64(), made["numbers"]["offset"].as_f64()), (Some(-2.5), Some(1.0)));
@@ -1787,4 +1787,43 @@ fn contour_goes_round_the_inside_of_openings_found_on_the_model() {
         (contour["side"].clone(), contour["openings"].clone(), contour["leave"].clone()),
         (json!("inside"), json!([[-14.0, 0.0]]), json!(0.2))
     );
+}
+
+#[test]
+fn chamfer_breaks_all_the_top_edges_when_asked() {
+    use std::f64::consts::PI;
+    let mut h = harness();
+    // The block (60 x 40 x 20) with a pocket 30 x 20, 6 deep, and a hole of 8 through it, and a
+    // 10 mm, 90 degree chamfer mill (T1).
+    block(&mut h);
+    h.app.run("solid.box", json!({"length": 30, "width": 20, "height": 6, "corner": [5, 10, 14], "operation": "cut"})).unwrap();
+    h.app.run("solid.cylinder", json!({"diameter": 8, "height": 30, "base": [48, 20, -5], "operation": "cut"})).unwrap();
+    add_tool(&mut h, "chamfer_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.chamfer");
+    h.frames(3);
+    // The outside edge unless asked: 1 outside the block's wall, 200 and the four corners round.
+    let round = |h: &mut Harness| chamfer_form(h).worked.get().and_then(|(_, preview)| preview.numbers["round"].as_f64()).unwrap();
+    assert_eq!(chamfer_form(&mut h).edges, 0);
+    assert!((round(&mut h) - (200.0 + 2.0 * PI)).abs() < 1e-6);
+    assert!(h.widget(tr("manufacture.chamfer_note")).is_some() && h.widget(tr("manufacture.chamfer_edges")).is_some());
+    // All the top edges: 1 inside the pocket's wall as well (28 x 18: 92) and 1 inside the hole
+    // (a circle of radius 3).
+    chamfer_form(&mut h).edges = 1;
+    h.frames(3);
+    assert!((round(&mut h) - (200.0 + 2.0 * PI + 92.0 + 6.0 * PI)).abs() < 1e-6, "{}", round(&mut h));
+    assert!(h.widget(tr("manufacture.chamfer_all_note")).is_some() && h.widget(tr("manufacture.chamfer_note")).is_none());
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"].clone();
+    assert_eq!((kept["edges"].clone(), kept["width"].clone(), kept["rpm"].clone()), (json!("all"), json!(null), json!(null)));
+    let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // Changed from its row it is still all the edges, and can go back to the outside one.
+    row_menu(&mut h, "Chamfer 1 (T1)", "manufacture.edit");
+    assert_eq!((open(&h), chamfer_form(&mut h).edges), ("chamfer", 1));
+    chamfer_form(&mut h).edges = 0;
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"]["edges"], "outside");
 }

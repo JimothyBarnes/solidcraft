@@ -2037,3 +2037,46 @@ fn a_setups_openings_are_listed_for_an_inside_contour() {
     assert!(refused(&mut s, "cam.setup.openings", json!({"id": "setup-9"})).contains("no setup 'setup-9'"));
     assert!(refused(&mut s, "cam.setup.openings", json!({"id": "setup-1", "z": 1})).contains("z"));
 }
+
+#[test]
+fn a_chamfer_of_all_the_edges_breaks_the_rims_of_the_openings_read_from_the_model() {
+    use std::f64::consts::PI;
+    // The plate (in the WCS X -50 to 50, Y -40 to 40, its top at Z -1) with a pocket 50 x 40,
+    // 8 deep, about (-15, 0) and a round post of 12 standing in its middle; a hole of 8 through
+    // the plate about (30, 20); and a recess 10 x 10, 1 deep, about (30, -20), which is not as
+    // deep as the tool's point goes (1.5 below the edge).
+    let mut s = plate();
+    boxed(&mut s, [10.0, 20.0, 12.0], [50.0, 40.0, 8.0], "cut");
+    run(&mut s, "solid.cylinder", json!({"diameter": 12, "height": 8, "base": [35, 40, 12], "axis": "Z", "operation": "join", "targets": ["Plate"]}));
+    run(&mut s, "solid.cylinder", json!({"diameter": 8, "height": 30, "base": [80, 60, -5], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    boxed(&mut s, [75.0, 15.0, 19.0], [10.0, 10.0, 1.0], "cut");
+    run(&mut s, "cam.tool.create", json!({"tool": chamfer10()}));
+    // The outside edge alone, as before: 360 round the plate and a quarter turn of 1 at each
+    // corner; the post in the pocket is said to be left sharp.
+    assert_eq!(run(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 360.0 + 2.0 * PI), "{}", t["numbers"]);
+    assert!(
+        t["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().is_some_and(|note| note.contains("left sharp: a chamfer goes round the outside only")))
+    );
+    // All the edges: 1 inside the pocket's wall (48 x 38: 172), 1 outside the post (a circle of
+    // radius 7), 1 inside the hole (a circle of radius 3); the recess is left sharp, and said.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "all"}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert!(about(&n["round"], 360.0 + 2.0 * PI + 172.0 + 14.0 * PI + 6.0 * PI), "{n}");
+    assert_eq!((n["entries"].as_array().map(Vec::len), n["z"].as_f64()), (Some(4), Some(-2.5)), "{n}");
+    let notes: Vec<&str> = t["notes"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert_eq!(notes, ["1 opening(s) with something in the way of the tool's point, which goes 1.50 mm below the edge, left sharp"]);
+    // The simulation takes every one of them as meant: nothing is cut into the part.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.2}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // What it keeps is what it was given, and a word that is no choice of edges is refused.
+    let kept = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["operation"]["chamfer"].clone();
+    assert_eq!(kept["edges"], "all");
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "inside"}})).contains("unknown variant"));
+}

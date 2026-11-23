@@ -219,6 +219,50 @@ impl<'a> Finder<'a> {
         Ok(())
     }
 
+    /// The openings in the bodies' top whose rims a chamfer breaks (decision 0018 of the CAM
+    /// work, all the edges): the air in every hole of a cut face of the bodies' section at the
+    /// height `at`, with what stands in it as its holes, that is open from `tip`, the height of
+    /// the tool's point, up to above the bodies ([`Finder::open_above`]); and how many were left
+    /// out because something is in the way there.
+    pub(super) fn rims(&mut self, at: f64, tip: f64) -> Result<(Vec<Region2>, usize), String> {
+        let faces = self.faces_above(at - self.hair)?;
+        let airs: Vec<Region2> = faces.iter().flat_map(|rings| rings.iter().skip(1)).map(|wall| air_within(faces, wall)).collect();
+        if airs.len() > MAX_FOUND_POCKETS {
+            return Err(format!("the part has more than {MAX_FOUND_POCKETS} openings in its top"));
+        }
+        let mut open = Vec::with_capacity(airs.len());
+        for air in &airs {
+            if self.open_above(air, tip)? {
+                open.push(air.clone());
+            }
+        }
+        let left_out = airs.len() - open.len();
+        Ok((open, left_out))
+    }
+
+    /// Whether the opening whose air is `air` is open from the height `tip` up to above the
+    /// bodies. Exactly: the air, shrunk by a hair, as a prism between those heights meets none
+    /// of them. A step, a boss or a floor in the opening that high is in the way of the whole
+    /// of it.
+    fn open_above(&self, air: &Region2, tip: f64) -> Result<bool, String> {
+        let (cut, height) = (self.plane.offset(tip + self.hair), self.top - tip);
+        let within = solidcraft_cam::offset_region(air, self.hair).map_err(|e| format!("an opening's rim: {e}"))?;
+        if within.is_empty() || height <= 2.0 * self.hair {
+            return Ok(false);
+        }
+        let prisms = solidcraft_kernel::extrude(&cut, &within, self.hair, height).map_err(|e| format!("checking an opening's rim: {e}"))?;
+        for &(name, body) in self.bodies {
+            for prism in &prisms {
+                let met = solidcraft_kernel::boolean(prism, body, BoolOp::Intersect)
+                    .map_err(|e| format!("checking an opening's rim against body '{name}': {e}"))?;
+                if met.is_some() {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Whether anything is seen above `pocket` from places a hair inside its wall and round its
     /// islands, looking straight up from just above its floor: a sample, for the list.
     fn seen_above(&self, pocket: &Pocket) -> bool {

@@ -6,9 +6,9 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferOp, ContourOp, ContourSide, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER,
-    MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock,
-    Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
+    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferEdges, ChamferOp, ContourOp, ContourSide, DrillOp, FaceOp, LengthUnit,
+    MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, SafeHeights,
+    Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
 use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
@@ -83,7 +83,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring"),
     CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpChamferParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge"),
+        .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), edges?: outside | all, direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge; with edges all, round the inside of every opening in the part's top and round what stands in it as well, but for an opening too narrow for the tool or not open as far down as its point, which is left sharp and said"),
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
@@ -582,6 +582,25 @@ fn pockets_of(
     .map_err(said)
 }
 
+/// The openings in the part's top whose rims a chamfer of all the edges breaks (decision 0018 of
+/// the CAM work), in the setup's WCS: the air in each, read at the height `at` and open down to
+/// `tip`, where the tool's point goes; and how many were left out because they are not.
+fn rims_of(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    at: f64,
+    tip: f64,
+) -> std::result::Result<(Vec<solidcore_record::Region2>, usize), String> {
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).rims(at, tip).map_err(|e| bad(cmd, e))
+    })
+    .map_err(said)
+}
+
 /// The openings an inside contour goes round (decision 0021 of the CAM work), in the setup's WCS,
 /// one for each of `points` in their order, and the height their walls were read at: `bottom`
 /// when given (the part's own bottom when it is under that), else the floor under the points,
@@ -988,7 +1007,22 @@ fn work(
             // whether or not it has the chamfer.
             let wall = chamfer.wall_height(tool, &placement).map_err(failed)?;
             let (_, outline) = outline_at(s, cmd, setup, &placement, Some(wall - CHAMFER_WALL_BELOW)).map_err(|e| bad(cmd, of(op, e)))?;
-            let done = chamfer.toolpath(start, tool, &placement, material, &outline).map_err(failed)?;
+            let done = if chamfer.edges == ChamferEdges::All {
+                // The rims of the openings in the part's top too, each read at the same height
+                // and open as far down as the tool's point goes.
+                let tip = chamfer.tip_height(tool, &placement).map_err(failed)?;
+                let (openings, left_out) = rims_of(s, cmd, setup, &placement, wall - CHAMFER_WALL_BELOW, tip).map_err(|e| bad(cmd, of(op, e)))?;
+                let mut done = chamfer.toolpath_round(start, tool, &placement, material, &outline, &openings).map_err(failed)?;
+                if left_out > 0 {
+                    done.notes.push(format!(
+                        "{left_out} opening(s) with something in the way of the tool's point, which goes {:.2} mm below the edge, left sharp",
+                        done.top - tip
+                    ));
+                }
+                done
+            } else {
+                chamfer.toolpath(start, tool, &placement, material, &outline).map_err(failed)?
+            };
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "z": done.z, "width": done.width,
                 "leg": done.leg, "offset": done.offset, "round": done.round, "entries": done.entries, "leads": done.leads

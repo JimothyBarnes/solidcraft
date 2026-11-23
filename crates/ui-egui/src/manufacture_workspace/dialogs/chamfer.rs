@@ -19,12 +19,17 @@ use crate::ui_kit;
 const WIDTH: f64 = 0.5;
 const TIP_BELOW: f64 = 1.0;
 
-/// Chamfer: the top outside edge of the part.
+/// Which edges are broken: the command's word and the label.
+const EDGES: [(&str, &str); 2] = [("outside", "manufacture.chamfer_edges_outside"), ("all", "manufacture.chamfer_edges_all")];
+
+/// Chamfer: the top outside edge of the part, or all its top edges.
 pub(crate) struct ChamferForm {
     setups: Vec<SetupChoice>,
     tools: Vec<ToolChoice>,
     pub setup: usize,
     pub tool: usize,
+    /// Which of [`EDGES`]: the outside edge alone, or the rims of the openings in the top too.
+    pub edges: usize,
     pub direction: usize,
     /// How wide the chamfer is seen from above, mm: half a millimetre until it is typed.
     pub width: f64,
@@ -56,6 +61,7 @@ impl ChamferForm {
             tools: manufacture_tools(&app.session.doc, "chamfer"),
             setup,
             tool: 0,
+            edges: 0,
             direction: 0,
             width: WIDTH,
             typed_width: false,
@@ -84,6 +90,7 @@ impl ChamferForm {
         form.setups = vec![setup];
         form.setup = 0;
         form.tool = form.tools.iter().position(|t| t.number == tool).unwrap_or(0);
+        form.edges = EDGES.iter().position(|e| Some(e.0) == base["edges"].as_str()).unwrap_or(0);
         form.direction = DIRECTIONS.iter().position(|d| Some(d.0) == base["direction"].as_str()).unwrap_or(0);
         (form.width, form.typed_width) = number("width").map_or((WIDTH, false), |v| (v, true));
         (form.tip_below, form.typed_tip_below) = number("tip_below").map_or((TIP_BELOW, false), |v| (v, true));
@@ -110,6 +117,13 @@ impl ChamferForm {
     /// its edge, its arcs) stays.
     pub fn params(&self) -> Value {
         let mut chamfer = self.editing.as_ref().map_or_else(|| json!({}), |edited| edited.base.clone());
+        // The outside edge alone is what a chamfer is unless it says otherwise: only the other
+        // choice is written.
+        if word(&EDGES, self.edges) == "all" {
+            chamfer["edges"] = json!("all");
+        } else if let Some(kept) = chamfer.as_object_mut() {
+            kept.remove("edges");
+        }
         chamfer["direction"] = json!(word(&DIRECTIONS, self.direction));
         set_or_clear(&mut chamfer, "width", self.typed_width.then_some(self.width));
         set_or_clear(&mut chamfer, "tip_below", self.typed_tip_below.then_some(self.tip_below));
@@ -168,6 +182,8 @@ impl ChamferForm {
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
         let directions = labels(&DIRECTIONS);
+        let edges = labels(&EDGES);
+        let all = word(&EDGES, self.edges) == "all";
         let missing = self.missing();
         let ready = missing.is_none() && self.worked.result.is_ok();
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
@@ -201,6 +217,7 @@ impl ChamferForm {
                     }
                 }
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_chamfer_tool", &mut self.tool, &tool_labels);
+                ui_kit::choice_row(ui, tr("manufacture.chamfer_edges"), "manufacture_chamfer_edges", &mut self.edges, &edges);
                 ui_kit::choice_row(ui, tr("manufacture.contour_direction"), "manufacture_chamfer_direction", &mut self.direction, &directions);
                 if ui_kit::row(ui, tr("manufacture.chamfer_width"), |ui| ui_kit::length_field(ui, &mut self.width, units, decimals)).changed() {
                     self.typed_width = true;
@@ -221,7 +238,8 @@ impl ChamferForm {
                 for note in self.worked.get().map(|(_, preview)| preview.notes.as_slice()).unwrap_or_default() {
                     ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_chamfer_engine_note"));
                 }
-                ui_kit::text(ui, tr("manufacture.chamfer_note"), ui_kit::Text::Note("manufacture_chamfer_note"));
+                let note = if all { "manufacture.chamfer_all_note" } else { "manufacture.chamfer_note" };
+                ui_kit::text(ui, tr(note), ui_kit::Text::Note("manufacture_chamfer_note"));
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_chamfer_preview_note"));
                 }
