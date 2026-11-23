@@ -643,3 +643,68 @@ fn a_shank_wider_than_the_cutter_and_a_holder_are_checked_to_their_width() {
         let _ = stock().cut(1, &path(p(20.0, 30.0, 5.0), vec![feed(20.0, 30.0, -15.0), rapid(20.0, 30.0, 5.0)]), &odd);
     }
 }
+
+#[test]
+fn a_tools_shape_is_what_the_simulation_cuts_and_checks_with() {
+    let near = |got: &[[f64; 2]], want: &[[f64; 2]]| {
+        got.len() == want.len() && got.iter().zip(want).all(|(g, w)| (g[0] - w[0]).abs() < 1e-9 && (g[1] - w[1]).abs() < 1e-9)
+    };
+    // A 10 mm flat end mill with 30 of flutes, 40 out of its holder: a flat end, a side, and a
+    // shank as wide up to the holder, which has no shape.
+    let shape = ToolShape::of(&flat10());
+    assert!(near(&shape.cutting, &[[0.0, 0.0], [5.0, 0.0], [5.0, 30.0]]), "{:?}", shape.cutting);
+    assert!(near(&shape.shank, &[[5.0, 30.0], [5.0, 40.0]]) && shape.holder.is_empty(), "{:?} {:?}", shape.shank, shape.holder);
+    // A 90 degree chamfer mill: a cone from its point to its full width 5 up, then its side.
+    let shape = ToolShape::of(&tool(ToolKind::ChamferMill, 10.0, 0.0, 90.0));
+    assert!(near(&shape.cutting, &[[0.0, 0.0], [5.0, 5.0], [5.0, 30.0]]), "{:?}", shape.cutting);
+    // With a flat of 2 at its tip the cone starts 1 out and is 4 high.
+    let mut flat_tip = tool(ToolKind::ChamferMill, 10.0, 0.0, 90.0);
+    flat_tip.geometry.tip_diameter = 2.0;
+    assert!(near(&ToolShape::of(&flat_tip).cutting, &[[0.0, 0.0], [1.0, 0.0], [5.0, 4.0], [5.0, 30.0]]));
+    // A ball: a quarter circle in eight pieces from the axis to its side, never outside it.
+    let shape = ToolShape::of(&tool(ToolKind::BallEndMill, 10.0, 5.0, 0.0));
+    assert_eq!(shape.cutting.len(), 10, "{:?}", shape.cutting);
+    assert!(
+        shape.cutting[..9].iter().all(|at| ((at[0]).hypot(5.0 - at[1]) - 5.0).abs() < 1e-9) && near(&shape.cutting[8..], &[[5.0, 5.0], [5.0, 30.0]])
+    );
+    // A bull nose with a corner of 2: flat to 3 out, then the corner.
+    let shape = ToolShape::of(&tool(ToolKind::BullNoseEndMill, 10.0, 2.0, 0.0));
+    assert!(near(&shape.cutting[..2], &[[0.0, 0.0], [3.0, 0.0]]) && near(&shape.cutting[9..], &[[5.0, 2.0], [5.0, 30.0]]), "{:?}", shape.cutting);
+    // A shank wider than the cutter from a shoulder 35 up, and a holder of two pieces: a cone
+    // from 20 to 40 across over 15, then a cylinder of 40 for 30.
+    let mut held = flat10();
+    held.geometry.shank_diameter = 12.0;
+    held.geometry.shoulder_length = 35.0;
+    held.holder.segments = vec![
+        HolderSegment { length: 15.0, lower_diameter: 20.0, upper_diameter: 40.0 },
+        HolderSegment { length: 30.0, lower_diameter: 40.0, upper_diameter: 40.0 },
+    ];
+    let shape = ToolShape::of(&held);
+    assert!(near(&shape.shank, &[[5.0, 30.0], [5.0, 35.0], [6.0, 35.0], [6.0, 40.0]]), "{:?}", shape.shank);
+    assert!(near(&shape.holder, &[[10.0, 40.0], [20.0, 55.0], [20.0, 85.0]]), "{:?}", shape.holder);
+    assert!(Simulation::cuts_with(&held).is_ok());
+    let no = Simulation::cuts_with(&tool(ToolKind::Tap, 6.0, 0.0, 0.0)).unwrap_err().to_string();
+    assert!(no.contains("cuts a thread, which a field of heights can't show"), "{no}");
+    // A tap is drawn as a cylinder, though the simulation can't cut with it; a tool with no
+    // diameter is nothing; and no number makes it panic.
+    assert!(near(&ToolShape::of(&tool(ToolKind::Tap, 6.0, 0.0, 0.0)).cutting, &[[0.0, 0.0], [3.0, 0.0], [3.0, 30.0]]));
+    assert_eq!(ToolShape::of(&tool(ToolKind::FlatEndMill, 0.0, 0.0, 0.0)), ToolShape::default());
+    for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1e300, 1e300, -1.0, 0.0, 5e-324] {
+        for field in 0..8 {
+            let mut odd = held.clone();
+            match field {
+                0 => odd.geometry.diameter = v,
+                1 => odd.geometry.corner_radius = v,
+                2 => odd.geometry.flute_length = v,
+                3 => odd.geometry.shoulder_length = v,
+                4 => odd.geometry.shank_diameter = v,
+                5 => odd.geometry.tip_angle = v,
+                6 => odd.holder.stick_out = v,
+                _ => odd.holder.segments[0].length = v,
+            }
+            let shape = ToolShape::of(&odd);
+            let points = shape.cutting.iter().chain(&shape.shank).chain(&shape.holder);
+            assert!(points.clone().all(|at| at[0].is_finite() && at[1].is_finite() && at[0] >= 0.0 && at[1] >= 0.0), "{v} in {field}: {shape:?}");
+        }
+    }
+}

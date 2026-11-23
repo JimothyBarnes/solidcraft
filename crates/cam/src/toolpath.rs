@@ -2,7 +2,7 @@
 //! with the tool tip as the controlled point. Toolpaths are derived from the design and the
 //! operation's parameters, never saved in the design.
 
-use std::f64::consts::{FRAC_PI_2, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use serde::{Deserialize, Serialize};
 use solidcore_record::{Vec2, Vec3};
@@ -178,6 +178,29 @@ impl Stats {
         self.feed_minutes + self.dwell_minutes + rapid
     }
 }
+
+/// A toolpath as far as the tool has come part of the way along it ([`Toolpath::upto`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Partway {
+    /// The moves made so far as plain moves (holes written out), the last one cut short where
+    /// the tool is.
+    pub toolpath: Toolpath,
+    /// Where the tool's tip is.
+    pub at: Vec3,
+    /// How far along the tool is and how long the whole toolpath is, mm, as
+    /// [`Toolpath::length`] measures.
+    pub along: f64,
+    pub length: f64,
+    /// The time spent so far cutting at feed and dwelling, minutes (rapids take none here).
+    pub minutes: f64,
+    /// The last tool changed to so far, if any.
+    pub tool: Option<u32>,
+}
+
+/// An arc shorter than this in its plane is cut short as a line: its two ends are too near one
+/// another for an arc between them not to be read as a full circle. Well above
+/// [`FULL_CIRCLE_CHORD`], well below anything a machine resolves.
+const SHORTEST_PART_OF_AN_ARC: f64 = 1e-4;
 
 /// How one straight piece of a drawn toolpath moves ([`Toolpath::drawn`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,6 +460,87 @@ impl Toolpath {
     pub fn stats(&self) -> Result<Stats> {
         let path = self.expanded(&CycleMotion::default())?;
         path.stats_of_plain_moves()
+    }
+
+    /// How long the path is, mm: every rapid as a straight line, every cut along its line or
+    /// arc, every hole as the moves it makes with the generic control's cycle distances
+    /// ([`CycleMotion::default`]).
+    pub fn length(&self) -> Result<f64> {
+        let stats = self.stats()?;
+        Ok(stats.feed_length + stats.rapid_length)
+    }
+
+    /// The toolpath as far as `along` mm of the way along it (as [`Toolpath::length`] measures;
+    /// below 0 is the start, past the end the whole of it): the moves made by then, the one the
+    /// tool is in cut short where it is (a line at the point reached; an arc about the same
+    /// centre, a helix as high as it has come, in two pieces when it is more than half a turn),
+    /// and where the tool is. Holes are the plain moves they make. What takes no distance (a
+    /// tool change, the spindle, a dwell) is there once the tool has reached where it happens.
+    pub fn upto(&self, along: f64) -> Result<Partway> {
+        if along.is_nan() {
+            return Err(Error::BadValue("how far along a toolpath must be a number".into()));
+        }
+        let path = self.expanded(&CycleMotion::default())?;
+        let length = path.length()?;
+        let along = along.clamp(0.0, length);
+        let lerp = |a: Vec3, b: Vec3, t: f64| Vec3 { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y), z: a.z + t * (b.z - a.z) };
+        let (mut done, mut minutes, mut at, mut tool) = (0.0, 0.0, path.start, None);
+        let mut moves = Vec::new();
+        for (index, (from, m)) in path.walk().enumerate() {
+            // How long this move is, and its arc when it is one.
+            let (len, arc) = match *m {
+                Move::Rapid { to } | Move::Linear { to, .. } => (distance(from, to), None),
+                Move::Arc { to, center, plane, direction, .. } => {
+                    let arc = ArcGeom::new(from, to, center, plane, direction).map_err(|reason| Error::BadMove { index, reason })?;
+                    (arc.length(), Some(arc))
+                }
+                _ => (0.0, None),
+            };
+            if done + len <= along {
+                // Made whole.
+                match *m {
+                    Move::Linear { feed, .. } | Move::Arc { feed, .. } => minutes += len / feed,
+                    Move::Dwell { seconds } => minutes += seconds / 60.0,
+                    Move::ToolChange { tool: number } => tool = Some(number),
+                    _ => {}
+                }
+                moves.push(*m);
+                at = m.end(from);
+                done += len;
+                continue;
+            }
+            // The tool is in this move: the share of it made so far.
+            let t = (along - done) / len;
+            if t > 0.0 {
+                match (*m, arc) {
+                    (Move::Rapid { to }, _) => {
+                        at = lerp(from, to, t);
+                        moves.push(Move::Rapid { to: at });
+                    }
+                    (Move::Linear { to, feed }, _) => {
+                        at = lerp(from, to, t);
+                        moves.push(Move::Linear { to: at, feed });
+                        minutes += t * len / feed;
+                    }
+                    (Move::Arc { center, plane, direction, feed, .. }, Some(arc)) => {
+                        at = arc.point(t);
+                        let turned = t * arc.sweep.abs();
+                        if turned * arc.radius <= SHORTEST_PART_OF_AN_ARC {
+                            moves.push(Move::Linear { to: at, feed });
+                        } else if turned <= PI {
+                            moves.push(Move::Arc { to: at, center, plane, direction, feed });
+                        } else {
+                            moves.push(Move::Arc { to: arc.point(0.5 * t), center, plane, direction, feed });
+                            moves.push(Move::Arc { to: at, center, plane, direction, feed });
+                        }
+                        minutes += t * len / feed;
+                    }
+                    _ => {}
+                }
+            }
+            break;
+        }
+        Ok(Partway { toolpath: Toolpath { start: path.start, moves }, at, along, length, minutes, tool })
     }
 
     /// The toolpath as straight pieces for a picture: how each moves and its two ends, in order.

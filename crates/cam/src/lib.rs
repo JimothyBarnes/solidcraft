@@ -58,14 +58,14 @@ pub use post::{
     Arcs, BUILTIN_POSTS, Comments, Cycles, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, Sequences,
 };
 pub use sheet::{MAX_SHEET_PIECES, MAX_SHEET_ROWS, SetupSheet, SheetOperation, SheetTool};
-pub use sim::{BodyHit, BodyPart, CutReport, Gouge, HeightField, MAX_FIELD_CELLS, MAX_LISTED, MIN_CELL, RapidHit, Simulation};
+pub use sim::{BodyHit, BodyPart, CutReport, Gouge, HeightField, MAX_FIELD_CELLS, MAX_LISTED, MIN_CELL, RapidHit, Simulation, ToolShape};
 pub use tool::{
     CuttingData, Engagement, FeedWarning, Holder, HolderSegment, MAX_CUTTING_DATA, MAX_HOLDER_SEGMENTS, MAX_TOOLS, Overrides, SpeedsFeeds,
     TOOL_LIBRARY_FORMAT, Tool, ToolGeometry, ToolKind, ToolLibrary,
 };
 pub use toolpath::{
     ARC_RADIUS_TOLERANCE, ARC_RADIUS_TOLERANCE_INCH, ArcDirection, Coolant, Drawn, MAX_DWELL_SECONDS, MAX_FEED, MAX_MOVES, MAX_SPINDLE_RPM,
-    MAX_TOOL_NUMBER, Move, Plane, SpindleDirection, Stats, Toolpath,
+    MAX_TOOL_NUMBER, Move, Partway, Plane, SpindleDirection, Stats, Toolpath,
 };
 pub use units::{DEFAULT_TOLERANCE, LengthUnit, MAX_COORDINATE, MM_PER_INCH, Tolerance};
 

@@ -231,3 +231,108 @@ fn operations_one_after_another_with_the_same_tool_keep_it() {
     // Nothing at all, and changes alone, are as they were.
     assert_eq!(Toolpath::default().without_needless_changes(), Toolpath::default());
 }
+
+/// Down 4 at rapid, 10 along X at feed, a quarter turn of radius 10 about (0, 0) up to (0, 10),
+/// a full turn of radius 5 about (0, 5) falling 2 (a helix), and up 9 at rapid: 4 + 10 + 5 pi +
+/// hypot(10 pi, 2) + 9 long.
+fn tour() -> Toolpath {
+    Toolpath {
+        start: p(0.0, 0.0, 5.0),
+        moves: vec![
+            Move::ToolChange { tool: 3 },
+            Move::Spindle { rpm: 8_000.0, direction: SpindleDirection::Clockwise },
+            Move::Rapid { to: p(0.0, 0.0, 1.0) },
+            Move::Linear { to: p(10.0, 0.0, 1.0), feed: 500.0 },
+            Move::Dwell { seconds: 6.0 },
+            Move::Arc { to: p(0.0, 10.0, 1.0), center: p(0.0, 0.0, 1.0), plane: Plane::Xy, direction: ArcDirection::CounterClockwise, feed: 250.0 },
+            Move::Arc { to: p(0.0, 10.0, -1.0), center: p(0.0, 5.0, 1.0), plane: Plane::Xy, direction: ArcDirection::Clockwise, feed: 100.0 },
+            Move::Rapid { to: p(0.0, 10.0, 8.0) },
+            Move::SpindleStop,
+        ],
+    }
+}
+
+#[test]
+fn a_toolpath_is_cut_off_part_of_the_way_along() {
+    let tour = tour();
+    let helix = (10.0 * PI).hypot(2.0);
+    let length = 4.0 + 10.0 + 5.0 * PI + helix + 9.0;
+    assert!(close(tour.length().unwrap(), length));
+    let near = |a: Vec3, b: Vec3| (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9 && (a.z - b.z).abs() < 1e-9;
+    // At the start nothing has moved, but the tool is changed and the spindle on: they take no
+    // distance, and happen where the tool is.
+    let part = tour.upto(0.0).unwrap();
+    assert_eq!(part.toolpath.moves, tour.moves[..2]);
+    assert!(near(part.at, p(0.0, 0.0, 5.0)) && part.along == 0.0 && close(part.length, length) && part.minutes == 0.0 && part.tool == Some(3));
+    // 9 along: the rapid whole, and half of the line at feed (5 mm at 500 mm/min).
+    let part = tour.upto(9.0).unwrap();
+    assert_eq!(part.toolpath.moves[..3], tour.moves[..3]);
+    assert_eq!(part.toolpath.moves[3..], [Move::Linear { to: p(5.0, 0.0, 1.0), feed: 500.0 }]);
+    assert!(near(part.at, p(5.0, 0.0, 1.0)) && close(part.minutes, 0.01));
+    // Exactly at the line's end the dwell that follows has happened (6 s), the arc not begun.
+    let part = tour.upto(14.0).unwrap();
+    assert_eq!(part.toolpath.moves, tour.moves[..5]);
+    assert!(near(part.at, p(10.0, 0.0, 1.0)) && close(part.minutes, 0.02 + 0.1));
+    // Half the quarter turn: an arc about the same centre to 45 degrees.
+    let half = 10.0 * 0.5f64.sqrt();
+    let part = tour.upto(14.0 + 2.5 * PI).unwrap();
+    let Some(Move::Arc { to, center, direction, feed, .. }) = part.toolpath.moves.last().copied() else { panic!("{:?}", part.toolpath.moves.last()) };
+    assert!(near(to, p(half, half, 1.0)) && near(center, p(0.0, 0.0, 1.0)) && direction == ArcDirection::CounterClockwise && feed == 250.0);
+    assert!(near(part.at, to) && close(part.minutes, 0.12 + 2.5 * PI / 250.0));
+    // A hair into it the arc's two ends are too near one another for an arc: a line, as far.
+    let part = tour.upto(14.0 + 5e-5).unwrap();
+    assert!(
+        matches!(part.toolpath.moves.last(), Some(Move::Linear { to, .. }) if (to.x - 10.0).abs() < 1e-8 && (to.y - 5e-5).abs() < 1e-8),
+        "{:?}",
+        part.toolpath.moves.last()
+    );
+    // A quarter of the helix: clockwise about (0, 5) from (0, 10) to (5, 5), half a millimetre
+    // down. Three quarters: more than half a turn, so in two arcs, the first to (2.5 (1 +
+    // sqrt 2) ..: 135 degrees round), 0.75 down, then to (-5, 5), 1.5 down.
+    let before = 14.0 + 5.0 * PI;
+    let part = tour.upto(before + 0.25 * helix).unwrap();
+    assert_eq!(part.toolpath.moves.len(), 7);
+    assert!(near(part.at, p(5.0, 5.0, 0.5)), "{:?}", part.at);
+    let part = tour.upto(before + 0.75 * helix).unwrap();
+    assert_eq!(part.toolpath.moves.len(), 8);
+    let (Move::Arc { to: first, .. }, Move::Arc { to: second, .. }) = (part.toolpath.moves[6], part.toolpath.moves[7]) else { panic!("two arcs") };
+    let round = |degrees: f64| p(5.0 * degrees.to_radians().sin(), 5.0 + 5.0 * degrees.to_radians().cos(), 0.0);
+    assert!(near(first, Vec3 { z: 0.25, ..round(135.0) }) && near(second, p(-5.0, 5.0, -0.5)) && near(part.at, second), "{first:?} {second:?}");
+    // What was cut off is a toolpath in its own right, as long as it was cut off at, and ends
+    // where the tool is.
+    for along in [0.0, 3.0, 9.0, 14.0, 20.0, before + 1.0, before + 0.5 * helix, before + 0.99 * helix, length - 4.0, length] {
+        let part = tour.upto(along).unwrap();
+        part.toolpath.validate().unwrap();
+        assert!(close(part.toolpath.length().unwrap(), along), "{along}: {}", part.toolpath.length().unwrap());
+        let end = part.toolpath.walk().last().map_or(part.toolpath.start, |(from, m)| m.end(from));
+        assert!(near(end, part.at), "{along}");
+    }
+    // Past the end it is the whole toolpath; before the start, the start; no number, refused.
+    let whole = tour.upto(1e9).unwrap();
+    assert!(whole.toolpath == tour && near(whole.at, p(0.0, 10.0, 8.0)) && close(whole.along, length));
+    assert_eq!(tour.upto(-3.0).unwrap().toolpath.moves, tour.moves[..2]);
+    assert!(tour.upto(f64::NAN).is_err());
+    for along in [f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e300, 5e-324] {
+        let _ = tour.upto(along).unwrap();
+    }
+}
+
+#[test]
+fn a_hole_is_cut_off_as_the_moves_it_makes() {
+    // One hole pecked 9 deep from R 2 in pecks of 4, the tool starting 10 up: written out, and
+    // cut off part of the way down, the path is plain moves that end where the tool is.
+    let hole = Toolpath {
+        start: p(0.0, 0.0, 10.0),
+        moves: vec![Move::Drill { to: p(20.0, 0.0, -9.0), r: 2.0, retract: 2.0, cycle: DrillCycle::Peck { peck: 4.0 }, feed: 120.0 }],
+    };
+    let plain = hole.expanded(&CycleMotion::default()).unwrap();
+    let length = hole.length().unwrap();
+    assert!(close(length, plain.length().unwrap()) && length > 20.0 + 8.0 + 11.0);
+    // 20 across and 8 down at rapid, then 3 of the first peck.
+    let part = hole.upto(31.0).unwrap();
+    assert!(part.toolpath.moves.iter().all(|m| !matches!(m, Move::Drill { .. })));
+    assert!((part.at.x - 20.0).abs() < 1e-9 && (part.at.z + 1.0).abs() < 1e-9, "{:?}", part.at);
+    assert!(close(part.minutes, 3.0 / 120.0));
+    // All of it is the hole written out.
+    assert_eq!(hole.upto(length).unwrap().toolpath, plain);
+}

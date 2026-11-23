@@ -147,6 +147,81 @@ struct Disc {
     part: BodyPart,
 }
 
+/// A tool's shape for a picture, as the simulation cuts and checks with it: the outline that
+/// turns about the tool's axis, in three parts from the tip up, each a run of `[how far out, how
+/// far above the tip]`: what cuts, what does not above that (the neck and the shank, up to where
+/// the holder begins) and the holder. A part the tool does not have is empty.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ToolShape {
+    pub cutting: Vec<[f64; 2]>,
+    pub shank: Vec<[f64; 2]>,
+    pub holder: Vec<[f64; 2]>,
+}
+
+/// How many straight pieces a rounded corner is drawn with.
+const CORNER_PIECES: usize = 8;
+
+impl ToolShape {
+    /// The shape of `tool`: nothing for a tool with no diameter. A tool the simulation can't
+    /// cut with (a tap, a cutter that cuts under itself) is a plain cylinder of its diameter.
+    pub fn of(tool: &Tool) -> ToolShape {
+        let g = tool.geometry;
+        let usable = |v: f64| v.is_finite() && v > 0.0 && v <= MAX_COORDINATE;
+        let radius = 0.5 * g.diameter;
+        if !usable(radius) {
+            return ToolShape::default();
+        }
+        // What cuts: from the axis out along its end, then up its side to the top of its flutes.
+        let mut cutting = vec![[0.0, 0.0]];
+        match Cutter::of(tool).map(|cutter| cutter.profile) {
+            Ok(Profile::Corner(corner)) => {
+                cutting.push([radius - corner, 0.0]);
+                for k in 1..=CORNER_PIECES {
+                    let turned = 0.5 * PI * k as f64 / CORNER_PIECES as f64;
+                    cutting.push([radius - corner + corner * turned.sin(), corner - corner * turned.cos()]);
+                }
+            }
+            Ok(Profile::Point(tip, slope)) => {
+                cutting.push([tip, 0.0]);
+                cutting.push([radius, (radius - tip) * slope]);
+            }
+            Ok(Profile::Flat) | Err(_) => cutting.push([radius, 0.0]),
+        }
+        let flutes = if usable(g.flute_length) { g.flute_length } else { g.diameter };
+        let top = cutting.last().map_or(0.0, |end| end[1]).max(flutes);
+        cutting.push([radius, top]);
+        cutting.dedup();
+        // Above the flutes: the neck, as wide as the cutter, up to the shoulder; the shank from
+        // there; both up to where the holder begins, or the tool ends when nothing says where.
+        let ends = if usable(tool.holder.stick_out) { tool.holder.stick_out } else { g.overall_length };
+        let mut shank = Vec::new();
+        if usable(ends) && ends > top {
+            let wide = 0.5 * g.shank_diameter;
+            let shoulder = if usable(g.shoulder_length) { g.shoulder_length.clamp(top, ends) } else { top };
+            shank.push([radius, top]);
+            if usable(wide) && (wide - radius).abs() > 1e-9 && shoulder < ends {
+                shank.extend([[radius, shoulder], [wide, shoulder], [wide, ends]]);
+            } else {
+                shank.push([radius, ends]);
+            }
+            shank.dedup();
+        }
+        // The holder's pieces from there up.
+        let mut holder = Vec::new();
+        let mut above = if usable(ends) { ends.max(top) } else { top };
+        for piece in tool.holder.segments.iter().take(MAX_BODY_DISCS) {
+            let (lower, upper) = (0.5 * piece.lower_diameter, 0.5 * piece.upper_diameter);
+            if !(usable(piece.length) && usable(lower.max(upper)) && lower >= 0.0 && upper >= 0.0) {
+                break;
+            }
+            holder.extend([[lower, above], [upper, above + piece.length]]);
+            above += piece.length;
+        }
+        holder.dedup();
+        ToolShape { cutting, shank, holder }
+    }
+}
+
 /// Which part of a tool that does not cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BodyPart {
@@ -599,6 +674,12 @@ impl Simulation {
         }
         let area = self.stock.dx * self.stock.dy;
         (over * area, beside * area)
+    }
+
+    /// Whether a simulation can cut with `tool`, or why not: a tool that cuts under itself or
+    /// cuts a thread is one a field of heights can't show.
+    pub fn cuts_with(tool: &Tool) -> Result<()> {
+        Cutter::of(tool).map(|_| ())
     }
 
     /// Cuts `toolpath` with `tool`, as toolpath number `operation` in what is reported.
