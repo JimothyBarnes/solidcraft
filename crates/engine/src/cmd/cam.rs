@@ -2206,7 +2206,7 @@ fn posted_program(s: &Session, cmd: &str, p: &CamPostParams) -> Result<(Posted, 
     for op in setup.operations.iter().filter(|o| !o.suppressed) {
         let start = program.as_ref().map(|all| all.moves.iter().fold(all.start, |at, m| m.end(at)));
         let worked = work(s, cmd, &d, setup, op, start, &mut placed)?;
-        notes.extend(worked.notes.into_iter().map(|n| format!("operation {}: {n}", op.id)));
+        notes.extend(worked.notes.into_iter().map(|n| format!("operation {} ({}): {n}", op.id, op.name)));
         let toolpath = &worked.toolpath;
         starts.push((program.as_ref().map_or(0, |all| all.moves.len()), op.name.clone()));
         match &mut program {
