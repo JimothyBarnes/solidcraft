@@ -1,7 +1,9 @@
 //! The chamfer operation (decision 0018 of the CAM work): the top outside edge of the part
 //! broken with the side of a chamfer mill. The tool's centre goes once round the part's wall, a
 //! little outside it and below the edge, so that its cone cuts the chamfer; how far outside and
-//! how far below follow from the tool's angle, its tip and the chamfer's width.
+//! how far below follow from the tool's angle, its tip and the chamfer's width. Asked for all
+//! the edges, it goes round the inside of the openings in the part's top as well, as far from
+//! their walls and from whatever stands in them.
 //!
 //! With the tool's half angle `a` from its axis, its tip's radius `t`, a chamfer `w` wide seen
 //! from above and the tip `b` below the chamfer's lower edge: the chamfer's lower edge is `w /
@@ -11,9 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 use solidcore_record::{Loop2, Region2, Vec2, Vec3};
-use solidcraft_geom::Seg2Geom;
+use solidcraft_geom::{Loop2Geom, Seg2Geom};
 
-use crate::contour::{CutDirection, MAX_LEAVE, Round, SAME_HEIGHT, apart, bad, cut, go_round, moved_at_least, round};
+use crate::contour::{CutDirection, MAX_LEAVE, Round, SAME_HEIGHT, apart, bad, cut, go_round, moved_at_least, round, round_within};
 use crate::feeds::op_feeds;
 use crate::offset::{JOINT_TOLERANCE, MAX_OFFSET_SEGMENTS, winding};
 use crate::placement::Placement;
@@ -40,6 +42,18 @@ const LEAD_SHARE: f64 = 0.1;
 /// The most separate outlines a chamfer is given.
 pub const MAX_CHAMFER_OUTLINES: usize = 1_000;
 
+/// Which of the part's top edges a chamfer breaks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChamferEdges {
+    /// The outside edge of the part alone.
+    #[default]
+    Outside,
+    /// The outside edge, and the rims of the openings in the part's top with the edges of
+    /// whatever stands in them.
+    All,
+}
+
 /// A chamfer operation's parameters, as the design keeps them. Every one has a default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +67,9 @@ pub struct ChamferOp {
     /// The Z of the edge that is chamfered, in the WCS; `None` for the model's top.
     #[serde(default)]
     pub top: Option<f64>,
+    /// Which edges at that height: the outside one alone unless told otherwise.
+    #[serde(default)]
+    pub edges: ChamferEdges,
     #[serde(default)]
     pub direction: CutDirection,
     /// The radius of the quarter turns on to the wall and off it, mm; `None` for the wider of a
@@ -167,12 +184,44 @@ impl ChamferOp {
         Ok(self.top.unwrap_or(placement.model.max.z) - self.shape(tool)?.leg)
     }
 
+    /// The Z, in the WCS, of the tool's tip as it goes round: an opening whose rim is broken must
+    /// be open that far down.
+    pub fn tip_height(&self, tool: &Tool, placement: &Placement) -> Result<f64> {
+        let shape = self.shape(tool)?;
+        Ok(self.top.unwrap_or(placement.model.max.z) - shape.leg - shape.below)
+    }
+
     /// The toolpath from `start` (where the tool is; `None` for above where it first goes down, at
     /// the clearance height) for `tool` in a setup placed at `placement`, with its stock
     /// `material`, round `outline`: the closed loops of the part's wall at the chamfer's lower
     /// edge ([`ChamferOp::wall_height`]), of lines and arcs, X and Y in the WCS.
     pub fn toolpath(&self, start: Option<Vec3>, tool: &Tool, placement: &Placement, material: Option<&str>, outline: &[Loop2]) -> Result<Chamfered> {
+        self.toolpath_round(start, tool, placement, material, outline, &[])
+    }
+
+    /// As [`ChamferOp::toolpath`], and for a chamfer of all the edges round the inside of
+    /// `openings` as well: the air in each opening of the part's top at the same height whose
+    /// rim is to be broken, its wall as the outer loop and whatever stands in it as holes.
+    /// The tool's centre keeps as far inside each wall, and outside each thing standing there,
+    /// as it keeps outside the part: anywhere that far from them its cone cuts no more than
+    /// the chamfer. An opening too narrow for that is left sharp, and said.
+    pub fn toolpath_round(
+        &self,
+        start: Option<Vec3>,
+        tool: &Tool,
+        placement: &Placement,
+        material: Option<&str>,
+        outline: &[Loop2],
+        openings: &[Region2],
+    ) -> Result<Chamfered> {
         let shape = self.shape(tool)?;
+        if self.edges == ChamferEdges::Outside && !openings.is_empty() {
+            return bad("openings are for a chamfer of all the edges: the outside edge alone is the part's own outline".into());
+        }
+        let loops_inside = |opening: &Region2| std::iter::once(&opening.outer).chain(&opening.holes).map(|l| l.segs.len()).sum::<usize>();
+        if openings.len() > MAX_CHAMFER_OUTLINES || openings.iter().map(loops_inside).sum::<usize>() > MAX_OFFSET_SEGMENTS {
+            return bad(format!("the openings to chamfer: at most {MAX_CHAMFER_OUTLINES}, of {MAX_OFFSET_SEGMENTS} segments together"));
+        }
         let top = self.top.unwrap_or(placement.model.max.z);
         let z = top - shape.leg - shape.below;
         let (retract, clearance) = (placement.retract_z, placement.clearance_z);
@@ -202,7 +251,20 @@ impl ChamferOp {
         let g = tool.geometry;
         let lead = self.lead.unwrap_or((LEAD_SHARE * g.diameter).max(shape.width + LEAD_CLEAR));
         let nowhere = (Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 0.0, y: 0.0 });
-        let rounds: Vec<Round> = moved.iter().map(|region| round(&region.outer, &moved, self.direction, nowhere, lead)).collect::<Result<_>>()?;
+        let mut rounds: Vec<Round> = moved.iter().map(|region| round(&region.outer, &moved, self.direction, nowhere, lead)).collect::<Result<_>>()?;
+        // Inside each opening: along its wall, and round whatever stands in it.
+        let mut narrow = 0;
+        for (k, opening) in openings.iter().enumerate() {
+            let air = Region2 { outer: opening.outer.ccw(), holes: opening.holes.iter().map(|island| island.ccw().reversed()).collect() };
+            let within = moved_at_least(std::slice::from_ref(&air), shape.offset).map_err(|e| Error::BadValue(format!("opening {}: {e}", k + 1)))?;
+            if within.is_empty() {
+                narrow += 1;
+            }
+            for region in &within {
+                let along = std::iter::once(None).chain((0..region.holes.len()).map(Some));
+                rounds.extend(along.map(|hole| round_within(region, hole, self.direction, lead, true)).filter(|r| !r.segs.is_empty()));
+            }
+        }
         // The tool's own chip load, with nothing added for a thin chip: the cut is narrow, but it
         // is made near the tip, on a small diameter where the tool is weakest, and it is a
         // finishing cut. (A radial engagement of the whole diameter is how that is said.)
@@ -247,7 +309,10 @@ impl ChamferOp {
         toolpath.validate()?;
 
         let mut notes = f.notes;
-        if islands > 0 {
+        if narrow > 0 {
+            notes.push(format!("{narrow} opening(s) too narrow for the tool to go round inside left sharp"));
+        }
+        if islands > 0 && self.edges == ChamferEdges::Outside {
             notes.push(format!(
                 "{islands} edge(s) inside the part's outline (an island standing in a pocket) left sharp: a chamfer goes round the outside only"
             ));

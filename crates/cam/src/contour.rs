@@ -622,7 +622,19 @@ impl ContourOp {
 /// above, and leaves the wall there by a quarter turn of `lead` (or a half or a quarter of it,
 /// where that is what fits) into the opening.
 fn round_inside(region: &Region2, direction: CutDirection, lead: f64) -> Round {
-    let path = &region.outer;
+    round_within(region, None, direction, lead, false)
+}
+
+/// One loop of `region`, which is where the tool's centre may be in an opening, as a round to
+/// cut along: its outer loop (along the inside of the opening's wall), or with `hole` the loop
+/// round something standing in the opening. Both have the opening's air on their left (the
+/// outer loop is counter-clockwise, a hole clockwise), and that is the way climb goes with a
+/// clockwise spindle: the wall on the tool's right. It starts and leaves as [`round_inside`]
+/// says, the quarter turn off going into the air. With `on_too` the tool meets the loop by a
+/// quarter turn as well and goes down where that begins (the round's `entry`), and a radius is
+/// taken only where both arcs are clear of every loop of the region.
+pub(crate) fn round_within(region: &Region2, hole: Option<usize>, direction: CutDirection, lead: f64, on_too: bool) -> Round {
+    let path = hole.and_then(|k| region.holes.get(k)).unwrap_or(&region.outer);
     let micron = |v: f64| (v * 1e6).round() as i64;
     let longest = path.segs.iter().enumerate().max_by_key(|(i, s)| {
         let mid = s.mid();
@@ -643,7 +655,7 @@ fn round_inside(region: &Region2, direction: CutDirection, lead: f64) -> Round {
         segs = Loop2 { segs }.reversed().segs;
         Vec2 { x: -along.x, y: -along.y }
     };
-    // Into the opening: to the left of the loop's own way round, the loop being counter-clockwise.
+    // Into the opening: to the left of the loop's own way round, its air being on its left.
     let inn = Vec2 { x: -along.y, y: along.x };
     let leads = LEAD_SHARES.iter().map(|share| share * lead).filter(|&radius| radius >= MIN_ARC_RADIUS).find_map(|radius| {
         // A wall that curves round the tool has room for the arc only well inside its own curve.
@@ -654,9 +666,21 @@ fn round_inside(region: &Region2, direction: CutDirection, lead: f64) -> Round {
         // Turning the way that leaves along the travel: left when the opening is on the left.
         let sweep = FRAC_PI_2.copysign(travel.x * inn.y - travel.y * inn.x);
         let off = Seg2::Arc { center: centre, radius, start: (-inn.y).atan2(-inn.x), sweep };
-        arc_is_clear(&off, std::slice::from_ref(region), (path, at)).then_some((off, off))
+        if !arc_is_clear(&off, std::slice::from_ref(region), (path, at)) {
+            return None;
+        }
+        if !on_too {
+            return Some((off, off));
+        }
+        // On by the quarter turn before it about the same centre: from behind the start.
+        let on = Seg2::Arc { center: centre, radius, start: (-travel.y).atan2(-travel.x), sweep };
+        arc_is_clear(&on, std::slice::from_ref(region), (path, at)).then_some((on, off))
     });
-    Round { entry: start, start, segs, leads }
+    let entry = match &leads {
+        Some((on, _)) if on_too => on.start(),
+        _ => start,
+    };
+    Round { entry, start, segs, leads }
 }
 
 /// The cutting moves once round `r` at the height `z` from its start back to it. With `over`

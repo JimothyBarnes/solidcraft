@@ -411,3 +411,221 @@ fn hostile_numbers_never_panic_and_a_chamfer_is_plain_json() {
     assert!(serde_json::from_str::<ChamferOp>(r#"{"angle": 45}"#).is_err());
     assert_eq!(serde_json::from_value::<ChamferOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
 }
+
+fn rectangle(x: (f64, f64), y: (f64, f64)) -> Loop2 {
+    let corners = [(x.0, y.0), (x.1, y.0), (x.1, y.1), (x.0, y.1)];
+    Loop2 { segs: (0..4).map(|i| Seg2::Line { a: q(corners[i].0, corners[i].1), b: q(corners[(i + 1) % 4].0, corners[(i + 1) % 4].1) }).collect() }
+}
+
+fn circle(x: f64, y: f64, radius: f64) -> Loop2 {
+    Loop2 { segs: vec![Seg2::Arc { center: q(x, y), radius, start: 0.0, sweep: 2.0 * PI }] }
+}
+
+/// A chamfer of all the edges of the block with `openings` in its top.
+fn all_round(op: &ChamferOp, openings: &[Region2]) -> Result<Chamfered> {
+    ChamferOp { edges: ChamferEdges::All, ..op.clone() }.toolpath_round(
+        None,
+        &chamfer10(),
+        &faced_block(),
+        Some("aluminium"),
+        &[block_outline()],
+        openings,
+    )
+}
+
+/// The block in its stock with openings already cut in both: `floor` gives the Z of what is
+/// under a place in an opening (below the stock's bottom for one that goes through), and
+/// nothing for a place on the block's top.
+fn block_with(floor: impl Fn(f64, f64) -> Option<f64>) -> Simulation {
+    let sim = Simulation::new(Bounds { min: p(-31.0, -21.0, -20.0), max: p(31.0, 21.0, 0.0) }, 0.1, 0.01).unwrap();
+    let f = sim.stock.clone();
+    let under = |k: usize| {
+        let c = f.centre(k % f.nx, k / f.nx);
+        if c.x.abs() < 30.0 && c.y.abs() < 20.0 { floor(c.x, c.y).unwrap_or(0.0) } else { -21.0 }
+    };
+    let mut sim = sim.with_part((0..f.nx * f.ny).map(under).collect()).unwrap();
+    for k in 0..f.nx * f.ny {
+        let c = f.centre(k % f.nx, k / f.nx);
+        if c.x.abs() < 30.0 && c.y.abs() < 20.0 && floor(c.x, c.y).is_some() {
+            sim.stock.heights[k] = under(k).max(-20.0);
+        }
+    }
+    sim
+}
+
+#[test]
+fn a_chamfer_of_all_the_edges_goes_round_inside_an_opening_too() {
+    // A pocket X -22 to 2, Y -8 to 8 in the block's top. The tool's centre is 1 inside its wall
+    // as it is 1 outside the block's: a rectangle X -21 to 1, Y -7 to 7, 72 round. It goes down
+    // at (-11, -6), on to the middle of the front side by a quarter turn of 1, counter-clockwise
+    // round (climb, the wall on its right), and off by a quarter turn to (-9, -6).
+    let pocket = Region2 { outer: rectangle((-22.0, 2.0), (-8.0, 8.0)), holes: Vec::new() };
+    let alone = chamfered(&ChamferOp::default(), &chamfer10()).unwrap();
+    let d = all_round(&ChamferOp::default(), std::slice::from_ref(&pocket)).unwrap();
+    assert_eq!((d.top, d.z, d.width, d.leg, d.offset), (0.0, -1.5, 0.5, 0.5, 1.0));
+    assert_eq!(ChamferOp::default().tip_height(&chamfer10(), &faced_block()).unwrap(), d.z);
+    assert_eq!((d.entries.clone(), d.leads.clone()), (vec![[1.0, -22.0], [-11.0, -6.0]], vec![1.0, 1.0]));
+    assert!(close(d.round, 200.0 + 2.0 * PI + 72.0), "{}", d.round);
+    let z = -1.5;
+    let arc = |x: f64, y: f64| Move::Arc {
+        to: p(x, y, z),
+        center: p(-10.0, -6.0, z),
+        plane: Plane::Xy,
+        direction: ArcDirection::CounterClockwise,
+        feed: d.feed,
+    };
+    let line = |x: f64, y: f64| Move::Linear { to: p(x, y, z), feed: d.feed };
+    // The outside as it is cut alone, then the pocket's rim.
+    let mut want = alone.toolpath.moves[..alone.toolpath.moves.len() - 3].to_vec();
+    want.extend([
+        Move::Rapid { to: p(-11.0, -6.0, 5.0) },
+        Move::Linear { to: p(-11.0, -6.0, z), feed: d.plunge_feed },
+        arc(-10.0, -7.0),
+        line(1.0, -7.0),
+        line(1.0, 7.0),
+        line(-21.0, 7.0),
+        line(-21.0, -7.0),
+        line(-10.0, -7.0),
+        arc(-9.0, -6.0),
+        Move::Rapid { to: p(-9.0, -6.0, 5.0) },
+        Move::Rapid { to: p(-9.0, -6.0, 25.0) },
+        Move::Coolant { mode: Coolant::Off },
+        Move::SpindleStop,
+    ]);
+    assert!(same_moves(&d.toolpath.moves, &want), "{:#?}", &d.toolpath.moves[alone.toolpath.moves.len() - 3..]);
+    assert!(d.notes.is_empty(), "{:?}", d.notes);
+
+    // The simulation, the pocket cut 6 deep already: nothing is cut into, and the stock rises
+    // at 45 degrees from 0.5 below the top at the pocket's wall to the top 0.5 back from it,
+    // over each cell's own centre, exactly: at its front wall (Y -8) and its right one (X 2).
+    let in_pocket = |x: f64, y: f64| (x > -22.0 && x < 2.0 && y.abs() < 8.0).then_some(-6.0);
+    let mut sim = block_with(in_pocket);
+    let cut = sim.cut_into(0, &d.toolpath, &chamfer10(), d.leg).unwrap();
+    assert_eq!((cut.gouges, cut.rapid_hits), (0, 0));
+    let f = sim.stock.clone();
+    let height = |x: f64, y: f64| f.at(((x - f.x) / f.dx - 0.5).round() as usize, ((y - f.y) / f.dy - 0.5).round() as usize).unwrap();
+    for (k, back) in [0.05, 0.15, 0.25, 0.35, 0.45].into_iter().enumerate() {
+        let want = -0.5 + back;
+        assert!((height(-10.05, -8.0 - back) - want).abs() < 1e-9, "the front wall, cell {k}: {}", height(-10.05, -8.0 - back));
+        assert!((height(2.0 + back, 3.05) - want).abs() < 1e-9, "the right wall, cell {k}: {}", height(2.0 + back, 3.05));
+    }
+    assert_eq!(
+        (height(-10.05, -8.55), height(2.55, 3.05), height(-10.05, 0.05)),
+        (0.0, 0.0, -6.0),
+        "the top past the chamfer, and the pocket's floor"
+    );
+    // Cut without saying it was meant, the rim is a cut into the part like the outside edge.
+    assert!(block_with(in_pocket).cut(0, &d.toolpath, &chamfer10()).unwrap().gouges > alone_gouges());
+
+    // The other way round, the outside goes counter-clockwise and the inside clockwise.
+    let other = all_round(&ChamferOp { direction: CutDirection::Conventional, ..ChamferOp::default() }, std::slice::from_ref(&pocket)).unwrap();
+    let turns: Vec<ArcDirection> =
+        other.toolpath.moves.iter().filter_map(|m| if let Move::Arc { direction, .. } = m { Some(*direction) } else { None }).collect();
+    // Round the outside: on, four corners and off, the on and off arcs turning the other way
+    // from the corners; inside, the two arcs on and off.
+    assert_eq!(turns.len(), 8, "{turns:?}");
+    assert_eq!(turns.iter().filter(|t| **t == ArcDirection::CounterClockwise).count(), 4, "{turns:?}");
+    assert!(close(other.round, d.round));
+}
+
+/// How many moves of the outside chamfer alone cut into a part that is not said to be meant.
+fn alone_gouges() -> usize {
+    let alone = chamfered(&ChamferOp::default(), &chamfer10()).unwrap();
+    block_in_stock().cut(0, &alone.toolpath, &chamfer10()).unwrap().gouges
+}
+
+#[test]
+fn what_stands_in_an_opening_is_chamfered_and_a_hole_is_gone_round_inside() {
+    // A pocket X -25 to 15, Y -15 to 15 with a round post of 10 standing in it about (-5, 0),
+    // and a hole of 6 about (22, 10). The tool's centre goes round the block (200 + 2 pi),
+    // 1 inside the pocket's wall (38 x 28: 132), 1 outside the post (a circle of radius 6) and
+    // 1 inside the hole (a circle of radius 2).
+    let pocket = Region2 { outer: rectangle((-25.0, 15.0), (-15.0, 15.0)), holes: vec![circle(-5.0, 0.0, 5.0)] };
+    let hole = Region2 { outer: circle(22.0, 10.0, 3.0), holes: Vec::new() };
+    let d = all_round(&ChamferOp::default(), &[pocket, hole]).unwrap();
+    assert!(close(d.round, 200.0 + 2.0 * PI + 132.0 + 12.0 * PI + 4.0 * PI), "{}", d.round);
+    assert_eq!((d.entries.len(), d.leads.clone()), (4, vec![1.0; 4]), "{:?}", d.entries);
+    // Round the post clockwise (climb round the outside of what stands there), every arc of
+    // that round about its middle at radius 6; the tool goes down 1 further out and 1 back.
+    let arcs: Vec<(Vec3, Vec3, ArcDirection)> = d
+        .toolpath
+        .moves
+        .iter()
+        .filter_map(|m| if let Move::Arc { to, center, direction, .. } = m { Some((*to, *center, *direction)) } else { None })
+        .collect();
+    let about = |x: f64, y: f64, radius: f64| {
+        arcs.iter()
+            .filter(|(to, center, _)| {
+                (center.x - x).abs() < 1e-9 && (center.y - y).abs() < 1e-9 && ((to.x - x).hypot(to.y - y) - radius).abs() < 1e-9
+            })
+            .collect::<Vec<_>>()
+    };
+    let (post, bore) = (about(-5.0, 0.0, 6.0), about(22.0, 10.0, 2.0));
+    assert!(post.len() >= 2 && post.iter().all(|(.., direction)| *direction == ArcDirection::Clockwise), "{post:?}");
+    assert!(bore.len() >= 2 && bore.iter().all(|(.., direction)| *direction == ArcDirection::CounterClockwise), "{bore:?}");
+    let from = |entry: [f64; 2], x: f64, y: f64| (entry[0] - x).hypot(entry[1] - y);
+    assert!(close(from(d.entries[2], -5.0, 0.0), 50f64.sqrt()), "{:?}", d.entries[2]);
+    // In the hole the arcs on and off are 1 inside a path of radius 2: down 1 from its middle
+    // and 1 back along the way.
+    assert!(close(from(d.entries[3], 22.0, 10.0), 2f64.sqrt()), "{:?}", d.entries[3]);
+
+    // The simulation: the pocket 6 deep with the post standing to the top, the hole through.
+    let floor = |x: f64, y: f64| {
+        let (post, hole) = ((x + 5.0).hypot(y), (x - 22.0).hypot(y - 10.0));
+        if hole < 3.0 {
+            Some(-21.0)
+        } else if x > -25.0 && x < 15.0 && y.abs() < 15.0 && post > 5.0 {
+            Some(-6.0)
+        } else {
+            None
+        }
+    };
+    let mut sim = block_with(floor);
+    let cut = sim.cut_into(0, &d.toolpath, &chamfer10(), d.leg).unwrap();
+    assert_eq!((cut.gouges, cut.rapid_hits), (0, 0));
+    let f = sim.stock.clone();
+    let height = |x: f64, y: f64| f.at(((x - f.x) / f.dx - 0.5).round() as usize, ((y - f.y) / f.dy - 0.5).round() as usize).unwrap();
+    // On the post the chamfer is a cone about its middle: as far below the top at a place as
+    // the place is from 0.5 inside the post's wall. In the block round the hole likewise.
+    for (x, y) in [(-0.05, 0.05), (-0.25, 0.05), (-5.05, 4.75), (-8.25, -3.45)] {
+        let want = (4.5 - (x + 5.0f64).hypot(y)).min(0.0);
+        assert!(want < 0.0 && (height(x, y) - want).abs() < 1e-6, "on the post at {x} {y}: {} and {want}", height(x, y));
+    }
+    for (x, y) in [(25.05, 10.05), (25.35, 10.05), (22.05, 6.85)] {
+        let want = ((x - 22.0f64).hypot(y - 10.0) - 3.5).min(0.0);
+        assert!(want < 0.0 && (height(x, y) - want).abs() < 1e-6, "round the hole at {x} {y}: {} and {want}", height(x, y));
+    }
+    assert_eq!((height(-5.05, 0.05), height(0.05, 0.05)), (0.0, -6.0), "the post's top, and the pocket's floor beside it");
+}
+
+#[test]
+fn an_opening_the_tool_does_not_fit_in_is_left_sharp_and_said() {
+    // A slot 1.6 wide: the tool's centre must be 1 from each of its walls, and there is no such
+    // place. The outside is cut as it is alone.
+    let alone = chamfered(&ChamferOp::default(), &chamfer10()).unwrap();
+    let slot = Region2 { outer: rectangle((10.0, 11.6), (-5.0, 5.0)), holes: Vec::new() };
+    let d = all_round(&ChamferOp::default(), std::slice::from_ref(&slot)).unwrap();
+    assert!(same_moves(&d.toolpath.moves, &alone.toolpath.moves));
+    assert_eq!(d.notes, ["1 opening(s) too narrow for the tool to go round inside left sharp"]);
+    // With all the edges asked for, what stands in a pocket is not left sharp, so nothing is
+    // said of it: its edge is cut where its opening is given, as above.
+    let island = circle(8.0, 2.0, 9.0);
+    let all = ChamferOp { edges: ChamferEdges::All, ..ChamferOp::default() };
+    let d = all.toolpath(None, &chamfer10(), &faced_block(), Some("aluminium"), &[block_outline(), island]).unwrap();
+    assert!(same_moves(&d.toolpath.moves, &alone.toolpath.moves) && d.notes.is_empty(), "{:?}", d.notes);
+    // Openings are for all the edges; and no more of them are taken than a part has.
+    let refused = ChamferOp::default().toolpath_round(None, &chamfer10(), &faced_block(), None, &[block_outline()], std::slice::from_ref(&slot));
+    assert!(refused.unwrap_err().to_string().contains("openings are for a chamfer of all the edges"));
+    let many = vec![slot; MAX_CHAMFER_OUTLINES + 1];
+    assert!(all_round(&ChamferOp::default(), &many).unwrap_err().to_string().contains("at most 1000"));
+    // Openings that are no shape at all never panic.
+    for v in [f64::NAN, f64::INFINITY, -1e300, 1e300, 0.0] {
+        let odd = Region2 { outer: rectangle((v, 2.0), (-8.0, v)), holes: vec![circle(v, 0.0, v)] };
+        let _ = all_round(&ChamferOp::default(), &[odd]);
+        let _ = all_round(&ChamferOp::default(), &[Region2 { outer: Loop2 { segs: Vec::new() }, holes: vec![Loop2 { segs: Vec::new() }] }]);
+    }
+    // The edges are kept by name, the outside alone unless said.
+    let op: ChamferOp = serde_json::from_str(r#"{"edges": "all"}"#).unwrap();
+    assert_eq!((op.edges, ChamferOp::default().edges), (ChamferEdges::All, ChamferEdges::Outside));
+    assert!(serde_json::from_str::<ChamferOp>(r#"{"edges": "inside"}"#).is_err());
+}
