@@ -166,6 +166,84 @@ impl<K: Clone + PartialEq> Picks<K> {
     }
 }
 
+/// What was clicked on the model for a form whose row offers all of a list of things (when
+/// there are more than one), then each one: Pocket and Slot. One thing picked is the row's own
+/// choice of it, none or every one is all of them, and several are a choice the row gains
+/// after the things, which stands for the form's `picks`.
+pub(crate) struct ListPicks {
+    /// The faces clicked, each with the thing's place in the list.
+    clicked: Picks<usize>,
+    /// The choice as the clicks last left it: another one since is the row's own.
+    left_at: usize,
+}
+
+impl ListPicks {
+    pub(crate) fn new() -> ListPicks {
+        ListPicks { clicked: Picks::new(), left_at: 0 }
+    }
+
+    /// Whether the last click on the model was on none of the things.
+    #[cfg(test)]
+    pub(crate) fn missed(&self) -> bool {
+        self.clicked.missed
+    }
+
+    /// A choice from the form's row (`choice` is another than the clicks left) is the choice:
+    /// what was picked on the model (`picks`) is forgotten. For the start of the form's frame.
+    pub(crate) fn follow_row(&mut self, app: &mut SolveApp, choice: usize, picks: &mut Vec<usize>) {
+        if choice != self.left_at {
+            self.clicked.forget(app);
+            picks.clear();
+            self.left_at = choice;
+        }
+    }
+
+    /// Takes what was clicked on the model since the last frame and makes it the row's
+    /// `choice`: `count` things are in the list numbered `found`, `label` is what the form
+    /// calls them and `of` says which one a picked point is on. Several picked, and not all,
+    /// are left in `picks`. Whether what is cut changed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn take(
+        &mut self,
+        app: &mut SolveApp,
+        ctx: &egui::Context,
+        label: &'static str,
+        found: Option<u64>,
+        count: usize,
+        of: impl Fn(&SolveApp, Vec3) -> Option<usize>,
+        choice: &mut usize,
+        picks: &mut Vec<usize>,
+    ) -> bool {
+        let changed = match self.clicked.take(app, ctx, label, found, of) {
+            None => false,
+            Some(mut clicked) => {
+                clicked.sort_unstable();
+                // The row's first choice is all of them, when there are more than one.
+                let first = usize::from(count > 1);
+                let own = match clicked.as_slice() {
+                    [] => Some(0),
+                    every if every.len() == count => Some(0),
+                    [one] => Some(first + one),
+                    _ => None,
+                };
+                (*choice, *picks) = match own {
+                    Some(own) => (own, Vec::new()),
+                    None => (first + count, clicked),
+                };
+                true
+            }
+        };
+        self.left_at = *choice;
+        changed
+    }
+
+    /// What the form says of the picking under its row: that the things can be clicked
+    /// (`hint`), or that the last click was on none (`missed`).
+    pub(crate) fn says(&self, hint: &'static str, missed: &'static str) -> &'static str {
+        tr(if self.clicked.missed { missed } else { hint })
+    }
+}
+
 /// What the picks of holes are called.
 const HOLES: &str = "Holes";
 

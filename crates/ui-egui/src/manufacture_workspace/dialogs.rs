@@ -93,6 +93,8 @@ impl Dialog {
             Dialog::Pocket(form) => form.editing.is_none(),
             Dialog::Drill(form) => form.editing.is_none(),
             Dialog::Bore(_) => true,
+            Dialog::Slot(form) => form.editing.is_none(),
+            Dialog::Contour(form) => form.editing.is_none() && form.inside(),
             _ => false,
         }
     }

@@ -3,7 +3,9 @@
 //! `cam.op.edit` for a slot operation being changed) and shows what they would cut before OK, as
 //! the other operations' forms do.
 use serde_json::{Value, json};
-use solidcraft_engine::cmd::{FoundSlot, OperationPreview, ToolChoice, manufacture_preview, manufacture_slots, manufacture_tools};
+use solidcraft_engine::cmd::{
+    FoundSlot, OperationPreview, ToolChoice, manufacture_preview, manufacture_slot_at, manufacture_slots, manufacture_tools,
+};
 use solidcraft_engine::doc::display_units::{format_length, length_number};
 use solidcraft_ui_text::tr;
 
@@ -11,8 +13,11 @@ use super::{
     Edited, SetupChoice, Worked, kept_operation, minutes_seconds, preview_note, refusal, set_or_clear, setups, speed_and_feed, window_words,
 };
 use crate::SolveApp;
+use crate::manufacture_workspace::picking;
 use crate::ui_kit;
 
+/// What the form's picks on the model are called.
+const PICKED: &str = "Slots";
 /// The stepdown a slot takes when none is typed, as a share of the tool's diameter (the engine's
 /// own default, shown in the field).
 const STEPDOWN_SHARE: f64 = 0.5;
@@ -25,10 +30,16 @@ pub(crate) struct SlotForm {
     /// The slots the setup picked has, as the engine found them.
     found: Worked<Vec<FoundSlot>>,
     /// Which of the form's choices is picked: with more than one slot found the first choice is
-    /// all of them, and the slots follow it one by one.
+    /// all of them, and the slots follow it one by one; after them, while several are picked on
+    /// the model, a choice that stands for those.
     pub slot: usize,
-    /// The choice the tool was last suited to.
-    suited_to: Option<usize>,
+    /// The slots picked on the model, when they are several and not all: their places among
+    /// those found, in order. One slot picked, or every one, is a choice of the row's own.
+    pub picks: Vec<usize>,
+    /// What was clicked on the model.
+    clicked: picking::ListPicks,
+    /// The choice and the picks the tool was last suited to.
+    suited_to: Option<(usize, Vec<usize>)>,
     pub tool: usize,
     /// Whether the tool was picked by hand: until then it is the widest that goes into every
     /// slot picked.
@@ -66,6 +77,8 @@ impl SlotForm {
             setup,
             found: Worked::new(),
             slot: 0,
+            picks: Vec::new(),
+            clicked: picking::ListPicks::new(),
             suited_to: None,
             tool: 0,
             picked_tool: false,
@@ -114,15 +127,24 @@ impl SlotForm {
         self.slots().len() > 1
     }
 
-    /// The slots the choice picked stands for: all of them, or one.
-    pub fn picked(&self) -> &[FoundSlot] {
+    /// The slots the choice picked stands for: all of them, one, or the several picked on the
+    /// model.
+    pub fn picked(&self) -> Vec<&FoundSlot> {
         let all = self.slots();
-        let one = |at: usize| all.get(at..at.saturating_add(1)).unwrap_or(&[]);
-        match (self.offers_all(), self.slot) {
-            (true, 0) => all,
-            (true, choice) => one(choice - 1),
-            (false, choice) => one(choice),
+        if !self.picks.is_empty() {
+            return self.picks.iter().filter_map(|at| all.get(*at)).collect();
         }
+        match (self.offers_all(), self.slot) {
+            (true, 0) => all.iter().collect(),
+            (true, choice) => all.get(choice - 1).into_iter().collect(),
+            (false, choice) => all.get(choice).into_iter().collect(),
+        }
+    }
+
+    /// Whether the last click on the model was on no slot.
+    #[cfg(test)]
+    pub fn pick_missed(&self) -> bool {
+        self.clicked.missed()
     }
 
     /// Where the slots to cut end, when they all end at one height: the slots picked as they
@@ -154,7 +176,7 @@ impl SlotForm {
 
     /// The tool that suits `slots`: the widest that is no wider than the narrowest of them, so
     /// that it goes into every one; else the narrowest there is, which then says why it does not.
-    fn fitting_tool(&self, slots: &[FoundSlot]) -> usize {
+    fn fitting_tool(&self, slots: &[&FoundSlot]) -> usize {
         let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
         let narrowest = slots.iter().map(|slot| slot.width).fold(f64::INFINITY, f64::min);
         let fits = self.tools.iter().enumerate().filter(|(_, tool)| tool.diameter <= narrowest + 1e-6).max_by(by_width);
@@ -195,15 +217,16 @@ impl SlotForm {
             if self.found.refresh(app, &json!({"id": setup}), || manufacture_slots(&app.session, &setup)) {
                 self.suited_to = None;
             }
-            let choices = self.slots().len() + usize::from(self.offers_all());
+            let choices = self.slots().len() + usize::from(self.offers_all()) + usize::from(!self.picks.is_empty());
             self.slot = self.slot.min(choices.saturating_sub(1));
-            if self.suited_to != Some(self.slot) && !self.picked().is_empty() {
+            let suited = self.suited_to.as_ref().is_some_and(|(choice, picks)| *choice == self.slot && *picks == self.picks);
+            if !suited && !self.picked().is_empty() {
                 // Other slots: their own bottom again, and the tool that suits them.
                 self.typed_bottom = false;
                 if !self.picked_tool {
-                    self.tool = self.fitting_tool(self.picked());
+                    self.tool = self.fitting_tool(&self.picked());
                 }
-                self.suited_to = Some(self.slot);
+                self.suited_to = Some((self.slot, self.picks.clone()));
             }
         }
         if !self.typed_bottom
@@ -275,14 +298,40 @@ impl SlotForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<SlotForm> {
+        // What is picked on the model is what is cut (decision 0030 of the CAM work): a choice
+        // from the row's list forgets it, and a slot clicked is taken and worked out.
+        let picks = self.editing.is_none();
+        if picks {
+            self.clicked.follow_row(app, self.slot, &mut self.picks);
+        }
         self.refresh(app);
+        if picks {
+            let found = self.found.get().map(|(key, _)| key);
+            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            let count = self.slots().len();
+            let on_slot = |app: &SolveApp, point| manufacture_slot_at(&app.session, &setup, point).ok().flatten();
+            if self.clicked.take(app, ctx, PICKED, found, count, on_slot, &mut self.slot, &mut self.picks) {
+                self.refresh(app);
+            }
+        }
+        let picking = picks.then(|| self.clicked.says("manufacture.slot_pick_hint", "manufacture.slot_pick_missed"));
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
-        // All of them first, when there is more than one; then each by its size.
+        // All of them first, when there is more than one; then each by its size; after them,
+        // while several are picked on the model, the choice that stands for those.
         let all = solidcraft_ui_text::format("manufacture.slot_all", &[("count", &self.slots().len().to_string())]);
-        let slot_labels: Vec<String> =
-            self.offers_all().then_some(all).into_iter().chain(self.slots().iter().map(|found| Self::label(found, units, decimals))).collect();
+        let several = (!self.picks.is_empty()).then(|| {
+            let (count, of) = (self.picks.len().to_string(), self.slots().len().to_string());
+            solidcraft_ui_text::format("manufacture.picked_of", &[("count", &count), ("of", &of)])
+        });
+        let slot_labels: Vec<String> = self
+            .offers_all()
+            .then_some(all)
+            .into_iter()
+            .chain(self.slots().iter().map(|found| Self::label(found, units, decimals)))
+            .chain(several)
+            .collect();
         let slot_labels: Vec<&str> = slot_labels.iter().map(String::as_str).collect();
         let kept = self.editing.as_ref().map(|edited| {
             let count = edited.base["slots"].as_array().map_or(0, Vec::len).to_string();
@@ -329,6 +378,9 @@ impl SlotForm {
                     }
                     None => {
                         ui_kit::choice_row(ui, tr("manufacture.slot_choice"), "manufacture_slot_choice", &mut self.slot, &slot_labels);
+                        if let Some(picking) = picking {
+                            ui_kit::text(ui, picking, ui_kit::Text::Note("manufacture_slot_pick"));
+                        }
                     }
                 }
                 if ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_slot_tool", &mut self.tool, &tool_labels).changed() {

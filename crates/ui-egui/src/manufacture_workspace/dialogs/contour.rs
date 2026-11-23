@@ -4,7 +4,8 @@
 //! the other operations' forms do.
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    FoundOpening, OperationPreview, Placement, ToolChoice, manufacture_openings, manufacture_preview, manufacture_setup_preview, manufacture_tools,
+    FoundOpening, OperationPreview, Placement, ToolChoice, manufacture_opening_at, manufacture_openings, manufacture_preview,
+    manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number};
 use solidcraft_ui_text::tr;
@@ -14,8 +15,11 @@ use super::{
     word,
 };
 use crate::SolveApp;
+use crate::manufacture_workspace::picking;
 use crate::ui_kit;
 
+/// What the form's picks on the model are called.
+const PICKED: &str = "Openings";
 /// Which way round the cut goes: the command's word and the label.
 pub(super) const DIRECTIONS: [(&str, &str); 2] = [("climb", "manufacture.direction_climb"), ("conventional", "manufacture.direction_conventional")];
 /// Which side of a wall the cut goes round: the command's word and the label.
@@ -48,8 +52,15 @@ pub(crate) struct ContourForm {
     found: Worked<Vec<FoundOpening>>,
     /// Which of the choices of openings is cut ([`ContourForm::choices`]).
     pub opening: usize,
-    /// The choice of openings the tool was last suited to.
-    suited_to: Option<usize>,
+    /// The openings picked on the model, when they are none of the row's own choices: their
+    /// places among those found, in order.
+    pub picks: Vec<usize>,
+    /// What was clicked on the model: the faces, each with the opening it is of.
+    clicked: picking::Picks<usize>,
+    /// The choice as the clicks on the model last left it: another one since is the row's own.
+    left_at: usize,
+    /// The choice of openings and the picks the tool was last suited to.
+    suited_to: Option<(usize, Vec<usize>)>,
     pub tool: usize,
     /// Whether the tool was picked by hand: until then, inside, it is the widest that fits the
     /// openings picked.
@@ -111,6 +122,9 @@ impl ContourForm {
             side: 0,
             found: Worked::new(),
             opening: 0,
+            picks: Vec::new(),
+            clicked: picking::Picks::new(),
+            left_at: 0,
             suited_to: None,
             tool: 0,
             picked_tool: false,
@@ -196,7 +210,9 @@ impl ContourForm {
     }
 
     /// What the form offers to cut round the inside of, as places in [`ContourForm::openings`]:
-    /// every two or more openings that are cut to one depth, together, then each one alone.
+    /// every two or more openings that are cut to one depth, together, then each one alone;
+    /// and after them, while openings are picked on the model that are none of those choices,
+    /// the choice that stands for them.
     pub fn choices(&self) -> Vec<Vec<usize>> {
         let found = self.openings();
         let mut together: Vec<Vec<usize>> = Vec::new();
@@ -213,7 +229,46 @@ impl ContourForm {
             }
         }
         together.retain(|group| group.len() > 1);
-        together.into_iter().chain((0..found.len()).map(|at| vec![at])).collect()
+        together.into_iter().chain((0..found.len()).map(|at| vec![at])).chain((!self.picks.is_empty()).then(|| self.picks.clone())).collect()
+    }
+
+    /// Whether the last click on the model was on no opening.
+    #[cfg(test)]
+    pub fn pick_missed(&self) -> bool {
+        self.clicked.missed
+    }
+
+    /// Takes what was clicked on the model since the last frame (decision 0030 of the CAM
+    /// work), inside. The opening clicked last says how deep the cut goes, and the ones cut to
+    /// another depth are picked no longer; the ones picked are the row's own choice of them
+    /// where it has one, else a choice the row gains. Whether what is cut changed.
+    fn take_picks(&mut self, app: &mut SolveApp, ctx: &egui::Context) -> bool {
+        let found = self.found.get().map(|(key, _)| key);
+        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+        let on_opening = |app: &SolveApp, point| manufacture_opening_at(&app.session, &setup, point).ok().flatten();
+        let changed = match self.clicked.take(app, ctx, PICKED, found, on_opening) {
+            None => false,
+            Some(clicked) => {
+                self.picks.clear();
+                let openings = self.openings();
+                let alike = |a: usize, b: usize| {
+                    openings.get(a).zip(openings.get(b)).is_some_and(|(a, b)| a.through == b.through && (a.bottom - b.bottom).abs() <= 1e-6)
+                };
+                let mut picks: Vec<usize> =
+                    clicked.last().map_or(Vec::new(), |last| clicked.iter().copied().filter(|at| alike(*at, *last)).collect());
+                picks.sort_unstable();
+                self.clicked.keep(app, |at| picks.contains(at));
+                // The row's own choice of them, where it has one: none picked is its first.
+                let own = if picks.is_empty() { Some(0) } else { self.choices().iter().position(|choice| *choice == picks) };
+                match own {
+                    Some(choice) => self.opening = choice,
+                    None => (self.opening, self.picks) = (self.choices().len(), picks),
+                }
+                true
+            }
+        };
+        self.left_at = self.opening;
+        changed
     }
 
     /// The openings the choice picked stands for.
@@ -241,7 +296,15 @@ impl ContourForm {
             };
             solidcraft_ui_text::format(key, &[("count", &count), ("depth", &depth), ("width", &width), ("height", &height), ("diameter", &diameter)])
         };
-        self.choices().iter().map(label).collect()
+        let mut labels: Vec<String> = self.choices().iter().map(label).collect();
+        // The openings picked on the model: how many they are, of those cut to their depth.
+        if let (false, Some(last)) = (self.picks.is_empty(), labels.last_mut()) {
+            let first = self.picks.first().and_then(|at| found.get(*at));
+            let alike =
+                first.map_or(0, |first| found.iter().filter(|o| o.through == first.through && (o.bottom - first.bottom).abs() <= 1e-6).count());
+            *last = solidcraft_ui_text::format("manufacture.picked_of", &[("count", &self.picks.len().to_string()), ("of", &alike.to_string())]);
+        }
+        labels
     }
 
     /// The tool that suits openings the narrowest of which lets a circle `widest` across in: the
@@ -310,8 +373,9 @@ impl ContourForm {
                 (self.opening, self.suited_to) = (0, None);
             }
             self.opening = self.opening.min(self.choices().len().saturating_sub(1));
-            if self.suited_to != Some(self.opening) {
-                self.suited_to = Some(self.opening);
+            let suited = self.suited_to.as_ref().is_some_and(|(choice, picks)| *choice == self.opening && *picks == self.picks);
+            if !suited {
+                self.suited_to = Some((self.opening, self.picks.clone()));
                 let widest = self.picked().iter().map(|opening| opening.widest).fold(f64::INFINITY, f64::min);
                 if !self.picked_tool && widest.is_finite() {
                     self.tool = self.fitting_tool(widest);
@@ -389,7 +453,19 @@ impl ContourForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<ContourForm> {
+        // Inside, what is picked on the model is what is cut round (decision 0030 of the CAM
+        // work): a choice from the row's list forgets it, and an opening clicked is taken and
+        // worked out.
+        let picks = self.editing.is_none() && self.inside();
+        if picks && self.opening != self.left_at {
+            self.clicked.forget(app);
+            self.picks.clear();
+        }
         self.refresh(app);
+        if picks && self.take_picks(app, ctx) {
+            self.refresh(app);
+        }
+        let picking = picks.then(|| tr(if self.clicked.missed { "manufacture.opening_pick_missed" } else { "manufacture.opening_pick_hint" }));
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
@@ -462,6 +538,9 @@ impl ContourForm {
                                 &mut self.opening,
                                 &choice_labels,
                             );
+                            if let Some(picking) = picking {
+                                ui_kit::text(ui, picking, ui_kit::Text::Note("manufacture_contour_pick"));
+                            }
                         }
                     }
                 }

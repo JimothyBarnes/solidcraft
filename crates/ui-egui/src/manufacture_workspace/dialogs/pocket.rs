@@ -39,10 +39,8 @@ pub(crate) struct PocketForm {
     /// The pockets picked on the model, when they are several and not all: their places among
     /// those found, in order. One pocket picked, or every one, is a choice of the row's own.
     pub picks: Vec<usize>,
-    /// What was clicked on the model: the faces, each with the pocket it is of.
-    clicked: picking::Picks<usize>,
-    /// The choice as the clicks on the model last left it: another one since is the row's own.
-    left_at: usize,
+    /// What was clicked on the model.
+    clicked: picking::ListPicks,
     /// The choice and the picks the tool was last suited to.
     suited_to: Option<(usize, Vec<usize>)>,
     pub tool: usize,
@@ -85,8 +83,7 @@ impl PocketForm {
             found: Worked::new(),
             pocket: 0,
             picks: Vec::new(),
-            clicked: picking::Picks::new(),
-            left_at: 0,
+            clicked: picking::ListPicks::new(),
             suited_to: None,
             tool: 0,
             picked_tool: false,
@@ -156,41 +153,7 @@ impl PocketForm {
     /// Whether the last click on the model was on no pocket.
     #[cfg(test)]
     pub fn pick_missed(&self) -> bool {
-        self.clicked.missed
-    }
-
-    /// Takes what was clicked on the model since the last frame (decision 0030 of the CAM
-    /// work) and makes it the choice: one pocket, all of them, or several. Whether the choice
-    /// changed.
-    fn take_picks(&mut self, app: &mut SolveApp, ctx: &egui::Context) -> bool {
-        if self.editing.is_some() {
-            return false;
-        }
-        let found = self.found.get().map(|(key, _)| key);
-        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
-        let on_pocket = |app: &SolveApp, point| manufacture_pocket_at(&app.session, &setup, point).ok().flatten();
-        let Some(mut picks) = self.clicked.take(app, ctx, PICKED, found, on_pocket) else { return false };
-        picks.sort_unstable();
-        let (count, first) = (self.pockets().len(), usize::from(self.offers_all()));
-        // None left, or every one: all of them, the row's first choice. One: the row's own
-        // choice of it. Several: the choice the row gains for them, after the pockets.
-        let own = match picks.as_slice() {
-            [] => Some(0),
-            every if every.len() == count => Some(0),
-            [one] => Some(first + one),
-            _ => None,
-        };
-        (self.pocket, self.picks) = match own {
-            Some(choice) => (choice, Vec::new()),
-            None => (first + count, picks),
-        };
-        true
-    }
-
-    /// Forgets what was picked on the model: a choice from the row's list is the choice.
-    fn forget_picks(&mut self, app: &mut SolveApp) {
-        self.clicked.forget(app);
-        self.picks.clear();
+        self.clicked.missed()
     }
 
     /// What is missing before a pocket can be cut, if anything.
@@ -335,17 +298,23 @@ impl PocketForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<PocketForm> {
-        // A choice from the row's list is the choice: what was picked on the model is forgotten.
-        if self.pocket != self.left_at {
-            self.forget_picks(app);
+        // What is picked on the model is what is cut (decision 0030 of the CAM work): a choice
+        // from the row's list forgets it, and a pocket clicked is taken and worked out.
+        let picks = self.editing.is_none();
+        if picks {
+            self.clicked.follow_row(app, self.pocket, &mut self.picks);
         }
         self.refresh(app);
-        // What was clicked on the model is the choice, and what the choice makes is worked out.
-        if self.take_picks(app, ctx) {
-            self.refresh(app);
+        if picks {
+            let found = self.found.get().map(|(key, _)| key);
+            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            let count = self.pockets().len();
+            let on_pocket = |app: &SolveApp, point| manufacture_pocket_at(&app.session, &setup, point).ok().flatten();
+            if self.clicked.take(app, ctx, PICKED, found, count, on_pocket, &mut self.pocket, &mut self.picks) {
+                self.refresh(app);
+            }
         }
-        self.left_at = self.pocket;
-        let picking = self.editing.is_none();
+        let picking = picks.then(|| self.clicked.says("manufacture.pocket_pick_hint", "manufacture.pocket_pick_missed"));
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
@@ -354,7 +323,7 @@ impl PocketForm {
         // After them, while several are picked on the model, the choice that stands for those.
         let several = (!self.picks.is_empty()).then(|| {
             let (count, of) = (self.picks.len().to_string(), self.pockets().len().to_string());
-            solidcraft_ui_text::format("manufacture.pocket_picked", &[("count", &count), ("of", &of)])
+            solidcraft_ui_text::format("manufacture.picked_of", &[("count", &count), ("of", &of)])
         });
         let pocket_labels: Vec<String> = self
             .offers_all()
@@ -408,9 +377,8 @@ impl PocketForm {
                     }
                     None => {
                         ui_kit::choice_row(ui, tr("manufacture.pocket_choice"), "manufacture_pocket_choice", &mut self.pocket, &pocket_labels);
-                        if picking {
-                            let said = if self.clicked.missed { "manufacture.pocket_pick_missed" } else { "manufacture.pocket_pick_hint" };
-                            ui_kit::text(ui, tr(said), ui_kit::Text::Note("manufacture_pocket_pick"));
+                        if let Some(picking) = picking {
+                            ui_kit::text(ui, picking, ui_kit::Text::Note("manufacture_pocket_pick"));
                         }
                     }
                 }

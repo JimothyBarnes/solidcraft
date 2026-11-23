@@ -895,21 +895,61 @@ fn round_wall(wall: &solidcore_record::Loop2) -> Option<f64> {
     circle.map(|(_, radius)| 2.0 * radius)
 }
 
-/// The openings the setup `setup` has for an inside contour, as a form or a script reads them:
-/// the ones through the part, then its closed pockets, each kind the largest first.
-fn found_openings(s: &Session, cmd: &str, setup: &Setup) -> std::result::Result<Vec<FoundOpening>, String> {
-    let (model, _) = model_box(s, cmd, setup).map_err(said)?;
-    let p = setup.place(model).map_err(|e| e.to_string())?;
+/// An opening of a placed setup as it is found: whether it goes through the part, a point in it
+/// and its region.
+type FoundRegion = (bool, (solidcore_record::Vec2, super::cam_pockets::Pocket));
+
+/// The openings of a placed setup with their regions, in the setup's WCS: the ones through the
+/// part, then its closed pockets, each kind the largest first, and whether each goes through.
+/// What the lists of openings and of slots are made from, and what a picked point is looked
+/// for in.
+fn found_regions(s: &Session, cmd: &str, setup: &Setup, p: &Placement) -> std::result::Result<Vec<FoundRegion>, String> {
     let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
     let windows = with_bodies(s, cmd, setup, |bodies| {
         let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
         super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).windows(p.model.min.z).map_err(|e| bad(cmd, e))
     })
     .map_err(said)?;
-    let pockets = pockets_of(s, cmd, setup, &p, None)?;
+    let pockets = pockets_of(s, cmd, setup, p, None)?;
+    Ok(windows.into_iter().map(|found| (true, found)).chain(pockets.into_iter().map(|found| (false, found))).collect())
+}
+
+/// Which of the openings [`manufacture_openings`] lists for the setup `id` the point `at` of
+/// the model was picked on, on its wall or on its floor: its place in that list, or `None`
+/// where the point is on no opening (decision 0030 of the CAM work). It reads the design and
+/// changes nothing.
+pub fn manufacture_opening_at(s: &Session, id: &str, at: solidcore_record::Vec3) -> std::result::Result<Option<usize>, String> {
+    const CMD: &str = "cam.setup.openings";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let found = found_regions(s, CMD, setup, &p)?;
+    Ok(super::cam_pockets::picked(found.iter().map(|(_, (_, opening))| opening), in_wcs(&p, at), p.model.max.z))
+}
+
+/// Which of the slots [`manufacture_slots`] lists for the setup `id` the point `at` of the model
+/// was picked on: its place in that list, or `None` where the point is on no slot (an opening
+/// that is no slot is none). It reads the design and changes nothing.
+pub fn manufacture_slot_at(s: &Session, id: &str, at: solidcore_record::Vec3) -> std::result::Result<Option<usize>, String> {
+    const CMD: &str = "cam.setup.slots";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let found = found_regions(s, CMD, setup, &p)?;
+    let slots = found.iter().map(|(_, (_, opening))| opening).filter(|opening| solidcraft_cam::slot_line(&opening.region).is_ok());
+    Ok(super::cam_pockets::picked(slots, in_wcs(&p, at), p.model.max.z))
+}
+
+/// The openings the setup `setup` has for an inside contour, as a form or a script reads them:
+/// the ones through the part, then its closed pockets, each kind the largest first.
+fn found_openings(s: &Session, cmd: &str, setup: &Setup) -> std::result::Result<Vec<FoundOpening>, String> {
+    let (model, _) = model_box(s, cmd, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
     let round = |v: f64| (v * 1e9).round() / 1e9;
-    let found = windows.into_iter().map(|found| (true, found)).chain(pockets.into_iter().map(|found| (false, found)));
-    Ok(found
+    Ok(found_regions(s, cmd, setup, &p)?
+        .into_iter()
         .map(|(through, (at, opening))| {
             let around = opening.region.outer.segs.iter().fold(solidcraft_geom::Aabb2::EMPTY, |b, seg| b.union(&seg.bounds()));
             FoundOpening {
@@ -968,17 +1008,10 @@ fn slots_of(
 fn found_slots(s: &Session, cmd: &str, setup: &Setup) -> std::result::Result<Vec<crate::schema::cam::FoundSlot>, String> {
     let (model, _) = model_box(s, cmd, setup).map_err(said)?;
     let p = setup.place(model).map_err(|e| e.to_string())?;
-    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
-    let windows = with_bodies(s, cmd, setup, |bodies| {
-        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
-        super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).windows(p.model.min.z).map_err(|e| bad(cmd, e))
-    })
-    .map_err(said)?;
-    let pockets = pockets_of(s, cmd, setup, &p, None)?;
     // To a millionth of a micron, and a zero without a minus sign.
     let round = |v: f64| (v * 1e9).round() / 1e9 + 0.0;
-    let found = windows.into_iter().map(|found| (true, found)).chain(pockets.into_iter().map(|found| (false, found)));
-    Ok(found
+    Ok(found_regions(s, cmd, setup, &p)?
+        .into_iter()
         .filter_map(|(through, (at, opening))| {
             let slot = solidcraft_cam::slot_line(&opening.region).ok()?;
             Some(crate::schema::cam::FoundSlot {

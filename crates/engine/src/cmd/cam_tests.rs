@@ -2623,3 +2623,43 @@ fn a_point_picked_on_the_model_is_of_the_hole_it_is_on() {
     let origin = solidcore_record::Vec3 { x: 0.0, y: 0.0, z: 0.0 };
     assert!(crate::cmd::manufacture_hole_at(&s, "setup-9", origin).err().is_some_and(|why| why.contains("no setup 'setup-9'")));
 }
+
+#[test]
+fn a_point_picked_on_the_model_is_of_the_opening_or_the_slot_it_is_in() {
+    // The plate with a window 30 x 20 through it, a pocket 20 x 20, 6 deep, and a slot 10 wide,
+    // 30 between the centres of its ends and 8 deep, drawn as a user draws one. In the model the
+    // plate's corner is at the origin and its top at Z 20.
+    let mut s = plate();
+    boxed(&mut s, [10.0, 10.0, -5.0], [30.0, 20.0, 30.0], "cut");
+    boxed(&mut s, [20.0, 50.0, 14.0], [20.0, 20.0, 6.0], "cut");
+    run(&mut s, "sketch.create", json!({"plane": "XY", "offset": 20}));
+    run(&mut s, "sketch.slot.center_to_center", json!({"p0": [50, 25], "p1": [80, 25], "width": 10}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 8, "direction": "negative", "operation": "cut", "profiles": "all"}));
+    let openings = run(&mut s, "cam.setup.openings", json!({"id": "setup-1"}))["openings"].as_array().unwrap().clone();
+    let slots = run(&mut s, "cam.setup.slots", json!({"id": "setup-1"}))["slots"].as_array().unwrap().clone();
+    assert_eq!((openings.len(), slots.len()), (3, 1), "{openings:#?} {slots:#?}");
+    let of_size = |size: [f64; 2]| openings.iter().position(|opening| opening["size"] == json!(size)).unwrap_or(usize::MAX);
+    let (window, pocket, slot) = (of_size([30.0, 20.0]), of_size([20.0, 20.0]), of_size([40.0, 10.0]));
+    assert!(window < 3 && pocket < 3 && slot < 3 && openings[window]["through"] == true, "{openings:#?}");
+    let point = |x: f64, y: f64, z: f64| solidcore_record::Vec3 { x, y, z };
+    let opening_at = |x: f64, y: f64, z: f64| crate::cmd::manufacture_opening_at(&s, "setup-1", point(x, y, z)).unwrap();
+    let slot_at = |x: f64, y: f64, z: f64| crate::cmd::manufacture_slot_at(&s, "setup-1", point(x, y, z)).unwrap();
+    // The window's wall, anywhere down the part.
+    assert_eq!((opening_at(10.0, 20.0, 3.0), opening_at(25.0, 30.0, 19.0)), (Some(window), Some(window)));
+    // The pocket's floor and its wall; the slot's floor, its straight wall and its round end.
+    assert_eq!((opening_at(30.0, 60.0, 14.0), opening_at(20.0, 60.0, 18.0)), (Some(pocket), Some(pocket)));
+    assert_eq!((opening_at(65.0, 25.0, 12.0), opening_at(65.0, 20.0, 15.0), opening_at(85.0, 25.0, 16.0)), (Some(slot), Some(slot), Some(slot)));
+    // As a slot it is the one slot; the window and the pocket are openings, and no slots.
+    assert_eq!((slot_at(65.0, 25.0, 12.0), slot_at(65.0, 30.0, 19.0), slot_at(85.0, 25.0, 16.0)), (Some(0), Some(0), Some(0)));
+    assert_eq!((slot_at(10.0, 20.0, 3.0), slot_at(30.0, 60.0, 14.0)), (None, None));
+    // On neither: the plate's top, an outside wall, off the part, and hostile points.
+    for (x, y, z) in
+        [(90.0, 70.0, 20.0), (0.0, 40.0, 10.0), (200.0, 0.0, 0.0), (f64::NAN, 25.0, 12.0), (65.0, f64::INFINITY, 12.0), (65.0, 25.0, 1e300)]
+    {
+        assert_eq!((opening_at(x, y, z), slot_at(x, y, z)), (None, None), "{x} {y} {z}");
+    }
+    // A setup that is not there is said.
+    assert!(crate::cmd::manufacture_opening_at(&s, "setup-9", point(0.0, 0.0, 0.0)).err().is_some_and(|why| why.contains("no setup 'setup-9'")));
+    assert!(crate::cmd::manufacture_slot_at(&s, "setup-9", point(0.0, 0.0, 0.0)).err().is_some_and(|why| why.contains("no setup 'setup-9'")));
+}

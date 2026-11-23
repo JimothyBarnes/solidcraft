@@ -2631,3 +2631,143 @@ fn bore_takes_the_holes_clicked_on_the_model() {
     assert_eq!((made["name"].as_str(), made["operation"]["contour"]["openings"].clone()), (Some("Bore 1"), json!([[15.0, -10.0]])));
     assert!(h.app.dialog.is_none());
 }
+
+/// The view from the corner, far enough back that the part is in the middle of the window: the
+/// far side of a wall is seen through its opening's mouth.
+fn from_the_corner(h: &mut Harness) {
+    for view in ["home", "fit"] {
+        h.step(&json!({"call": "ui.view", "params": {"view": view}})).unwrap();
+    }
+    let distance = h.call("ui.camera", json!({}))["result"]["distance"].as_f64().unwrap();
+    h.step(&json!({"call": "ui.camera", "params": {"distance": 2.2 * distance}})).unwrap();
+    h.frames(3);
+}
+
+/// A click where the model's point `at` is on the screen.
+fn click_model(h: &mut Harness, at: [f64; 3]) {
+    h.step(&json!({"click": {"world": at}})).unwrap_or_else(|e| panic!("a click at {at:?}: {e}"));
+    h.frames(3);
+}
+
+#[test]
+fn slot_takes_the_slots_clicked_on_the_model() {
+    // The plate's two slots, the one through it first (12 wide, along Y at X 85), then the one
+    // 6 deep (10 wide, along X at Y 15). T1 is a 10 mm end mill.
+    let mut h = slotted_plate();
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    from_the_corner(&mut h);
+    panel_menu(&mut h, "MILLING", "cam.op.slot");
+    h.frames(3);
+    let form = slot_form(&mut h);
+    assert_eq!((form.slot, form.picked().len(), form.picks.clone()), (0, 2, vec![]));
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.slot_pick_hint")).is_some());
+    // The walls seen from the corner: the through slot's at X 79 and the other's at Y 20.
+    let (through, floored, top) = ([79.0, 45.0, 18.0], [40.0, 20.0, 18.0], [50.0, 60.0, 20.0]);
+    // The slot with a floor: that one alone, the row's own choice of it.
+    click_model(&mut h, floored);
+    let form = slot_form(&mut h);
+    assert_eq!((form.slot, form.picked().len(), form.picks.clone(), form.pick_missed()), (2, 1, vec![], false));
+    assert_eq!(form.picked()[0].width, 10.0);
+    // The plate's top is on no slot: nothing changes, and the form says so.
+    click_model(&mut h, top);
+    let form = slot_form(&mut h);
+    assert_eq!((form.slot, form.pick_missed()), (2, true));
+    assert!(h.widget(tr("manufacture.slot_pick_missed")).is_some());
+    // The other slot too: both are every slot, the row's first choice.
+    click_model(&mut h, through);
+    let form = slot_form(&mut h);
+    assert_eq!((form.slot, form.picked().len(), form.picks.clone(), form.pick_missed()), (0, 2, vec![], false));
+    // The first again takes it out: the one through the plate alone.
+    click_model(&mut h, floored);
+    let form = slot_form(&mut h);
+    assert_eq!((form.slot, form.picked().len(), form.picked()[0].through), (1, 1, true));
+    // A choice from the row's list forgets the picks.
+    slot_form(&mut h).slot = 2;
+    h.frames(3);
+    assert_eq!((slot_form(&mut h).slot, h.app.dialog.as_ref().map(|d| d.inputs[0].items.len())), (2, Some(0)));
+    // Created on a slot clicked: the operation mills that slot, and the picking stops.
+    click_model(&mut h, through);
+    assert_eq!(slot_form(&mut h).slot, 1);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let made = data(&mut h)["setups"][0]["operations"][0]["operation"]["slot"]["slots"].clone();
+    assert_eq!(made.as_array().map(Vec::len), Some(1), "{made}");
+    assert!(h.app.dialog.is_none());
+}
+
+#[test]
+fn contour_takes_the_openings_clicked_on_the_model() {
+    let mut h = harness();
+    // The block with a window 20 x 16 through it, two holes of 9 through it and a round pocket
+    // of 16, 8 deep; T1 is a 6 mm end mill. The row's choices: all three that go through, the
+    // window, each hole, the pocket.
+    block(&mut h);
+    h.app.run("solid.box", json!({"length": 20, "width": 16, "height": 30, "corner": [6, 12, -5], "operation": "cut"})).unwrap();
+    h.app.run("solid.cylinder", json!({"diameter": 16, "height": 8, "base": [45, 20, 12], "operation": "cut"})).unwrap();
+    for y in [6, 34] {
+        h.app.run("solid.cylinder", json!({"diameter": 9, "height": 30, "base": [45, y, -5], "operation": "cut"})).unwrap();
+    }
+    add_tool(&mut h, "flat_end_mill", 6.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    from_the_corner(&mut h);
+    ribbon(&mut h, "cam.op.contour");
+    // Round the outside nothing is picked, and the form does not say it could be.
+    h.frames(2);
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.opening_pick_hint")).is_none());
+    contour_form(&mut h).side = 1;
+    h.frames(3);
+    let form = contour_form(&mut h);
+    assert_eq!((form.opening, form.picked().len(), form.choices().len(), form.picks.clone()), (0, 3, 5, vec![]));
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.opening_pick_hint")).is_some());
+    // The far side of each wall, 2 mm down it, as it is seen from the corner.
+    let round = |x: f64, y: f64, diameter: f64| {
+        let across = std::f64::consts::FRAC_1_SQRT_2 * 0.5 * diameter;
+        [x - across, y + across, 18.0]
+    };
+    let (window, low, high, pocket) = ([6.0, 20.0, 18.0], round(45.0, 6.0, 9.0), round(45.0, 34.0, 9.0), round(45.0, 20.0, 16.0));
+    // One hole: that hole alone, the row's own choice of it.
+    click_model(&mut h, low);
+    assert!(crate::manufacture_workspace::picking::active(&h.app));
+    let form = contour_form(&mut h);
+    assert_eq!((form.picked().len(), form.picks.clone(), form.pick_missed()), (1, vec![], false));
+    assert_eq!((form.picked()[0].diameter, form.picked()[0].through), (Some(9.0), true));
+    let alone = form.opening;
+    assert!((2..=3).contains(&alone));
+    // The other hole too: two of the three that go through, a choice the row gains.
+    click_model(&mut h, high);
+    let form = contour_form(&mut h);
+    assert_eq!((form.opening, form.picked().len(), form.picks.len(), form.choices().len()), (5, 2, 2, 6));
+    assert_eq!(form.params()["contour"]["openings"].as_array().map(Vec::len), Some(2));
+    assert!(h.widget("2 of 3, picked on the model").is_some());
+    // The window too: all three that go through, the row's first choice.
+    click_model(&mut h, window);
+    let form = contour_form(&mut h);
+    assert_eq!((form.opening, form.picked().len(), form.picks.clone(), form.choices().len()), (0, 3, vec![], 5));
+    // The pocket is cut to another depth: it alone is cut round now, and the others are
+    // picked no longer.
+    click_model(&mut h, pocket);
+    let picked = h.app.dialog.as_ref().map(|d| d.inputs[0].items.len());
+    let form = contour_form(&mut h);
+    assert_eq!((form.opening, form.picked().len(), form.picked()[0].through, picked), (4, 1, false, Some(1)));
+    // The block's top is on no opening.
+    click_model(&mut h, [30.0, 35.0, 20.0]);
+    assert!(contour_form(&mut h).pick_missed() && h.widget(tr("manufacture.opening_pick_missed")).is_some());
+    // A choice from the row's list forgets the picks; round the outside nothing is picked.
+    contour_form(&mut h).opening = 1;
+    h.frames(3);
+    assert_eq!((contour_form(&mut h).opening, h.app.dialog.as_ref().map(|d| d.inputs[0].items.len())), (1, Some(0)));
+    contour_form(&mut h).side = 0;
+    h.frames(3);
+    assert!(h.app.dialog.is_none());
+    // Inside again, a hole clicked, and Create: the contour goes round that hole.
+    contour_form(&mut h).side = 1;
+    h.frames(3);
+    click_model(&mut h, high);
+    assert_eq!(contour_form(&mut h).opening, 5 - alone, "the other hole of the two");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let made = data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"].clone();
+    assert_eq!((made["side"].clone(), made["openings"].as_array().map(Vec::len)), (json!("inside"), Some(1)), "{made}");
+    assert!(h.app.dialog.is_none());
+}
