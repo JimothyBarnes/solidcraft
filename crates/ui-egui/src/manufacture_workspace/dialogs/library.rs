@@ -204,10 +204,7 @@ impl LibraryForm {
                 self.error = app.run("cam.tool.delete", json!({"number": number})).err();
                 Some(self)
             }
-            Some(Ask::Import) => {
-                app.manufacture_workspace.dialog = Some(Dialog::Import(ImportForm::new()));
-                None
-            }
+            Some(Ask::Import) => self.open(app, Dialog::Import(ImportForm::new())),
             Some(Ask::Export) => {
                 export_library(app);
                 Some(self)

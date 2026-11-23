@@ -2217,9 +2217,31 @@ fn the_tool_library_lists_searches_sorts_and_changes_the_designs_tools() {
     assert_eq!(open(&h), "setup");
     press(&mut h, "Cancel");
     assert_eq!(open(&h), "none");
-    // Close closes it.
+    // Export Tool Library writes the design's three tools to a file and leaves the window open.
     ribbon(&mut h, "cam.tool.list");
-    assert_eq!(open(&h), "library");
+    assert_eq!((open(&h), listed(&h)), ("library", vec![1, 2, 3]));
+    click(&mut h, "manufacture:library:export");
+    h.frames(5);
+    let file = h.dir.join(file_name(&format!("{} tools", h.app.session.doc.name), "tools", "json"));
+    assert!(file.exists() && open(&h) == "library", "{}: {:?}", file.display(), h.app.status);
+    // Import Tools opens its form in the window's place too, and the window comes back when it
+    // closes: with the drill, deleted since, in the list again once it is imported, and as it
+    // was when nothing is.
+    click(&mut h, "manufacture:library:tool:2");
+    click(&mut h, "manufacture:library:delete");
+    assert_eq!(listed(&h), vec![1, 3]);
+    click(&mut h, "manufacture:library:import");
+    assert_eq!(open(&h), "import");
+    import_form(&mut h).path = file.to_string_lossy().to_string();
+    h.frames(3);
+    assert_eq!(import_form(&mut h).picked.iter().copied().collect::<Vec<_>>(), vec![2]);
+    press(&mut h, "Import");
+    assert_eq!((open(&h), listed(&h)), ("library", vec![1, 2, 3]), "{:?}", h.app.status);
+    click(&mut h, "manufacture:library:import");
+    assert_eq!(open(&h), "import");
+    press(&mut h, "Cancel");
+    assert_eq!((open(&h), listed(&h)), ("library", vec![1, 2, 3]));
+    // Close closes it.
     press(&mut h, "Close");
     assert_eq!(open(&h), "none");
 }
