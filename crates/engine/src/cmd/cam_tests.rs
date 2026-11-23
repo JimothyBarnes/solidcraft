@@ -2386,3 +2386,41 @@ fn openings_read_lately_are_kept_and_read_again_when_the_model_changes() {
         assert!(why.contains("X 40 Y 30 is on top of the part, not in an opening"), "{why}");
     }
 }
+
+#[test]
+fn the_designs_tools_are_listed_by_number_and_searched_by_words() {
+    // The block's 10 mm drill (T3), then a 20 mm end mill (T4) that a facing uses and a 10 mm
+    // end mill (T2).
+    let mut s = drilling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.tool.create", json!({"tool": mill10()}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    let numbers = |listed: &Value| listed["tools"].as_array().unwrap().iter().map(|tool| tool["number"].as_u64().unwrap()).collect::<Vec<_>>();
+    let all = run(&mut s, "cam.tool.list", json!({}));
+    assert_eq!((numbers(&all), all["of"].as_u64()), (vec![2, 3, 4], Some(3)));
+    assert_eq!(
+        all["tools"][2],
+        json!({"number": 4, "name": "20 mm flat end mill", "kind": "flat_end_mill", "diameter": 20.0, "flutes": 4, "flute_length": 30.0,
+               "overall_length": 100.0, "stick_out": 50.0, "operations": 1})
+    );
+    assert_eq!((all["tools"][0]["operations"].as_u64(), all["tools"][1]["kind"].as_str()), (Some(0), Some("drill")));
+    // Every word must be found, in any case: in the name, the kind, the number as T3 or the
+    // diameter. No words list every tool.
+    for (search, found) in [
+        ("flat", vec![2, 4]),
+        ("FLAT 10", vec![2]),
+        ("drill", vec![3]),
+        ("t4", vec![4]),
+        ("  ", vec![2, 3, 4]),
+        ("ball", vec![]),
+        ("end mill 20", vec![4]),
+        ("10", vec![2, 3]),
+    ] {
+        let listed = run(&mut s, "cam.tool.list", json!({"search": search}));
+        assert_eq!((numbers(&listed), listed["of"].as_u64()), (found, Some(3)), "{search:?}");
+    }
+    assert_eq!(crate::cmd::manufacture_tool_rows(&crate::cmd::manufacture_data(&s.doc).unwrap(), "mill").len(), 2);
+    assert!(refused(&mut s, "cam.tool.list", json!({"search": 5})).contains("parameters"));
+    // A design with no Manufacture data has no tools to list.
+    assert_eq!(run(&mut Session::default(), "cam.tool.list", json!({})), json!({"tools": [], "of": 0}));
+}

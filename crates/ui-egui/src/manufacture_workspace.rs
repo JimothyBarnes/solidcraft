@@ -49,6 +49,9 @@ pub struct State {
     pub(crate) scene: std::sync::Mutex<scene::Cache>,
     /// The open form (Add Tool, Import Tools, New Setup, Face, Drill, Post Process), if any.
     pub(crate) dialog: Option<dialogs::Dialog>,
+    /// The window that comes back when the open form closes: the tool library, while a form it
+    /// opened (Add Tool, a tool's own) is open.
+    pub(crate) resume: Option<Box<dialogs::Dialog>>,
 }
 
 pub fn active(app: &SolveApp) -> bool {

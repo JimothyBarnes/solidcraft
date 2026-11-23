@@ -39,6 +39,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.tool.delete", "Delete Tool", crate::checked!("cam.tool.delete", tool_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamToolDeleteParams>::new()).output(output_schema_for::<CamToolWritten>)
         .params("number → removes one of the design's tools; refused while an operation uses it"),
+    CommandSpec::new("cam.tool.list", "Tool Library", crate::checked!("cam.tool.list", tool_list)).icon("library").noundo().read_only().doc_only()
+        .contract(&TypedContract::<crate::schema::cam::CamToolListParams>::new()).output(output_schema_for::<crate::schema::cam::CamToolList>)
+        .params("search?: words to look for in a tool's number (T3), name, kind and diameter, every one of them, in any case (default: every tool) → tools: [{number, name, kind, diameter, flutes, flute_length, overall_length, stick_out, operations: how many of the design's operations use it}] by number, lengths in mm; of: how many tools the design has"),
     CommandSpec::new("cam.setup.create", "New Setup", crate::checked!("cam.setup.create", setup_create)).icon("edit").doc_only()
         .contract(&TypedContract::<CamSetupCreateParams>::new()).output(output_schema_for::<CamSetupWritten>)
         .params("name?, machine?, wcs?, work_offset?: 1-6 (G54-G59), stock?, model_bodies?, fixture_bodies?, safe_heights? → id; defaults: stock 1 mm over on the sides and top, WCS at the stock's top centre, G54, clearance 25 mm, retract 5 mm"),
@@ -168,6 +171,42 @@ fn data(s: &mut Session, p: &Value) -> Result<Value> {
         CMD,
         CamData { data: serde_json::to_value(&d).map_err(|e| bad(CMD, e.to_string()))?, setups: d.setups.len(), tools: d.tools.len(), operations },
     )
+}
+
+/// The design's tools as a list shows them, by number: those in which every word of `search` is
+/// found, in any case, in the tool's number written `T3`, its name, its kind in words and its
+/// diameter; all of them for no words.
+pub fn manufacture_tool_rows(d: &ManufactureData, search: &str) -> Vec<crate::schema::cam::ToolRow> {
+    let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
+    let mut rows: Vec<crate::schema::cam::ToolRow> = d
+        .tools
+        .iter()
+        .filter(|tool| {
+            let text = format!("t{} {} {} {}", tool.number, tool.name, kind_words(&tool.kind), tool.geometry.diameter).to_lowercase();
+            words.iter().all(|word| text.contains(word.as_str()))
+        })
+        .map(|tool| crate::schema::cam::ToolRow {
+            number: tool.number,
+            name: tool.name.clone(),
+            kind: kind_words(&tool.kind).replace(' ', "_"),
+            diameter: tool.geometry.diameter,
+            flutes: tool.flutes,
+            flute_length: tool.geometry.flute_length,
+            overall_length: tool.geometry.overall_length,
+            stick_out: tool.holder.stick_out,
+            operations: d.setups.iter().flat_map(|setup| &setup.operations).filter(|op| op.tool == tool.number).count(),
+        })
+        .collect();
+    rows.sort_by_key(|row| row.number);
+    rows
+}
+
+fn tool_list(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.tool.list";
+    let p: crate::schema::cam::CamToolListParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let tools = manufacture_tool_rows(&d, p.search.as_deref().unwrap_or(""));
+    reply(CMD, crate::schema::cam::CamToolList { tools, of: d.tools.len() })
 }
 
 fn tool_create(s: &mut Session, p: &Value) -> Result<Value> {

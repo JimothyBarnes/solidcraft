@@ -27,12 +27,14 @@ use crate::ui_kit;
 mod bore;
 mod chamfer;
 mod contour;
+mod library;
 mod pocket;
 mod simulate;
 mod slot;
 pub(crate) use bore::BoreForm;
 pub(crate) use chamfer::ChamferForm;
 pub(crate) use contour::ContourForm;
+pub(crate) use library::LibraryForm;
 pub(crate) use pocket::PocketForm;
 pub(crate) use simulate::SimForm;
 pub(crate) use slot::SlotForm;
@@ -40,6 +42,7 @@ pub(crate) use slot::SlotForm;
 /// The open form.
 pub(crate) enum Dialog {
     Tool(ToolForm),
+    Library(LibraryForm),
     Import(ImportForm),
     Setup(SetupForm),
     Face(FaceForm),
@@ -1775,6 +1778,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
     if !matches!(
         id,
         "cam.tool.create"
+            | "cam.tool.list"
             | "cam.library.import"
             | "cam.library.export"
             | "cam.setup.create"
@@ -1797,6 +1801,8 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         app.set_status(why, true);
         return true;
     }
+    // A command started afresh has no window to come back to when its form closes.
+    app.manufacture_workspace.resume = None;
     if id == "cam.library.export" {
         // No form: the save prompt is all it asks.
         export_library(app);
@@ -1808,6 +1814,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
     }
     app.manufacture_workspace.dialog = Some(match id {
         "cam.tool.create" => Dialog::Tool(ToolForm::new(app)),
+        "cam.tool.list" => Dialog::Library(LibraryForm::new()),
         "cam.library.import" => Dialog::Import(ImportForm::new()),
         "cam.setup.create" => Dialog::Setup(SetupForm::new(app)),
         "cam.op.face" => Dialog::Face(FaceForm::new(app)),
@@ -1827,6 +1834,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
 /// click on its row). What has no form, or is of a kind its form does not show, says so on the
 /// status line.
 pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
+    app.manufacture_workspace.resume = None;
     let form = match target {
         Target::Tool(number) => ToolForm::edit(app, *number).map(Dialog::Tool),
         Target::Setup(id) => SetupForm::edit(app, id).map(Dialog::Setup),
@@ -1852,11 +1860,13 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
 pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let Some(dialog) = app.manufacture_workspace.dialog.take() else { return };
     if !super::active(app) || app.dialog.is_some() || app.tool.is_some() {
+        app.manufacture_workspace.resume = None;
         return;
     }
     let (units, decimals) = (app.session.doc.units.clone(), app.preferences.length_decimals);
     let kept = match dialog {
         Dialog::Tool(form) => form.show(app, ctx, &units, decimals).map(Dialog::Tool),
+        Dialog::Library(form) => form.show(app, ctx, &units, decimals).map(Dialog::Library),
         Dialog::Import(form) => form.show(app, ctx, &units, decimals).map(Dialog::Import),
         Dialog::Setup(form) => form.show(app, ctx, &units, decimals).map(Dialog::Setup),
         Dialog::Face(form) => form.show(app, ctx, &units, decimals).map(Dialog::Face),
@@ -1870,9 +1880,10 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),
     };
-    // A form that opened another while it ran keeps that one.
+    // A form that opened another while it ran keeps that one; a form that closes gives way to
+    // the window it was opened from (the tool library), when there is one.
     if app.manufacture_workspace.dialog.is_none() {
-        app.manufacture_workspace.dialog = kept;
+        app.manufacture_workspace.dialog = kept.or_else(|| app.manufacture_workspace.resume.take().map(|window| *window));
     }
 }
 

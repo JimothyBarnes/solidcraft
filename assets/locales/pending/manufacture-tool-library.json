@@ -1,0 +1,82 @@
+{
+  "en": {
+    "cmd.cam_tool_list": "Tool Library",
+    "help.cam.tool.list": "Lists the design's tools in a table: search it by words (a number as T3, a name, a kind, a diameter), sort it by a heading, and pick a tool to see its outline with its shank and holder. From here tools are added, changed and deleted, brought in from a tool library file and written out to one. A tool an operation uses can't be deleted.",
+    "manufacture.library_none": "The design has no tools yet. Add one, or import a tool library file.",
+    "manufacture.library_none_found": "No tool matches the search.",
+    "manufacture.library_pick": "Pick a tool to see its outline, change it or delete it. A double click opens its form.",
+    "manufacture.library_search": "Search tools",
+    "manufacture.library_stick_out": "Stick-out",
+    "manufacture.library_used": "Operations"
+  },
+  "ar": {
+    "cmd.cam_tool_list": "مكتبة الأدوات",
+    "help.cam.tool.list": "يعرض أدوات التصميم في جدول: ابحث فيه بالكلمات (رقم مثل T3، اسم، نوع، قطر)، ورتّبه بالنقر على عنوان عمود، واختر أداة لترى شكلها الخارجي مع ساقها وحاملها. من هنا تُضاف الأدوات وتُعدَّل وتُحذف، وتُستورد من ملف مكتبة أدوات وتُكتب إلى ملف. الأداة التي تستخدمها عملية لا يمكن حذفها.",
+    "manufacture.library_none": "لا توجد أدوات في التصميم بعد. أضف أداة، أو استورد ملف مكتبة أدوات.",
+    "manufacture.library_none_found": "لا توجد أداة تطابق البحث.",
+    "manufacture.library_pick": "اختر أداة لترى شكلها الخارجي أو لتعديلها أو حذفها. النقر المزدوج يفتح نموذجها.",
+    "manufacture.library_search": "البحث في الأدوات",
+    "manufacture.library_stick_out": "طول البروز",
+    "manufacture.library_used": "العمليات"
+  },
+  "he": {
+    "cmd.cam_tool_list": "ספריית כלים",
+    "help.cam.tool.list": "מציג את כלי התכן בטבלה: חפש בה במילים (מספר כמו T3, שם, סוג, קוטר), מיין אותה בלחיצה על כותרת, ובחר כלי כדי לראות את קו המתאר שלו עם הקנה והמחזיק. מכאן מוסיפים, משנים ומוחקים כלים, מייבאים אותם מקובץ ספריית כלים וכותבים אותם לקובץ. כלי שפעולה משתמשת בו אינו ניתן למחיקה.",
+    "manufacture.library_none": "אין עדיין כלים בתכן. הוסף כלי, או ייבא קובץ ספריית כלים.",
+    "manufacture.library_none_found": "אין כלי התואם לחיפוש.",
+    "manufacture.library_pick": "בחר כלי כדי לראות את קו המתאר שלו, לשנות אותו או למחוק אותו. לחיצה כפולה פותחת את הטופס שלו.",
+    "manufacture.library_search": "חיפוש כלים",
+    "manufacture.library_stick_out": "אורך בליטה",
+    "manufacture.library_used": "פעולות"
+  },
+  "ja": {
+    "cmd.cam_tool_list": "工具ライブラリ",
+    "help.cam.tool.list": "デザインの工具を表で一覧します。単語（T3 のような番号、名前、種類、直径）で検索し、見出しをクリックして並べ替え、工具を選ぶとシャンクとホルダを含む外形が表示されます。ここから工具の追加・変更・削除、工具ライブラリファイルからの読み込みと書き出しができます。加工で使用中の工具は削除できません。",
+    "manufacture.library_none": "デザインにはまだ工具がありません。工具を追加するか、工具ライブラリファイルを読み込んでください。",
+    "manufacture.library_none_found": "検索に一致する工具がありません。",
+    "manufacture.library_pick": "工具を選ぶと外形が表示され、変更や削除ができます。ダブルクリックでその工具のフォームが開きます。",
+    "manufacture.library_search": "工具を検索",
+    "manufacture.library_stick_out": "突き出し長さ",
+    "manufacture.library_used": "加工数"
+  },
+  "vi": {
+    "cmd.cam_tool_list": "Thư viện dao",
+    "help.cam.tool.list": "Liệt kê các dao của thiết kế trong một bảng: tìm theo từ (số như T3, tên, loại, đường kính), sắp xếp bằng cách bấm vào tiêu đề cột, và chọn một dao để xem biên dạng của nó cùng chuôi và đầu kẹp. Từ đây có thể thêm, sửa và xóa dao, nhập dao từ tệp thư viện dao và ghi ra tệp. Không thể xóa dao đang được một nguyên công sử dụng.",
+    "manufacture.library_none": "Thiết kế chưa có dao nào. Hãy thêm một dao, hoặc nhập một tệp thư viện dao.",
+    "manufacture.library_none_found": "Không có dao nào khớp với nội dung tìm.",
+    "manufacture.library_pick": "Chọn một dao để xem biên dạng, sửa hoặc xóa nó. Bấm đúp để mở biểu mẫu của dao.",
+    "manufacture.library_search": "Tìm dao",
+    "manufacture.library_stick_out": "Chiều dài nhô ra",
+    "manufacture.library_used": "Nguyên công"
+  },
+  "zh": {
+    "cmd.cam_tool_list": "刀具库",
+    "help.cam.tool.list": "在表格中列出设计的刀具：可按词搜索（如 T3 这样的编号、名称、类型、直径），点击表头排序，选中一把刀具即可查看其外形以及刀柄和刀夹。在这里可以添加、修改和删除刀具，从刀具库文件导入，或写出到文件。正被工序使用的刀具不能删除。",
+    "manufacture.library_none": "设计中还没有刀具。请添加一把，或导入刀具库文件。",
+    "manufacture.library_none_found": "没有与搜索匹配的刀具。",
+    "manufacture.library_pick": "选中一把刀具可查看其外形、修改或删除它。双击可打开它的表单。",
+    "manufacture.library_search": "搜索刀具",
+    "manufacture.library_stick_out": "伸出长度",
+    "manufacture.library_used": "工序数"
+  },
+  "de": {
+    "cmd.cam_tool_list": "Werkzeugbibliothek",
+    "help.cam.tool.list": "Listet die Werkzeuge der Konstruktion in einer Tabelle: nach Wörtern suchen (eine Nummer wie T3, ein Name, eine Art, ein Durchmesser), über eine Spaltenüberschrift sortieren und ein Werkzeug wählen, um seinen Umriss mit Schaft und Halter zu sehen. Von hier aus werden Werkzeuge hinzugefügt, geändert und gelöscht, aus einer Werkzeugbibliotheksdatei importiert und in eine geschrieben. Ein Werkzeug, das eine Bearbeitung verwendet, lässt sich nicht löschen.",
+    "manufacture.library_none": "Die Konstruktion hat noch keine Werkzeuge. Eines hinzufügen oder eine Werkzeugbibliotheksdatei importieren.",
+    "manufacture.library_none_found": "Kein Werkzeug passt zur Suche.",
+    "manufacture.library_pick": "Ein Werkzeug wählen, um seinen Umriss zu sehen, es zu ändern oder zu löschen. Ein Doppelklick öffnet sein Formular.",
+    "manufacture.library_search": "Werkzeuge suchen",
+    "manufacture.library_stick_out": "Auskraglänge",
+    "manufacture.library_used": "Bearbeitungen"
+  },
+  "ko": {
+    "cmd.cam_tool_list": "공구 라이브러리",
+    "help.cam.tool.list": "설계의 공구를 표로 나열합니다. 단어(T3 같은 번호, 이름, 종류, 지름)로 검색하고, 열 제목을 눌러 정렬하며, 공구를 선택하면 생크와 홀더를 포함한 외형을 볼 수 있습니다. 여기에서 공구를 추가, 변경, 삭제하고 공구 라이브러리 파일에서 가져오거나 파일로 내보냅니다. 작업에서 사용 중인 공구는 삭제할 수 없습니다.",
+    "manufacture.library_none": "설계에 아직 공구가 없습니다. 공구를 추가하거나 공구 라이브러리 파일을 가져오세요.",
+    "manufacture.library_none_found": "검색과 일치하는 공구가 없습니다.",
+    "manufacture.library_pick": "공구를 선택하면 외형을 보고 변경하거나 삭제할 수 있습니다. 두 번 클릭하면 해당 공구의 양식이 열립니다.",
+    "manufacture.library_search": "공구 검색",
+    "manufacture.library_stick_out": "돌출 길이",
+    "manufacture.library_used": "작업 수"
+  }
+}

@@ -25,6 +25,7 @@ pub const DOCUMENTED: &[&str] = &[
     "cam.setup.sheet",
     "cam.simulate",
     "cam.tool.create",
+    "cam.tool.list",
     "canvas.decal",
     "canvas.edit",
     "canvas.insert",

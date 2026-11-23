@@ -48,6 +48,7 @@ fn open(h: &Harness) -> &'static str {
     match &h.app.manufacture_workspace.dialog {
         None => "none",
         Some(Dialog::Tool(_)) => "tool",
+        Some(Dialog::Library(_)) => "library",
         Some(Dialog::Import(_)) => "import",
         Some(Dialog::Setup(_)) => "setup",
         Some(Dialog::Face(_)) => "face",
@@ -2128,4 +2129,94 @@ fn bore_goes_to_the_bottom_typed_to_break_through() {
     press(&mut h, "Create");
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"]["bottom"], json!(-21.5));
+}
+
+fn library_form(h: &mut Harness) -> &mut LibraryForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Library(form)) => form,
+        _ => panic!("the tool library is not open"),
+    }
+}
+
+/// The numbers of the tools the open tool library lists, in its order.
+fn listed(h: &Harness) -> Vec<u32> {
+    match &h.app.manufacture_workspace.dialog {
+        Some(Dialog::Library(form)) => form.rows(&h.app).iter().map(|row| row.number).collect(),
+        _ => panic!("the tool library is not open"),
+    }
+}
+
+/// A click on something the open window has a handle for.
+fn click(h: &mut Harness, handle: &str) {
+    h.step(&json!({"click": {"handle": handle}})).unwrap_or_else(|e| panic!("{handle}: {e}"));
+    h.frames(3);
+}
+
+#[test]
+fn the_tool_library_lists_searches_sorts_and_changes_the_designs_tools() {
+    let mut h = harness();
+    // The block with a 20 mm end mill (T1) that a facing uses, a 6 mm drill (T2) and a 10 mm
+    // end mill (T3).
+    block(&mut h);
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    add_tool(&mut h, "drill", 6.0);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 1})).unwrap();
+    // On the ribbon's Manage panel, beside Add Tool: the design's tools, by number.
+    assert_eq!(crate::workspace::destination(solidcraft_engine::find_command("cam.tool.list").unwrap()), Some(("MANUFACTURE", "MANAGE")));
+    ribbon(&mut h, "cam.tool.list");
+    assert_eq!((open(&h), listed(&h)), ("library", vec![1, 2, 3]));
+    assert!(h.widget(tr("manufacture.library_pick")).is_some());
+    // Searched by words, each of which must be found.
+    library_form(&mut h).search = "flat".into();
+    h.frames(3);
+    assert_eq!(listed(&h), vec![1, 3]);
+    // Sorted by a click on a heading: the diameter, the smallest first, then the largest first,
+    // then as listed again.
+    click(&mut h, "manufacture:library:sort:3");
+    assert_eq!(listed(&h), vec![3, 1]);
+    click(&mut h, "manufacture:library:sort:3");
+    assert_eq!(listed(&h), vec![1, 3]);
+    click(&mut h, "manufacture:library:sort:3");
+    assert_eq!((listed(&h), library_form(&mut h).sort.1), (vec![1, 3], crate::ui_kit::Sort::Listed));
+    // A click picks a tool. Delete is refused while an operation uses it, and the window says why.
+    click(&mut h, "manufacture:library:tool:1");
+    assert_eq!(library_form(&mut h).picked, Some(1));
+    assert!(h.widget(tr("manufacture.library_pick")).is_none());
+    click(&mut h, "manufacture:library:delete");
+    assert!(library_form(&mut h).error.is_some(), "a tool in use is not deleted");
+    assert_eq!(data(&mut h)["tools"].as_array().map(Vec::len), Some(3));
+    // The 10 mm end mill is not used: it goes, and nothing is picked any more.
+    click(&mut h, "manufacture:library:tool:3");
+    click(&mut h, "manufacture:library:delete");
+    assert_eq!((data(&mut h)["tools"].as_array().map(Vec::len), listed(&h)), (Some(2), vec![1]));
+    assert_eq!((library_form(&mut h).picked, library_form(&mut h).error.clone()), (None, None));
+    // Add Tool opens its form in the window's place, and the window comes back when the form
+    // closes, with its search and with the new tool.
+    click(&mut h, "manufacture:library:add");
+    assert_eq!(open(&h), "tool");
+    tool_form(&mut h).diameter = 8.0;
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "library", "{:?}", h.app.status);
+    assert_eq!(library_form(&mut h).search, "flat");
+    assert_eq!((listed(&h).len(), data(&mut h)["tools"].as_array().map(Vec::len)), (2, Some(3)));
+    // A tool's own form is opened from its row, and comes back here too, changed or not.
+    click(&mut h, "manufacture:library:tool:1");
+    click(&mut h, "manufacture:library:edit");
+    assert_eq!(open(&h), "tool");
+    press(&mut h, "Cancel");
+    assert_eq!(open(&h), "library");
+    // A form started from the ribbon while one of the window's is open does not bring the
+    // window back when it closes.
+    click(&mut h, "manufacture:library:add");
+    ribbon(&mut h, "cam.setup.create");
+    assert_eq!(open(&h), "setup");
+    press(&mut h, "Cancel");
+    assert_eq!(open(&h), "none");
+    // Close closes it.
+    ribbon(&mut h, "cam.tool.list");
+    assert_eq!(open(&h), "library");
+    press(&mut h, "Close");
+    assert_eq!(open(&h), "none");
 }

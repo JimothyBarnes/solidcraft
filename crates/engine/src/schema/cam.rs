@@ -53,6 +53,41 @@ pub struct CamToolWritten {
     pub tools: usize,
 }
 
+/// List the design's tools.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamToolListParams {
+    /// Words to look for in a tool's number (`T3`), name, kind and diameter: every word must be
+    /// found, in any case. None, or no words, lists every tool.
+    #[serde(default)]
+    pub search: Option<String>,
+}
+
+/// One of the design's tools, as a list shows it; lengths in mm.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct ToolRow {
+    pub number: u32,
+    pub name: String,
+    /// Its kind as a tool file names it (`flat_end_mill`).
+    pub kind: String,
+    pub diameter: f64,
+    pub flutes: u32,
+    pub flute_length: f64,
+    pub overall_length: f64,
+    /// How far it sticks out of its holder.
+    pub stick_out: f64,
+    /// How many of the design's operations use it: a tool in use can't be deleted.
+    pub operations: usize,
+}
+
+/// The design's tools that were asked for, by number.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamToolList {
+    pub tools: Vec<ToolRow>,
+    /// How many tools the design has, listed or not.
+    pub of: usize,
+}
+
 /// Create a setup. Every field is optional; the defaults are the usual vise setup: stock 1 mm
 /// over the model on the sides and the top, WCS at the top centre of the stock with the model's
 /// axes, G54, clearance 25 mm and retract 5 mm above the stock.

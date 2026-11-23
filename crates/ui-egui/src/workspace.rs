@@ -446,7 +446,12 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "MANUFACTURE", panel: "MILLING", promoted: 4, ids: crate::manufacture_workspace::MILLING },
     Section { tab: "MANUFACTURE", panel: "DRILLING", promoted: 1, ids: &["cam.op.drill"] },
     Section { tab: "MANUFACTURE", panel: "ACTIONS", promoted: 3, ids: &["cam.simulate", "cam.post", "cam.setup.sheet"] },
-    Section { tab: "MANUFACTURE", panel: "MANAGE", promoted: 1, ids: &["cam.tool.create", "cam.library.import", "cam.library.export"] },
+    Section {
+        tab: "MANUFACTURE",
+        panel: "MANAGE",
+        promoted: 2,
+        ids: &["cam.tool.list", "cam.tool.create", "cam.library.import", "cam.library.export"],
+    },
     Section { tab: "INSPECT", panel: "MEASURE", promoted: 3, ids: &["inspect.measure", "inspect.center_of_mass", "component.properties"] },
     Section { tab: "INSPECT", panel: "SECTION", promoted: 1, ids: &["inspect.section"] },
     Section {
