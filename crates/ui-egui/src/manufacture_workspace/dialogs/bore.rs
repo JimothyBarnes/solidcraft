@@ -1,15 +1,15 @@
 //! Bore's form (decision 0021 of the CAM work): round holes wider than the tool, cut with an end
 //! mill down a helix along their wall. It offers the holes Drill offers, a group at a time,
-//! builds the parameters of `cam.op.bore` (of `cam.op.edit` for a bore being changed: it is an
-//! inside contour) and shows what they would cut before OK, as the other operations' forms do.
+//! builds the parameters of `cam.op.bore` and shows what they would cut before Create, as the
+//! other operations' forms do. What it makes is an inside contour, and is changed in Contour's
+//! form.
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{HoleBottom, HoleGroup, OperationPreview, ToolChoice, manufacture_holes, manufacture_preview, manufacture_tools};
 use solidcraft_ui_text::tr;
 
 use super::contour::DIRECTIONS;
 use super::{
-    Edited, SetupChoice, Worked, group_label, kept_operation, labels, minutes_seconds, preview_note, refusal, set_or_clear, setups, speed_and_feed,
-    window_words, word,
+    SetupChoice, Worked, group_label, labels, minutes_seconds, preview_note, refusal, set_or_clear, setups, speed_and_feed, window_words, word,
 };
 use crate::SolveApp;
 use crate::ui_kit;
@@ -42,9 +42,6 @@ pub(crate) struct BoreForm {
     pub(super) worked: Worked<OperationPreview>,
     /// The setup of the list the viewport was last told to draw.
     drawn_setup: Option<usize>,
-    /// The bore being changed, when the form changes one: its `contour` parameters as kept. Its
-    /// holes stay the ones it has.
-    pub(super) editing: Option<Edited>,
     pub error: Option<String>,
 }
 
@@ -68,27 +65,8 @@ impl BoreForm {
             typed_feed: false,
             worked: Worked::new(),
             drawn_setup: None,
-            editing: None,
             error: None,
         }
-    }
-
-    /// The form for changing the bore `id` (an inside contour), in the setup it is in, on the
-    /// holes it has; why not, when the design has no such operation.
-    pub fn edit(app: &SolveApp, id: &str) -> Result<BoreForm, String> {
-        let (setup, name, tool, kind, base) = kept_operation(app, id)?;
-        if kind != "contour" || base["side"] != "inside" {
-            return Err(format!("operation {id} is not a bore"));
-        }
-        let mut form = BoreForm::new(app);
-        form.setups = vec![setup];
-        form.setup = 0;
-        (form.tool, form.picked_tool) = (form.tools.iter().position(|t| t.number == tool).unwrap_or(0), true);
-        form.direction = DIRECTIONS.iter().position(|d| Some(d.0) == base["direction"].as_str()).unwrap_or(0);
-        (form.rpm, form.typed_rpm) = base["rpm"].as_f64().map_or((0.0, false), |v| (v, true));
-        (form.feed, form.typed_feed) = base["feed"].as_f64().map_or((0.0, false), |v| (v, true));
-        form.editing = Some(Edited { id: json!(id), title: name, base });
-        Ok(form)
     }
 
     /// What is missing before holes can be bored, if anything.
@@ -123,18 +101,17 @@ impl BoreForm {
     /// The `cam.op.bore` parameters: a point in each hole of the group (its centre), and where
     /// the cut ends: at the end of the wall of a hole with a floor or a drill's point, through
     /// the part for one that goes through. A speed or feed that was not typed is left to the
-    /// command. A bore being changed keeps its own holes and the rest as kept.
+    /// command.
     pub fn params(&self) -> Value {
-        let mut contour = match (&self.editing, self.picked()) {
-            (Some(edited), _) => edited.base.clone(),
-            (None, Some(group)) => {
+        let mut contour = match self.picked() {
+            Some(group) => {
                 let bottom = match group.bottom {
                     HoleBottom::Through => Value::Null,
                     HoleBottom::Flat | HoleBottom::Point => json!(group.top - group.depth),
                 };
                 json!({"side": "inside", "openings": group.holes, "bottom": bottom})
             }
-            (None, None) => json!({"side": "inside", "openings": []}),
+            None => json!({"side": "inside", "openings": []}),
         };
         contour["direction"] = json!(word(&DIRECTIONS, self.direction));
         set_or_clear(&mut contour, "rpm", self.typed_rpm.then_some(self.rpm));
@@ -149,21 +126,18 @@ impl BoreForm {
     /// Finds the setup's holes and works the boring out, when the design or a field changed, and
     /// shows what was not typed as the holes and the tool give it.
     fn refresh(&mut self, app: &SolveApp) {
-        // An operation being changed keeps its holes: nothing is looked for or suited to them.
-        if self.editing.is_none() {
-            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
-            if self.found.refresh(app, &json!(setup), || manufacture_holes(&app.session, &setup)) {
-                // Other holes: start from their largest group again.
-                (self.group, self.suited_to) = (0, None);
-            }
-            if self.group >= self.groups().len() {
-                self.group = 0;
-            }
-            if self.suited_to != Some(self.group) {
-                self.suited_to = Some(self.group);
-                if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
-                    self.tool = self.fitting_tool(diameter);
-                }
+        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+        if self.found.refresh(app, &json!(setup), || manufacture_holes(&app.session, &setup)) {
+            // Other holes: start from their largest group again.
+            (self.group, self.suited_to) = (0, None);
+        }
+        if self.group >= self.groups().len() {
+            self.group = 0;
+        }
+        if self.suited_to != Some(self.group) {
+            self.suited_to = Some(self.group);
+            if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
+                self.tool = self.fitting_tool(diameter);
             }
         }
         let params = self.params();
@@ -185,15 +159,10 @@ impl BoreForm {
     /// the command refuses.
     pub fn accept(mut self, app: &mut SolveApp) -> Option<BoreForm> {
         self.refresh(app);
-        if self.missing().is_some() || (self.editing.is_none() && self.picked().is_none()) || self.worked.result.is_err() {
+        if self.missing().is_some() || self.picked().is_none() || self.worked.result.is_err() {
             return Some(self);
         }
-        let mut params = self.params();
-        let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "contour": params["contour"].take()})),
-            None => app.run("cam.op.bore", params),
-        };
-        match made {
+        match app.run("cam.op.bore", self.params()) {
             Ok(_) => None,
             Err(why) => {
                 self.error = Some(why);
@@ -211,13 +180,8 @@ impl BoreForm {
         let group_labels: Vec<&str> = group_labels.iter().map(String::as_str).collect();
         let directions = labels(&DIRECTIONS);
         let missing = self.missing();
-        let ready = missing.is_none() && (self.editing.is_some() || self.picked().is_some()) && self.worked.result.is_ok();
+        let ready = missing.is_none() && self.picked().is_some() && self.worked.result.is_ok();
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
-        // The holes of an operation being changed: how many it has.
-        let kept_holes = self.editing.as_ref().map(|edited| {
-            let count = edited.base["openings"].as_array().map_or(0, Vec::len).to_string();
-            solidcraft_ui_text::format("manufacture.drill_holes_kept", &[("count", &count)])
-        });
         // The setup picked is the one the viewport draws, so the holes are seen on its own stock.
         if self.drawn_setup != Some(self.setup)
             && let Some(picked) = self.setups.get(self.setup)
@@ -226,7 +190,7 @@ impl BoreForm {
             self.drawn_setup = Some(self.setup);
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
-        let (title, ok) = window_words(&self.editing, "cmd.cam_op_bore");
+        let (title, ok) = window_words(&None, "cmd.cam_op_bore");
         let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_bore"), "hole", &title)
             .placed(pivot, at)
             .fields()
@@ -236,24 +200,18 @@ impl BoreForm {
                     ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_bore_missing"));
                     return;
                 }
-                if let (Some(kept), Some(setup)) = (&kept_holes, setup_labels.first()) {
-                    // An operation stays in its setup and on its holes.
-                    ui_kit::value_row(ui, tr("manufacture.field_setup"), setup);
-                    ui_kit::value_row(ui, tr("manufacture.drill_holes"), kept);
-                } else {
-                    ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_bore_setup", &mut self.setup, &setup_labels);
-                    if group_labels.is_empty() {
-                        // Why no holes could be looked for, or that there are none to bore from here.
-                        match self.found.trouble().filter(|why| !why.is_empty()) {
-                            Some(why) => refusal(ui, Some(why)),
-                            None => {
-                                ui_kit::text(ui, tr("manufacture.drill_no_holes"), ui_kit::Text::Note("manufacture_bore_no_holes"));
-                            }
+                ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_bore_setup", &mut self.setup, &setup_labels);
+                if group_labels.is_empty() {
+                    // Why no holes could be looked for, or that there are none to bore from here.
+                    match self.found.trouble().filter(|why| !why.is_empty()) {
+                        Some(why) => refusal(ui, Some(why)),
+                        None => {
+                            ui_kit::text(ui, tr("manufacture.drill_no_holes"), ui_kit::Text::Note("manufacture_bore_no_holes"));
                         }
-                        return;
                     }
-                    ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_bore_holes", &mut self.group, &group_labels);
+                    return;
                 }
+                ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_bore_holes", &mut self.group, &group_labels);
                 let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_bore_tool", &mut self.tool, &tool_labels);
                 self.picked_tool |= self.tool != tool;
@@ -269,7 +227,7 @@ impl BoreForm {
                 }
                 ui_kit::text(ui, tr("manufacture.bore_note"), ui_kit::Text::Note("manufacture_bore_note"));
                 if ready {
-                    ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_bore_preview_note"));
+                    ui_kit::text(ui, preview_note(&None), ui_kit::Text::Note("manufacture_bore_preview_note"));
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });

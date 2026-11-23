@@ -584,6 +584,7 @@ fn commands_that_measure_the_model_bring_it_up_to_date_first() {
             spec.id,
             "cam.setup.measure"
                 | "cam.setup.holes"
+                | "cam.setup.openings"
                 | "cam.setup.outline"
                 | "cam.setup.pockets"
                 | "cam.setup.sheet"
@@ -1984,4 +1985,55 @@ fn an_inside_contour_goes_round_an_opening_read_from_the_model() {
     assert!(
         refused(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"openings": [[-15, 0]]}})).contains("openings are for an inside contour")
     );
+}
+
+#[test]
+fn a_setups_openings_are_listed_for_an_inside_contour() {
+    use std::f64::consts::PI;
+    // The plate (in the WCS X -50 to 50, Y -40 to 40, its top at Z -1 and its bottom at Z -21)
+    // with a window 40 x 30 through it about (-15, 0), a round pocket of 24, 8 deep, about
+    // (30, 0), a hole of 10 through it about (30, 25), and a recess of 20 x 10, 5 up into its
+    // underside about (-15, -30), which is no opening from above.
+    let mut s = plate();
+    boxed(&mut s, [15.0, 25.0, -5.0], [40.0, 30.0, 30.0], "cut");
+    run(&mut s, "solid.cylinder", json!({"diameter": 24, "height": 8, "base": [80, 40, 12], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    run(&mut s, "solid.cylinder", json!({"diameter": 10, "height": 30, "base": [80, 65, -5], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    boxed(&mut s, [25.0, 5.0, -1.0], [20.0, 10.0, 6.0], "cut");
+    let found = run(&mut s, "cam.setup.openings", json!({"id": "setup-1"}));
+    let openings = found["openings"].as_array().unwrap();
+    // The ones through the part first, the largest first, then the pocket.
+    assert_eq!(openings.len(), 3, "{found:#}");
+    let (window, hole, pocket) = (&openings[0], &openings[1], &openings[2]);
+    assert_eq!((window["through"].clone(), window["bottom"].clone(), window["depth"].clone()), (json!(true), json!(-21.0), json!(20.0)), "{window}");
+    assert_eq!((window["size"].clone(), window["diameter"].clone(), window["islands"].clone()), (json!([40.0, 30.0]), json!(null), json!(0)));
+    assert!(about(&window["area"], 1200.0) && window["widest"].as_f64().is_some_and(|widest| (widest - 30.0).abs() < 0.05), "{window}");
+    let inside = |opening: &Value, x: [f64; 2], y: [f64; 2]| {
+        let (px, py) = (opening["at"][0].as_f64().unwrap(), opening["at"][1].as_f64().unwrap());
+        px > x[0] && px < x[1] && py > y[0] && py < y[1]
+    };
+    assert!(inside(window, [-35.0, 5.0], [-15.0, 15.0]), "{window}");
+    assert_eq!((hole["through"].clone(), hole["diameter"].clone(), hole["bottom"].clone()), (json!(true), json!(10.0), json!(-21.0)), "{hole}");
+    assert!(inside(hole, [25.0, 35.0], [20.0, 30.0]) && about(&hole["area"], 25.0 * PI), "{hole}");
+    assert_eq!(
+        (pocket["through"].clone(), pocket["diameter"].clone(), pocket["bottom"].clone()),
+        (json!(false), json!(24.0), json!(-9.0)),
+        "{pocket}"
+    );
+    assert_eq!((pocket["depth"].clone(), pocket["size"].clone()), (json!(8.0), json!([24.0, 24.0])), "{pocket}");
+    // Each is named by its point: a contour round the inside of every one of them is worked out
+    // as it is listed, to the bottom it says (with a 6 mm end mill, tool 3, which goes into the
+    // hole of 10).
+    let mut small = mill10();
+    (small["number"], small["name"]) = (json!(3), json!("6 mm flat end mill"));
+    (small["geometry"]["diameter"], small["geometry"]["shank_diameter"]) = (json!(6.0), json!(6.0));
+    run(&mut s, "cam.tool.create", json!({"tool": small}));
+    for (k, opening) in openings.iter().enumerate() {
+        let made = run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 3, "contour": {"side": "inside", "openings": [opening["at"]]}}));
+        let t = run(&mut s, "cam.op.toolpath", json!({"id": made["id"]}));
+        let levels = t["numbers"]["levels"].as_array().unwrap();
+        assert!(about(levels.last().unwrap(), opening["bottom"].as_f64().unwrap()), "opening {k}: {}", t["numbers"]);
+    }
+    // No such setup; and a design with nothing to machine says so.
+    assert!(refused(&mut s, "cam.setup.openings", json!({"id": "setup-9"})).contains("no setup 'setup-9'"));
+    assert!(refused(&mut s, "cam.setup.openings", json!({"id": "setup-1", "z": 1})).contains("z"));
 }

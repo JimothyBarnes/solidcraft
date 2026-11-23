@@ -140,13 +140,29 @@ impl<'a> Finder<'a> {
             .flat_map(|rings| rings.iter().skip(1))
             .filter(|ring| ring.contains(at))
             .min_by(|a, b| a.signed_area().abs().total_cmp(&b.signed_area().abs()));
-        let Some(wall) = wall else { return Ok(None) };
-        let inside: Vec<&Loop2> =
-            faces.iter().filter_map(|rings| rings.first()).filter(|outer| outer.segs.first().is_some_and(|seg| wall.contains(seg.start()))).collect();
-        let islands = inside.iter().filter(|outer| {
-            !inside.iter().any(|other| !std::ptr::eq(*other, **outer) && outer.segs.first().is_some_and(|seg| other.contains(seg.start())))
-        });
-        Ok(Some(Region2 { outer: wall.ccw(), holes: islands.map(|island| island.ccw().reversed()).collect() }))
+        Ok(wall.map(|wall| air_within(faces, wall)))
+    }
+
+    /// The openings through the bodies, for the list a form shows: one for each hole of a cut
+    /// face of their section a hair above `lowest`, their own bottom, which is its floor here,
+    /// with a point in it; the largest first. Nothing was seen above any of them from places
+    /// along its wall ([`Finder::seen_above`]: a recess in the underside is not one); an
+    /// opening is checked exactly when it is cut.
+    pub(super) fn windows(&mut self, lowest: f64) -> Result<Vec<(Vec2, Pocket)>, String> {
+        let faces = self.faces_above(lowest)?;
+        let walls: Vec<Region2> = faces.iter().flat_map(|rings| rings.iter().skip(1)).map(|wall| air_within(faces, wall)).collect();
+        if walls.len() > MAX_FOUND_POCKETS {
+            return Err(format!("the part has more than {MAX_FOUND_POCKETS} openings through it"));
+        }
+        let mut found: Vec<(Vec2, Pocket)> = Vec::new();
+        for region in walls {
+            let window = Pocket { floor: lowest, region };
+            if !self.seen_above(&window) {
+                found.push((window.region.interior_point(), window));
+            }
+        }
+        found.sort_by(|a, b| b.1.region.area().total_cmp(&a.1.region.area()).then(a.0.y.total_cmp(&b.0.y)).then(a.0.x.total_cmp(&b.0.x)));
+        Ok(found)
     }
 
     /// The opening the point `at` of the plane is in, for a cut round the inside of its wall
@@ -267,4 +283,16 @@ impl<'a> Finder<'a> {
         found.sort_by(|a, b| b.1.region.area().total_cmp(&a.1.region.area()).then(b.1.floor.total_cmp(&a.1.floor)));
         Ok(found)
     }
+}
+
+/// The air within `wall`, a hole of one of `faces` (each a cut face's rings, the outer one
+/// first): the wall's outline, with the cut faces inside it as its holes: material standing
+/// there, islands, but for those that stand inside another one (in a pocket of an island).
+fn air_within(faces: &[Vec<Loop2>], wall: &Loop2) -> Region2 {
+    let inside: Vec<&Loop2> =
+        faces.iter().filter_map(|rings| rings.first()).filter(|outer| outer.segs.first().is_some_and(|seg| wall.contains(seg.start()))).collect();
+    let islands = inside.iter().filter(|outer| {
+        !inside.iter().any(|other| !std::ptr::eq(*other, **outer) && outer.segs.first().is_some_and(|seg| other.contains(seg.start())))
+    });
+    Region2 { outer: wall.ccw(), holes: islands.map(|island| island.ccw().reversed()).collect() }
 }

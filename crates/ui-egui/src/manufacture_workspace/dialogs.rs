@@ -86,7 +86,6 @@ impl Dialog {
             | Dialog::Contour(ContourForm { editing: Some(edited), .. })
             | Dialog::Pocket(PocketForm { editing: Some(edited), .. })
             | Dialog::Chamfer(ChamferForm { editing: Some(edited), .. })
-            | Dialog::Bore(BoreForm { editing: Some(edited), .. })
             | Dialog::Drill(DrillForm { editing: Some(edited), .. }) => edited.id.as_str(),
             _ => None,
         }
@@ -1802,10 +1801,9 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
     let form = match target {
         Target::Tool(number) => ToolForm::edit(app, *number).map(Dialog::Tool),
         Target::Setup(id) => SetupForm::edit(app, id).map(Dialog::Setup),
-        Target::Operation(id) => kept_operation(app, id).and_then(|(.., kind, kept)| match kind.as_str() {
+        Target::Operation(id) => kept_operation(app, id).and_then(|(.., kind, _)| match kind.as_str() {
             "face" => FaceForm::edit(app, id).map(Dialog::Face),
-            // A contour round the inside of round holes was made by Bore, and is changed there.
-            "contour" if kept["side"] == "inside" => BoreForm::edit(app, id).map(Dialog::Bore),
+            // Inside or outside, and a bore too: what Bore makes is an inside contour.
             "contour" => ContourForm::edit(app, id).map(Dialog::Contour),
             "pocket" => PocketForm::edit(app, id).map(Dialog::Pocket),
             "chamfer" => ChamferForm::edit(app, id).map(Dialog::Chamfer),

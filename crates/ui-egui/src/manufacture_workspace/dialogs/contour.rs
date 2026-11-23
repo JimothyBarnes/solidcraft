@@ -1,9 +1,12 @@
-//! Contour's form (decision 0013 of the CAM work): round the outside of the part. It builds the
-//! parameters of `cam.op.contour` (of `cam.op.edit` for a contour being changed) and shows what
-//! they would cut before OK, as the other operations' forms do.
+//! Contour's form (decisions 0013 and 0021 of the CAM work): round the outside of the part, or
+//! round the inside of openings found on the model. It builds the parameters of `cam.op.contour`
+//! (of `cam.op.edit` for a contour being changed) and shows what they would cut before OK, as
+//! the other operations' forms do.
 use serde_json::{Value, json};
-use solidcraft_engine::cmd::{OperationPreview, Placement, ToolChoice, manufacture_preview, manufacture_setup_preview, manufacture_tools};
-use solidcraft_engine::doc::display_units::format_length;
+use solidcraft_engine::cmd::{
+    FoundOpening, OperationPreview, Placement, ToolChoice, manufacture_openings, manufacture_preview, manufacture_setup_preview, manufacture_tools,
+};
+use solidcraft_engine::doc::display_units::{format_length, length_number};
 use solidcraft_ui_text::tr;
 
 use super::{
@@ -15,6 +18,10 @@ use crate::ui_kit;
 
 /// Which way round the cut goes: the command's word and the label.
 pub(super) const DIRECTIONS: [(&str, &str); 2] = [("climb", "manufacture.direction_climb"), ("conventional", "manufacture.direction_conventional")];
+/// Which side of a wall the cut goes round: the command's word and the label.
+const SIDES: [(&str, &str); 2] = [("outside", "manufacture.contour_side_outside"), ("inside", "manufacture.contour_side_inside")];
+/// The widest tool picked for an opening, as a share of the widest circle that fits in it.
+const WIDEST_TOOL: f64 = 0.9;
 /// The stepdown a contour takes when none is typed, as a share of the tool's diameter (the
 /// engine's own default, shown in the field).
 const STEPDOWN_SHARE: f64 = 0.5;
@@ -25,12 +32,24 @@ const LEAD_SHARE: f64 = 0.1;
 const TAB_WIDTH: f64 = 6.0;
 const TAB_HEIGHT: f64 = 2.0;
 
-/// Contour: round the outside of the part.
+/// Contour: round the outside of the part, or round the inside of its openings.
 pub(crate) struct ContourForm {
     setups: Vec<SetupChoice>,
     tools: Vec<ToolChoice>,
     pub setup: usize,
+    /// Which of [`SIDES`]: round the outside of the part, or round the inside of openings.
+    pub side: usize,
+    /// The openings the setup picked has, as the engine found them: looked for once the side
+    /// is inside.
+    found: Worked<Vec<FoundOpening>>,
+    /// Which of the choices of openings is cut ([`ContourForm::choices`]).
+    pub opening: usize,
+    /// The choice of openings the tool was last suited to.
+    suited_to: Option<usize>,
     pub tool: usize,
+    /// Whether the tool was picked by hand: until then, inside, it is the widest that fits the
+    /// openings picked.
+    pub picked_tool: bool,
     pub direction: usize,
     /// The Z the cut goes down to in the setup's WCS, mm: the part's bottom until it is typed.
     pub bottom: f64,
@@ -56,8 +75,9 @@ pub(crate) struct ContourForm {
     pub feed: f64,
     pub typed_rpm: bool,
     pub typed_feed: bool,
-    /// Where the setup sits on the model: the part's bottom is read from it.
-    placed: Worked<Placement>,
+    /// Where the setup sits on the model: the part's bottom is read from it. (Boxed: it is the
+    /// largest thing here, and the form is one of several kept in one enum.)
+    placed: Worked<Box<Placement>>,
     /// The contour these parameters would make.
     pub(super) worked: Worked<OperationPreview>,
     /// The setup of the list the viewport was last told to draw.
@@ -78,7 +98,12 @@ impl ContourForm {
             setups,
             tools,
             setup,
+            side: 0,
+            found: Worked::new(),
+            opening: 0,
+            suited_to: None,
             tool: 0,
+            picked_tool: false,
             direction: 0,
             bottom: 0.0,
             typed_bottom: false,
@@ -116,8 +141,9 @@ impl ContourForm {
         let mut form = ContourForm::new(app);
         form.setups = vec![setup];
         form.setup = 0;
-        form.tool = tools.iter().position(|t| t.number == tool).unwrap_or(0);
+        (form.tool, form.picked_tool) = (tools.iter().position(|t| t.number == tool).unwrap_or(0), true);
         form.tools = tools;
+        form.side = SIDES.iter().position(|side| Some(side.0) == base["side"].as_str()).unwrap_or(0);
         form.direction = DIRECTIONS.iter().position(|d| Some(d.0) == base["direction"].as_str()).unwrap_or(0);
         (form.bottom, form.typed_bottom) = number("bottom").map_or((0.0, false), |v| (v, true));
         (form.stepdown, form.typed_stepdown) = number("stepdown").map_or((form.stepdown, false), |v| (v, true));
@@ -144,19 +170,92 @@ impl ContourForm {
         }
     }
 
+    /// Whether the cut goes round the inside of openings.
+    pub fn inside(&self) -> bool {
+        word(&SIDES, self.side) == "inside"
+    }
+
+    /// The openings found, none while they could not be (or the side is the outside).
+    pub fn openings(&self) -> &[FoundOpening] {
+        self.found.get().map_or(&[], |(_, found)| found.as_slice())
+    }
+
+    /// What the form offers to cut round the inside of, as places in [`ContourForm::openings`]:
+    /// every two or more openings that are cut to one depth, together, then each one alone.
+    pub fn choices(&self) -> Vec<Vec<usize>> {
+        let found = self.openings();
+        let mut together: Vec<Vec<usize>> = Vec::new();
+        for (at, opening) in found.iter().enumerate() {
+            let alike = |group: &Vec<usize>| {
+                group
+                    .first()
+                    .and_then(|first| found.get(*first))
+                    .is_some_and(|first| first.through == opening.through && (first.bottom - opening.bottom).abs() <= 1e-6)
+            };
+            match together.iter_mut().find(|group| alike(group)) {
+                Some(group) => group.push(at),
+                None => together.push(vec![at]),
+            }
+        }
+        together.retain(|group| group.len() > 1);
+        together.into_iter().chain((0..found.len()).map(|at| vec![at])).collect()
+    }
+
+    /// The openings the choice picked stands for.
+    pub fn picked(&self) -> Vec<&FoundOpening> {
+        let found = self.openings();
+        self.choices().get(self.opening).map(|choice| choice.iter().filter_map(|at| found.get(*at)).collect()).unwrap_or_default()
+    }
+
+    /// The choices of openings as the form offers them: "40.00 × 30.00 mm, through the part",
+    /// "Ø24.00 mm, 8.00 mm deep", "All 3 through the part".
+    pub fn choice_labels(&self, units: &str, decimals: u8) -> Vec<String> {
+        let found = self.openings();
+        let label = |choice: &Vec<usize>| {
+            let Some(first) = choice.first().and_then(|at| found.get(*at)) else { return String::new() };
+            let (count, depth) = (choice.len().to_string(), format_length(first.depth, units, decimals));
+            let (width, height) = (length_number(first.size[0], units, decimals), format_length(first.size[1], units, decimals));
+            let diameter = first.diameter.map(|diameter| format_length(diameter, units, decimals)).unwrap_or_default();
+            let key = match (choice.len() > 1, first.through, first.diameter.is_some()) {
+                (true, true, _) => "manufacture.contour_openings_through",
+                (true, false, _) => "manufacture.contour_openings_deep",
+                (false, true, true) => "manufacture.contour_round_through",
+                (false, false, true) => "manufacture.contour_round_deep",
+                (false, true, false) => "manufacture.contour_opening_through",
+                (false, false, false) => "manufacture.contour_opening_deep",
+            };
+            solidcraft_ui_text::format(key, &[("count", &count), ("depth", &depth), ("width", &width), ("height", &height), ("diameter", &diameter)])
+        };
+        self.choices().iter().map(label).collect()
+    }
+
+    /// The tool that suits openings the narrowest of which lets a circle `widest` across in: the
+    /// widest tool that is no more than nine tenths of that, else the narrowest there is, which
+    /// then says why it does not fit.
+    fn fitting_tool(&self, widest: f64) -> usize {
+        let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
+        let fits = self.tools.iter().enumerate().filter(|(_, tool)| tool.diameter <= WIDEST_TOOL * widest + 1e-6).max_by(by_width);
+        fits.or(self.tools.iter().enumerate().min_by(by_width)).map_or(0, |(at, _)| at)
+    }
+
     /// The `cam.op.contour` parameters. What was not typed is left to the command, so it keeps
-    /// following the model and the tool: the bottom the part's, the stepdown and the arcs in and
-    /// out the tool's diameter, the speed and feed its cutting data. A contour being changed
-    /// starts from its parameters as kept, so what the form does not show (its top, its
-    /// clearance) stays.
+    /// following the model and the tool: the bottom the part's (inside, the opening's floor, or
+    /// through), the stepdown and the arcs the tool's diameter, the speed and feed its cutting
+    /// data. Inside, a point in each opening picked names it; there are no tabs there. A contour
+    /// being changed starts from its parameters as kept, so what the form does not show (its
+    /// top, its clearance, its side and its openings) stays.
     pub fn params(&self) -> Value {
         let mut contour = self.editing.as_ref().map_or_else(|| json!({}), |edited| edited.base.clone());
+        if self.editing.is_none() && self.inside() {
+            contour["side"] = json!("inside");
+            contour["openings"] = json!(self.picked().iter().map(|opening| opening.at).collect::<Vec<_>>());
+        }
         contour["direction"] = json!(word(&DIRECTIONS, self.direction));
         set_or_clear(&mut contour, "bottom", self.typed_bottom.then_some(self.bottom));
         set_or_clear(&mut contour, "stepdown", self.typed_stepdown.then_some(self.stepdown));
         set_or_clear(&mut contour, "leave", (self.leave > 0.0).then_some(self.leave));
         set_or_clear(&mut contour, "lead", self.typed_lead.then_some(self.lead));
-        if self.tabs > 0 {
+        if self.tabs > 0 && !self.inside() {
             let mut tabs = json!({"count": self.tabs});
             set_or_clear(&mut tabs, "width", self.typed_tab_width.then_some(self.tab_width));
             set_or_clear(&mut tabs, "height", self.typed_tab_height.then_some(self.tab_height));
@@ -179,11 +278,35 @@ impl ContourForm {
         // The part's bottom, read where the setup sits: known even when the contour can't be
         // worked out, which is when it most needs changing.
         let setup = json!({"id": self.setups.get(self.setup).map_or("", |s| s.id.as_str())});
-        self.placed.refresh(app, &setup, || manufacture_setup_preview(&app.session, "cam.setup.edit", &setup));
-        if !self.typed_bottom
-            && let Ok(placement) = &self.placed.result
-        {
-            self.bottom = placement.model.min.z;
+        self.placed.refresh(app, &setup, || manufacture_setup_preview(&app.session, "cam.setup.edit", &setup).map(Box::new));
+        // Inside, the openings are looked for, and the tool follows the ones picked until it
+        // is picked by hand. A contour being changed keeps its openings: nothing is looked for.
+        if self.inside() && self.editing.is_none() {
+            let id = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            if self.found.refresh(app, &setup, || manufacture_openings(&app.session, &id)) {
+                (self.opening, self.suited_to) = (0, None);
+            }
+            self.opening = self.opening.min(self.choices().len().saturating_sub(1));
+            if self.suited_to != Some(self.opening) {
+                self.suited_to = Some(self.opening);
+                let widest = self.picked().iter().map(|opening| opening.widest).fold(f64::INFINITY, f64::min);
+                if !self.picked_tool && widest.is_finite() {
+                    self.tool = self.fitting_tool(widest);
+                }
+            }
+        }
+        if !self.typed_bottom {
+            // Where the cut ends unless typed: inside, where the openings picked end (a
+            // contour being changed says where it ended when it was last worked out).
+            let worked = || self.worked.get().and_then(|(_, preview)| preview.numbers.get("levels")?.as_array()?.last()?.as_f64());
+            let found = match (self.inside(), &self.editing) {
+                (true, None) => self.picked().first().map(|opening| opening.bottom),
+                (true, Some(_)) => worked(),
+                (false, _) => None,
+            };
+            if let Some(bottom) = found.or(self.placed.result.as_ref().ok().map(|placement| placement.model.min.z)) {
+                self.bottom = bottom;
+            }
         }
         if !self.typed_stepdown {
             self.stepdown = self.tools.get(self.tool).map_or(self.stepdown, |t| STEPDOWN_SHARE * t.diameter);
@@ -220,7 +343,8 @@ impl ContourForm {
     /// the command refuses.
     pub fn accept(mut self, app: &mut SolveApp) -> Option<ContourForm> {
         self.refresh(app);
-        if self.missing().is_some() || self.worked.result.is_err() {
+        let nothing_picked = self.inside() && self.editing.is_none() && self.picked().is_empty();
+        if self.missing().is_some() || nothing_picked || self.worked.result.is_err() {
             return Some(self);
         }
         let mut params = self.params();
@@ -243,8 +367,17 @@ impl ContourForm {
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
         let directions = labels(&DIRECTIONS);
+        let sides = labels(&SIDES);
+        let inside = self.inside();
+        let choice_labels = self.choice_labels(units, decimals);
+        let choice_labels: Vec<&str> = choice_labels.iter().map(String::as_str).collect();
+        // The openings of a contour being changed: how many it has.
+        let kept_openings = self.editing.as_ref().map(|edited| {
+            let count = edited.base["openings"].as_array().map_or(0, Vec::len).to_string();
+            solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count)])
+        });
         let missing = self.missing();
-        let ready = missing.is_none() && self.worked.result.is_ok();
+        let ready = missing.is_none() && self.worked.result.is_ok() && (!inside || self.editing.is_some() || !self.picked().is_empty());
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         let levels = self.levels(units, decimals);
         // The setup picked is the one the viewport draws, so the contour is seen on its own stock.
@@ -274,7 +407,40 @@ impl ContourForm {
                         ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_contour_setup", &mut self.setup, &setup_labels);
                     }
                 }
+                // Its side, and inside, its openings: a contour being changed stays on both.
+                match &kept_openings {
+                    Some(kept) => {
+                        ui_kit::value_row(ui, tr("manufacture.contour_side"), sides.get(self.side).copied().unwrap_or_default());
+                        if inside {
+                            ui_kit::value_row(ui, tr("manufacture.contour_opening"), kept);
+                        }
+                    }
+                    None => {
+                        ui_kit::choice_row(ui, tr("manufacture.contour_side"), "manufacture_contour_side", &mut self.side, &sides);
+                        if inside && choice_labels.is_empty() {
+                            // Why no openings could be looked for, or that the part has none.
+                            match self.found.trouble().filter(|why| !why.is_empty()) {
+                                Some(why) => refusal(ui, Some(why)),
+                                None => {
+                                    ui_kit::text(ui, tr("manufacture.contour_no_openings"), ui_kit::Text::Note("manufacture_contour_no_openings"));
+                                }
+                            }
+                            return;
+                        }
+                        if inside {
+                            ui_kit::choice_row(
+                                ui,
+                                tr("manufacture.contour_opening"),
+                                "manufacture_contour_opening",
+                                &mut self.opening,
+                                &choice_labels,
+                            );
+                        }
+                    }
+                }
+                let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_contour_tool", &mut self.tool, &tool_labels);
+                self.picked_tool |= self.tool != tool;
                 ui_kit::choice_row(ui, tr("manufacture.contour_direction"), "manufacture_contour_direction", &mut self.direction, &directions);
                 if ui_kit::row(ui, tr("manufacture.contour_bottom"), |ui| ui_kit::length_field(ui, &mut self.bottom, units, decimals)).changed() {
                     self.typed_bottom = true;
@@ -286,8 +452,11 @@ impl ContourForm {
                 if ui_kit::row(ui, tr("manufacture.contour_lead"), |ui| ui_kit::length_field(ui, &mut self.lead, units, decimals)).changed() {
                     self.typed_lead = true;
                 }
-                ui_kit::row(ui, tr("manufacture.contour_tabs"), |ui| ui_kit::whole_number_field(ui, &mut self.tabs, 0..=1000, ""));
-                if self.tabs > 0 {
+                // Tabs hold a part cut round its outside: there are none inside.
+                if !inside {
+                    ui_kit::row(ui, tr("manufacture.contour_tabs"), |ui| ui_kit::whole_number_field(ui, &mut self.tabs, 0..=1000, ""));
+                }
+                if self.tabs > 0 && !inside {
                     if ui_kit::row(ui, tr("manufacture.contour_tab_width"), |ui| ui_kit::length_field(ui, &mut self.tab_width, units, decimals))
                         .changed()
                     {
@@ -311,10 +480,14 @@ impl ContourForm {
                 for note in self.worked.get().map(|(_, preview)| preview.notes.as_slice()).unwrap_or_default() {
                     ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_contour_engine_note"));
                 }
-                ui_kit::text(ui, tr("manufacture.contour_note"), ui_kit::Text::Note("manufacture_contour_note"));
-                // What holds the part: its tabs, or a word that nothing does.
-                let held = if self.tabs > 0 { "manufacture.contour_tabs_note" } else { "manufacture.contour_loose" };
-                ui_kit::text(ui, tr(held), ui_kit::Text::Note("manufacture_contour_loose"));
+                if inside {
+                    ui_kit::text(ui, tr("manufacture.contour_inside_note"), ui_kit::Text::Note("manufacture_contour_note"));
+                } else {
+                    ui_kit::text(ui, tr("manufacture.contour_note"), ui_kit::Text::Note("manufacture_contour_note"));
+                    // What holds the part: its tabs, or a word that nothing does.
+                    let held = if self.tabs > 0 { "manufacture.contour_tabs_note" } else { "manufacture.contour_loose" };
+                    ui_kit::text(ui, tr(held), ui_kit::Text::Note("manufacture_contour_loose"));
+                }
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_contour_preview_note"));
                 }

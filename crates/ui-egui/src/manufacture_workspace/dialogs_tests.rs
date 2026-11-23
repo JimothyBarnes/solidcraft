@@ -1679,15 +1679,112 @@ fn bore_offers_the_holes_and_the_widest_end_mill_that_leaves_room_for_its_helix(
     // The simulation: both holes cut, nothing of the block cut into.
     let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
     assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
-    // Edit on a bore's row opens Bore's form on it, on the hole it has.
+    // Edit on a bore's row opens Contour's form on it: it is an inside contour, on the hole it
+    // has, with the depth and the steps Bore's form leaves to the hole and the tool.
     row_menu(&mut h, "Bore 1 (T2)", "manufacture.edit");
-    assert_eq!(open(&h), "bore");
-    let count = solidcraft_ui_text::format("manufacture.drill_holes_kept", &[("count", "1")]);
-    assert!(h.widget(&count).is_some() && h.widget("OK").is_some());
-    let form = bore_form(&mut h);
+    assert_eq!(open(&h), "contour");
+    let count = solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", "1")]);
+    assert!(h.widget(&count).is_some() && h.widget(tr("manufacture.contour_side_inside")).is_some() && h.widget("OK").is_some());
+    assert!(h.widget(tr("manufacture.contour_tabs")).is_none(), "no tabs inside");
+    let form = contour_form(&mut h);
+    assert_eq!((form.inside(), form.typed_bottom, form.bottom), (true, true, -9.0));
     (form.rpm, form.typed_rpm) = (3000.0, true);
     press(&mut h, "OK");
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"].clone();
     assert_eq!((kept["rpm"].clone(), kept["side"].clone(), kept["openings"].clone()), (json!(3000.0), json!("inside"), json!([[15.0, 0.0]])));
+}
+
+#[test]
+fn contour_goes_round_the_inside_of_openings_found_on_the_model() {
+    let mut h = harness();
+    // The block (60 x 40 x 20) with end mills of 20 (T1), 10 (T2) and 6 mm (T3). It has no
+    // openings yet: the outside is what a contour goes round, and inside says there is nothing.
+    block(&mut h);
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    add_tool(&mut h, "flat_end_mill", 6.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.contour");
+    let form = contour_form(&mut h);
+    assert!(!form.inside() && form.openings().is_empty());
+    assert!(h.widget(tr("manufacture.contour_tabs")).is_some() && h.widget(tr("manufacture.contour_side")).is_some());
+    contour_form(&mut h).side = 1;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.contour_no_openings")).is_some() && h.widget(tr("manufacture.contour_tabs")).is_none());
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "contour", "nothing to go round the inside of");
+    press(&mut h, "Cancel");
+    assert_eq!(data(&mut h)["setups"][0]["operations"], json!([]));
+
+    // A window 20 x 16 through it, a round pocket of 16, 8 deep, and two holes of 9 through it.
+    h.app.run("solid.box", json!({"length": 20, "width": 16, "height": 30, "corner": [6, 12, -5], "operation": "cut"})).unwrap();
+    h.app.run("solid.cylinder", json!({"diameter": 16, "height": 8, "base": [45, 20, 12], "operation": "cut"})).unwrap();
+    for y in [6, 34] {
+        h.app.run("solid.cylinder", json!({"diameter": 9, "height": 30, "base": [45, y, -5], "operation": "cut"})).unwrap();
+    }
+    ribbon(&mut h, "cam.op.contour");
+    contour_form(&mut h).side = 1;
+    h.frames(3);
+    // What goes through the part together first, then each opening alone: the largest first,
+    // the ones through the part before the pocket.
+    let form = contour_form(&mut h);
+    assert_eq!(
+        form.choice_labels("mm", 2),
+        ["All 3 through the part", "20.00 × 16.00 mm, through", "Ø9.00 mm, through", "Ø9.00 mm, through", "Ø16.00 × 8.00 mm"]
+    );
+    // All three: the 6 mm tool is the widest that goes into the holes of 9 with room to spare.
+    assert_eq!((form.opening, form.picked().len(), form.tool, form.picked_tool), (0, 3, 2, false));
+    // The window alone: the 10 mm tool, and its bottom is the part's.
+    form.opening = 1;
+    h.frames(3);
+    let form = contour_form(&mut h);
+    assert_eq!((form.tool, form.bottom, form.typed_bottom), (1, -21.0, false));
+    assert!(h.widget(tr("manufacture.contour_inside_note")).is_some() && h.widget(tr("manufacture.preview_note")).is_some());
+    assert!(scene::counts(&h.app).2 > 0, "drawn before it exists");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["name"].as_str(), kept["tool"].as_u64(), kept["operation"]["kind"].as_str()), (Some("Contour 1"), Some(2), Some("contour")));
+    // A point in the window names it (its middle: X 6 to 26 and Y 12 to 28 of the block, whose
+    // middle the WCS is over); nothing typed is kept, and no tabs.
+    let contour = &kept["operation"]["contour"];
+    assert_eq!((contour["side"].clone(), contour["openings"].clone()), (json!("inside"), json!([[-14.0, 0.0]])));
+    assert_eq!((contour["bottom"].clone(), contour["tabs"].clone(), contour["rpm"].clone()), (json!(null), json!(null), json!(null)));
+    // The pocket's wall: cut to its floor, which the model gives (Z -9).
+    ribbon(&mut h, "cam.op.contour");
+    contour_form(&mut h).side = 1;
+    h.frames(3);
+    contour_form(&mut h).opening = 4;
+    h.frames(3);
+    assert_eq!(contour_form(&mut h).bottom, -9.0);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let levels = h.app.run("cam.op.toolpath", json!({"id": "op-2"})).unwrap()["numbers"]["levels"].clone();
+    assert_eq!(levels.as_array().and_then(|levels| levels.last()).and_then(Value::as_f64), Some(-9.0), "{levels}");
+    // Everything through the part in one operation, with the 6 mm tool.
+    ribbon(&mut h, "cam.op.contour");
+    contour_form(&mut h).side = 1;
+    h.frames(3);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][2].clone();
+    assert_eq!((kept["tool"].as_u64(), kept["operation"]["contour"]["openings"].as_array().map(Vec::len)), (Some(3), Some(3)));
+    // Nothing of the block is cut into by any of them.
+    let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // Changed from its row, an inside contour stays inside, on the openings it has.
+    row_menu(&mut h, "Contour 1 (T2)", "manufacture.edit");
+    assert_eq!(open(&h), "contour");
+    let count = solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", "1")]);
+    assert!(h.widget(&count).is_some() && h.widget(tr("manufacture.contour_side_inside")).is_some());
+    let form = contour_form(&mut h);
+    form.leave = 0.2;
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let contour = data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"].clone();
+    assert_eq!(
+        (contour["side"].clone(), contour["openings"].clone(), contour["leave"].clone()),
+        (json!("inside"), json!([[-14.0, 0.0]]), json!(0.2))
+    );
 }

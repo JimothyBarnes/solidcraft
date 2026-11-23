@@ -19,9 +19,9 @@ use crate::schema::cam::{
     CamData, CamDataParams, CamOpChamferParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpDuplicateParams, CamOpEditParams,
     CamOpFaceParams, CamOpManualParams, CamOpMoveParams, CamOpPocketParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams,
     CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams,
-    CamSetupMeasured, CamSetupOutline, CamSetupOutlineParams, CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamSimulateParams,
-    CamSimulated, CamSimulatedHit, CamSimulatedOperation, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, FoundPocket,
-    HoleBottom, HoleGroup, OutlineLoop,
+    CamSetupMeasured, CamSetupOpenings, CamSetupOpeningsParams, CamSetupOutline, CamSetupOutlineParams, CamSetupPockets, CamSetupPocketsParams,
+    CamSetupWritten, CamSimulateParams, CamSimulated, CamSimulatedHit, CamSimulatedOperation, CamToolCreateParams, CamToolDeleteParams,
+    CamToolEditParams, CamToolWritten, FoundOpening, FoundPocket, HoleBottom, HoleGroup, OutlineLoop,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -60,6 +60,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup.pockets", "Find Pockets", crate::checked!("cam.setup.pockets", setup_pockets)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSetupPocketsParams>::new()).output(output_schema_for::<CamSetupPockets>)
         .params("id: the setup → pockets: [{at: [x, y], floor, depth, widest, passes, size: [x, y], islands, area}] in the setup's WCS (mm): the closed pockets of its bodies, from their exact faces, the largest first: a flat floor facing up, walls all round and nothing seen over it; `at` is a point on the floor, which is what cam.op.pocket names a pocket by, `widest` how far across the widest circle that fits is, and `passes` how wide a tool can be and still pass everywhere in it"),
+    CommandSpec::new("cam.setup.openings", "Find Openings", crate::checked!("cam.setup.openings", setup_openings)).icon("inspect").noundo().read_only()
+        .contract(&TypedContract::<CamSetupOpeningsParams>::new()).output(output_schema_for::<CamSetupOpenings>)
+        .params("id: the setup → openings: [{at: [x, y], bottom, through, depth, widest, size: [x, y], diameter?, islands, area}] in the setup's WCS (mm): what an inside contour (cam.op.contour with side inside) can go round, from the bodies' exact faces: the openings through the part, then its closed pockets, each kind the largest first; `at` is a point in the opening, which is what the contour names it by, `bottom` the Z it is cut down to unless told otherwise, `widest` how far across the widest circle that fits is, and `diameter` is given when the wall is a circle"),
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
@@ -685,6 +688,70 @@ pub fn manufacture_pockets(s: &Session, id: &str) -> std::result::Result<Vec<Fou
     let d = manufacture_data(&s.doc)?;
     let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
     found_pockets(s, CMD, setup)
+}
+
+/// The diameter of a wall that is a circle: arcs about one centre, of one radius.
+fn round_wall(wall: &solidcore_record::Loop2) -> Option<f64> {
+    let mut circle: Option<(solidcore_record::Vec2, f64)> = None;
+    for seg in &wall.segs {
+        let solidcore_record::Seg2::Arc { center, radius, .. } = *seg else { return None };
+        match circle {
+            None => circle = Some((center, radius)),
+            Some((about, of)) if (about.x - center.x).hypot(about.y - center.y) <= 1e-6 && (of - radius).abs() <= 1e-6 => {}
+            Some(_) => return None,
+        }
+    }
+    circle.map(|(_, radius)| 2.0 * radius)
+}
+
+/// The openings the setup `setup` has for an inside contour, as a form or a script reads them:
+/// the ones through the part, then its closed pockets, each kind the largest first.
+fn found_openings(s: &Session, cmd: &str, setup: &Setup) -> std::result::Result<Vec<FoundOpening>, String> {
+    let (model, _) = model_box(s, cmd, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    let windows = with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).windows(p.model.min.z).map_err(|e| bad(cmd, e))
+    })
+    .map_err(said)?;
+    let pockets = pockets_of(s, cmd, setup, &p, None)?;
+    let round = |v: f64| (v * 1e9).round() / 1e9;
+    let found = windows.into_iter().map(|found| (true, found)).chain(pockets.into_iter().map(|found| (false, found)));
+    Ok(found
+        .map(|(through, (at, opening))| {
+            let around = opening.region.outer.segs.iter().fold(solidcraft_geom::Aabb2::EMPTY, |b, seg| b.union(&seg.bounds()));
+            FoundOpening {
+                at: [round(at.x), round(at.y)],
+                bottom: round(opening.floor),
+                through,
+                depth: round(p.model.max.z - opening.floor),
+                widest: (2.0 * opening.region.inradius(1e-4) * 100.0).round() / 100.0,
+                size: [round(around.max.x - around.min.x), round(around.max.y - around.min.y)],
+                diameter: round_wall(&opening.region.outer).map(round),
+                islands: opening.region.holes.len(),
+                area: opening.region.area(),
+            }
+        })
+        .collect())
+}
+
+fn setup_openings(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.openings";
+    let p: CamSetupOpeningsParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let setup = d.setups.iter().find(|x| x.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.id)))?;
+    let openings = found_openings(s, CMD, setup).map_err(|e| bad(CMD, e))?;
+    reply(CMD, CamSetupOpenings { id: p.id, openings })
+}
+
+/// The openings the setup `id` has for an inside contour, for a form to offer; why not, when
+/// the setup can't be placed or a body can't be read. It reads the design and changes nothing.
+pub fn manufacture_openings(s: &Session, id: &str) -> std::result::Result<Vec<FoundOpening>, String> {
+    const CMD: &str = "cam.setup.openings";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    found_openings(s, CMD, setup)
 }
 
 fn setup_measure(s: &mut Session, p: &Value) -> Result<Value> {

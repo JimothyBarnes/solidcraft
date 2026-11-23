@@ -260,6 +260,48 @@ pub struct CamSetupPockets {
     pub pockets: Vec<FoundPocket>,
 }
 
+/// Find the openings a setup has for an inside contour.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupOpeningsParams {
+    pub id: String,
+}
+
+/// An opening of a setup's bodies that an inside contour can go round, in the setup's WCS, mm.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct FoundOpening {
+    /// A point in it, `[x, y]`: what an inside contour names it by.
+    pub at: [f64; 2],
+    /// The Z a contour round its inside goes down to unless told otherwise: the part's bottom
+    /// for an opening through it, else its floor.
+    pub bottom: f64,
+    /// Whether it goes through the part.
+    pub through: bool,
+    /// How far that bottom is below the part's top.
+    pub depth: f64,
+    /// About how far across the widest circle that fits in it is (from a search, never more than
+    /// what fits): a tool must be narrower.
+    pub widest: f64,
+    /// The sizes along X and Y of the box round its wall.
+    pub size: [f64; 2],
+    /// Its diameter, when its wall is a circle.
+    pub diameter: Option<f64>,
+    /// How many things stand in it, which the tool goes round too.
+    pub islands: usize,
+    /// The area within its wall, what stands in it taken out.
+    pub area: f64,
+}
+
+/// The openings of a setup's bodies, found on their exact faces (never a display mesh): the
+/// ones through the part first, then the closed pockets (it is their walls a contour goes
+/// round), each kind the largest first. Nothing was seen over any of them from places along its
+/// wall; an opening is checked exactly when it is cut.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupOpenings {
+    pub id: String,
+    pub openings: Vec<FoundOpening>,
+}
+
 /// What a setup command left.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CamSetupWritten {
