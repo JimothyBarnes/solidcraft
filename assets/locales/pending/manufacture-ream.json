@@ -1,0 +1,26 @@
+{
+  "en": {
+    "manufacture.cycle_ream": "Ream, feed out"
+  },
+  "ar": {
+    "manufacture.cycle_ream": "توسيع، خروج بالتغذية"
+  },
+  "he": {
+    "manufacture.cycle_ream": "קידוד, יציאה בהזנה"
+  },
+  "ja": {
+    "manufacture.cycle_ream": "リーマ（送りで戻る）"
+  },
+  "vi": {
+    "manufacture.cycle_ream": "Doa, lùi ra bằng bước tiến"
+  },
+  "zh": {
+    "manufacture.cycle_ream": "铰孔（进给退出）"
+  },
+  "de": {
+    "manufacture.cycle_ream": "Reiben, mit Vorschub zurück"
+  },
+  "ko": {
+    "manufacture.cycle_ream": "리밍(이송 복귀)"
+  }
+}

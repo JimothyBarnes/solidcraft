@@ -135,7 +135,7 @@ fn hostile_programs_are_refused_with_their_line_and_reason() {
         ("G0 X[1+2]", "expressions"),
         ("G0 X#1", "parameters"),
         ("F1\nG41 X1 D1", "line 2: G41"),
-        ("G85 X1 Z-1 R1", "boring cycles"),
+        ("G86 X1 Z-1 R1 P1", "boring cycles"),
         ("F1\nG0 Z5\nG99 G84 X1 Y1 Z-1 R1", "G84 with the spindle stopped"),
         ("F1 S100 M4\nG0 Z5\nG99 G84 X1 Y1 Z-1 R1", "G84 with the spindle turning counter-clockwise"),
         ("S100 M3\nG0 Z5\nG99 G84 X1 Y1 Z-1 R1", "before any feed"),
@@ -381,4 +381,31 @@ fn an_arc_is_held_to_the_limit_of_the_units_its_program_is_in() {
     let r = read("G20 F1\nG2 X1.00015 Y0 I0.5 J0", &ReadSettings::default()).unwrap();
     let Some(Move::Arc { to, center, .. }) = r.toolpath.moves.first() else { panic!("{:?}", r.toolpath.moves) };
     assert!((to.x - 25.40381).abs() < 1e-9 && (center.x - 12.7).abs() < 1e-9, "{to:?} {center:?}");
+}
+
+#[test]
+fn g85_and_g89_read_as_holes_fed_in_and_fed_out() {
+    let holes = moves("F50\nG0 Z5\nG99 G85 X1 Y1 Z-2 R1\nX2 Y2\nG89 X3 Y3 Z-1 R1 P0.5\nG80");
+    assert_eq!(
+        holes[1..],
+        [
+            drill(1.0, 1.0, -2.0, 1.0, 1.0, DrillCycle::Ream { dwell: 0.0 }, 50.0),
+            drill(2.0, 2.0, -2.0, 1.0, 1.0, DrillCycle::Ream { dwell: 0.0 }, 50.0),
+            drill(3.0, 3.0, -1.0, 1.0, 1.0, DrillCycle::Ream { dwell: 0.5 }, 50.0),
+        ]
+    );
+    // G85 takes no dwell and no peck; G89 needs its dwell; the boring cycles that stop the
+    // spindle are still refused by name.
+    for (program, why) in [
+        ("G0 Z5\nF50\nG99 G85 X1 Y1 Z-2 R1 P1", "P (a dwell) on G85 is not supported"),
+        ("G0 Z5\nF50\nG99 G85 X1 Y1 Z-2 R1 Q1", "G85 takes no Q"),
+        ("G0 Z5\nF50\nG99 G89 X1 Y1 Z-2 R1 Q1 P1", "G89 takes no Q"),
+        ("G0 Z5\nF50\nG99 G89 X1 Y1 Z-2 R1", "G89 needs P"),
+        ("G0 Z5\nF50\nG99 G89 X1 Y1 Z-2 R1 P-1", "may not be negative"),
+        ("G0 Z5\nF50\nG99 G86 X1 Y1 Z-2 R1 P1", "G86: boring cycles that stop the spindle"),
+        ("G0 Z5\nF50\nG99 G88 X1 Y1 Z-2 R1 P1", "G88: boring cycles that stop the spindle"),
+    ] {
+        let e = read(program, &ReadSettings::default()).unwrap_err().to_string();
+        assert!(e.contains(why), "{program:?}: {e:?} does not mention {why:?}");
+    }
 }

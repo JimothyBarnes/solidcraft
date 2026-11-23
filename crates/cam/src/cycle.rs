@@ -46,6 +46,10 @@ pub enum DrillCycle {
     /// and feed back out to R in step with it: G84, a right-hand thread. The hole's feed is the
     /// pitch times the spindle speed ([`check_tap`]).
     Tap { pitch: f64 },
+    /// Feed to the bottom, stay there `dwell` seconds (0 for none), and feed back out to R: G85,
+    /// or G89 with a dwell (NIST IR 6556 3.5.16.6 and 3.5.16.10). For a reamer or a boring
+    /// tool: a rapid out would drag a line down the finished wall.
+    Ream { dwell: f64 },
 }
 
 /// What G98 returns a hole to (NIST IR 6556 §3.5.20 and Haas's workbook differ, decision 0008).
@@ -137,6 +141,8 @@ pub(crate) fn check(from: Vec3, to: Vec3, r: f64, retract: f64, cycle: DrillCycl
         }
         DrillCycle::Tap { pitch } if (MIN_PITCH..=MAX_PITCH).contains(&pitch) => Ok(()),
         DrillCycle::Tap { pitch } => Err(format!("a tap's pitch must be {MIN_PITCH} to {MAX_PITCH} mm, not {pitch}")),
+        DrillCycle::Ream { dwell } if (0.0..=MAX_DWELL_SECONDS).contains(&dwell) => Ok(()),
+        DrillCycle::Ream { dwell } => Err(format!("dwell must be 0 to {MAX_DWELL_SECONDS} s, not {dwell}")),
     }
 }
 
@@ -219,6 +225,19 @@ pub(crate) fn expand(from: Vec3, to: Vec3, r: f64, retract: f64, cycle: DrillCyc
             // In, and back out to R at the same feed: the control reverses the spindle at the
             // bottom and turns it forward again at R. Above R the tool is clear of the thread.
             out.push(Move::Linear { to: at(to.z), feed });
+            out.push(Move::Linear { to: at(r), feed });
+            if retract > r {
+                out.push(Move::Rapid { to: at(retract) });
+            }
+            return;
+        }
+        DrillCycle::Ream { dwell } => {
+            // In, a dwell when it has one, and back out to R at the same feed. Above R the
+            // tool is clear of the hole.
+            out.push(Move::Linear { to: at(to.z), feed });
+            if dwell > 0.0 {
+                out.push(Move::Dwell { seconds: dwell });
+            }
             out.push(Move::Linear { to: at(r), feed });
             if retract > r {
                 out.push(Move::Rapid { to: at(retract) });

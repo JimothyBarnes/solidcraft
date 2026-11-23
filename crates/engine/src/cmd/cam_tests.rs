@@ -2199,3 +2199,47 @@ fn a_contour_in_passes_cuts_a_shoulder_down_to_its_floor() {
     assert!(edit(&mut s, json!({"stepover": 3})).contains("give the number of passes"));
     assert!(edit(&mut s, json!({"passes": 2, "stepover": 12})).contains("the stepover must be 0.001 mm to the tool's diameter (10 mm)"));
 }
+
+#[test]
+fn a_reamed_hole_is_fed_in_and_fed_back_out_and_posts_as_g85() {
+    // The block with a 10 mm reamer (tool 7) beside its drill: two holes reamed 12 deep from
+    // the block's top at Z -1, from R 5.
+    let mut s = drilling();
+    let mut reamer = drill10();
+    (reamer["number"], reamer["name"], reamer["kind"]) = (json!(7), json!("10 mm reamer"), json!("reamer"));
+    reamer["geometry"]["tip_angle"] = json!(0.0);
+    run(&mut s, "cam.tool.create", json!({"tool": reamer}));
+    let reamed = |dwell: f64| json!({"holes": [[-20, -10], [20, -10]], "depth": 12, "cycle": {"type": "ream", "dwell": dwell}});
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 7, "drill": reamed(0.0)}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let holes: Vec<&Value> = t["toolpath"]["moves"].as_array().unwrap().iter().filter(|m| m["kind"] == "drill").collect();
+    assert!(holes.len() == 2 && holes.iter().all(|m| m["cycle"] == json!({"type": "ream", "dwell": 0.0})), "{holes:?}");
+    // In and back out at the feed: twice the 18 mm from R 5 to Z -13, for each hole.
+    assert!(about(&t["feed_length"], 72.0), "{t}");
+    // Haas and NIST write it as G85; the Fanuc-style post, which has no cycle for it yet,
+    // writes the moves themselves and says so.
+    for post in ["haas_mill", "rs274"] {
+        let text = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": post}))["text"].as_str().unwrap().to_string();
+        assert!(text.contains("G99 G85 X-20. Y-10. Z-13. R5. F") && text.contains("\nX20. Y-10.\nG80"), "{post}:\n{text}");
+    }
+    let plain = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "fanuc_mill"}));
+    assert!(!plain["text"].as_str().unwrap().contains("G85"), "{}", plain["text"]);
+    assert!(
+        plain["notes"].as_array().unwrap().iter().any(|n| n.as_str().is_some_and(|n| n.contains("plain moves") && n.contains("G85"))),
+        "{}",
+        plain["notes"]
+    );
+    // The setup sheet calls it what it is.
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    assert!(sheet["html"].as_str().unwrap().contains("<td>Drill 1 <span class=\"note\">ream</span></td>"), "{}", sheet["html"]);
+    // With a dwell at the bottom it is G89 on the Haas.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": reamed(0.5)}));
+    let text = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}))["text"].as_str().unwrap().to_string();
+    assert!(text.contains("G99 G89 X-20. Y-10. Z-13. R5. P0.500 F"), "{text}");
+    // Drill's form is offered both tools, and told which one reams.
+    let offered: Vec<(u32, bool)> = crate::cmd::manufacture_tools(&s.doc, "drill").iter().map(|t| (t.number, t.reams)).collect();
+    assert_eq!(offered, vec![(3, false), (7, true)]);
+    // A dwell that is no dwell is refused when the toolpath is worked out, as a drilled hole's is.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": reamed(-1.0)}));
+    assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"})).contains("dwell must be 0 to"));
+}

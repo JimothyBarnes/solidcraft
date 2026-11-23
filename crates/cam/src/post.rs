@@ -113,6 +113,10 @@ pub struct Cycles {
     /// can't be written as plain moves.
     #[serde(default)]
     pub tap: bool,
+    /// G85: a hole fed in and fed back out, for a reamer; with the post's `dwell`, G89 for one
+    /// that dwells at the bottom. A post without it writes the moves out plainly.
+    #[serde(default)]
+    pub ream: bool,
     /// What the control's G98 returns to.
     pub g98: G98Rule,
     /// The control's own cycle distances, used to draw and simulate holes and to write them as
@@ -670,6 +674,8 @@ impl<'a> Writer<'a> {
             DrillCycle::Peck { .. } => ("G83", c.peck),
             DrillCycle::ChipBreak { .. } => ("G73", c.chip_break),
             DrillCycle::Tap { .. } => ("G84", c.tap),
+            DrillCycle::Ream { dwell } if dwell > 0.0 => ("G89", c.ream && c.dwell),
+            DrillCycle::Ream { .. } => ("G85", c.ream),
         };
         if !on {
             return Err(format!("the {} post does not write {code}", self.post.id));
@@ -697,8 +703,10 @@ impl<'a> Writer<'a> {
                 tail.push(format!("Q{q_text}"));
             }
             // Never stripped, as a dwell's P (see `Post::dwell`).
-            DrillCycle::Drill { dwell } if dwell > 0.0 => tail.push(format!("P{}", format_decimal(dwell, self.post.numbers.dwell, false))),
-            DrillCycle::Drill { .. } | DrillCycle::Tap { .. } => {}
+            DrillCycle::Drill { dwell } | DrillCycle::Ream { dwell } if dwell > 0.0 => {
+                tail.push(format!("P{}", format_decimal(dwell, self.post.numbers.dwell, false)));
+            }
+            DrillCycle::Drill { .. } | DrillCycle::Tap { .. } | DrillCycle::Ream { .. } => {}
         }
         // A tap's feed says its pitch, with the spindle speed: two more decimals than other
         // feeds (Haas's workbook writes F32.1429 for 14 threads an inch at 450 rev/min), and
@@ -948,6 +956,7 @@ fn compare(written: &Toolpath, read: &Toolpath, tol: f64, w: &Writer<'_>) -> Res
                     (DrillCycle::Peck { peck: a }, DrillCycle::Peck { peck: b })
                     | (DrillCycle::ChipBreak { peck: a }, DrillCycle::ChipBreak { peck: b }) => (a - b).abs() <= tol,
                     (DrillCycle::Tap { pitch: a }, DrillCycle::Tap { pitch: b }) => (a - b).abs() <= TAP_PITCH_SLOP * a,
+                    (DrillCycle::Ream { dwell: a }, DrillCycle::Ream { dwell: b }) => (a - b).abs() <= dwell_tol,
                     _ => false,
                 };
                 near(p, q, tol) && (r1 - r2).abs() <= tol && (t1 - t2).abs() <= tol && (f - g).abs() <= feed_tol && same_cycle

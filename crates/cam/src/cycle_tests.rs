@@ -245,3 +245,28 @@ fn a_tap_must_be_in_step_with_the_spindle() {
         assert!(refused(tapped(turning(400.0, clockwise), pitch, 500.0)).1.contains("pitch"), "{pitch}");
     }
 }
+
+#[test]
+fn a_reamed_hole_feeds_in_and_feeds_back_out() {
+    // NIST's G85: to the bottom at the feed and back out at the feed, where a drilled hole
+    // rapids out; then up to where it started at rapid, when that is above R.
+    let ream = |dwell: f64, retract: f64| Move::Drill { to: p(10.0, 0.0, -10.0), r: 2.0, retract, cycle: DrillCycle::Ream { dwell }, feed: 80.0 };
+    assert_eq!(
+        hole(p(0.0, 0.0, 5.0), ream(0.0, 5.0), &CycleMotion::default()),
+        [rapid(10.0, 0.0, 5.0), rapid(10.0, 0.0, 2.0), feed(10.0, 0.0, -10.0, 80.0), feed(10.0, 0.0, 2.0, 80.0), rapid(10.0, 0.0, 5.0)]
+    );
+    // With a dwell at the bottom (G89), from the R plane itself and back to it.
+    assert_eq!(
+        hole(p(10.0, 0.0, 2.0), ream(0.5, 2.0), &CycleMotion::default()),
+        [feed(10.0, 0.0, -10.0, 80.0), Move::Dwell { seconds: 0.5 }, feed(10.0, 0.0, 2.0, 80.0)]
+    );
+    // 12 in and 12 out at 80 mm/min and half a second: twice a drilled hole's cutting.
+    let s = Toolpath { start: p(10.0, 0.0, 2.0), moves: vec![ream(0.5, 2.0)] }.stats().unwrap();
+    assert!((s.feed_length - 24.0).abs() < 1e-12 && (s.feed_minutes - 0.3).abs() < 1e-12 && (s.dwell_minutes - 0.5 / 60.0).abs() < 1e-12, "{s:?}");
+    assert_eq!(ream(0.0, 5.0).end(p(0.0, 0.0, 5.0)), p(10.0, 0.0, 5.0));
+    // A dwell out of range is refused; a reamed hole is plain JSON by its name.
+    let bad = Toolpath { start: p(10.0, 0.0, 2.0), moves: vec![ream(-1.0, 2.0)] };
+    assert!(bad.validate().unwrap_err().to_string().contains("dwell must be 0 to"));
+    assert_eq!(serde_json::to_value(DrillCycle::Ream { dwell: 0.25 }).unwrap(), serde_json::json!({"type": "ream", "dwell": 0.25}));
+    assert_eq!(serde_json::from_str::<DrillCycle>(r#"{"type": "ream", "dwell": 0}"#).unwrap(), DrillCycle::Ream { dwell: 0.0 });
+}

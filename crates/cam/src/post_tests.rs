@@ -667,3 +667,41 @@ fn two_operations_with_one_tool_post_with_one_tool_change() {
     // Both read back as the moves they were given.
     assert_eq!(kept.read_back.toolpath.moves.iter().filter(|m| matches!(m, Move::ToolChange { .. })).count(), 1);
 }
+
+#[test]
+fn a_reamed_hole_is_g85_or_g89_where_the_post_has_them_and_plain_moves_where_not() {
+    let ream = DrillCycle::Ream { dwell: 0.0 };
+    for id in ["haas_mill", "rs274"] {
+        let posted = Post::builtin(id).unwrap().write(&one_hole(ream, 1.0), &ctx()).unwrap();
+        assert!(posted.text.contains("\nG99 G85 X0. Y0. Z-5. R1. F100.\nG80\n"), "{id}:\n{}", posted.text);
+        assert_eq!(posted.written.moves.last(), Some(&Move::Drill { to: p(0.0, 0.0, -5.0), r: 1.0, retract: 1.0, cycle: ream, feed: 100.0 }));
+        // With a dwell at the bottom it is G89.
+        let posted = Post::builtin(id).unwrap().write(&one_hole(DrillCycle::Ream { dwell: 0.5 }, 1.0), &ctx()).unwrap();
+        assert!(posted.text.contains("\nG99 G89 X0. Y0. Z-5. R1. P0.5"), "{id}:\n{}", posted.text);
+        assert!(posted.text.lines().any(|line| line.starts_with("G99 G89") && line.ends_with(" F100.")), "{id}:\n{}", posted.text);
+    }
+    // The dwell keeps all its decimals on the Haas, as G82's does.
+    let posted = Post::builtin("haas_mill").unwrap().write(&one_hole(DrillCycle::Ream { dwell: 0.5 }, 1.0), &ctx()).unwrap();
+    assert!(posted.text.contains("\nG99 G89 X0. Y0. Z-5. R1. P0.500 F100.\n"), "{}", posted.text);
+    // The Fanuc-style post has no cycle for it read from a public source yet: it writes the
+    // moves themselves, fed in and fed out, which say the same.
+    let posted = Post::builtin("fanuc_mill").unwrap().write(&one_hole(ream, 10.0), &ctx()).unwrap();
+    assert!(
+        !posted.text.contains("G85") && posted.notes.iter().any(|n| n.contains("plain moves") && n.contains("G85")),
+        "{:?}\n{}",
+        posted.notes,
+        posted.text
+    );
+    assert_eq!(
+        posted.written.moves[2..],
+        [
+            Move::Rapid { to: p(0.0, 0.0, 1.0) },
+            Move::Linear { to: p(0.0, 0.0, -5.0), feed: 100.0 },
+            Move::Linear { to: p(0.0, 0.0, 1.0), feed: 100.0 },
+            Move::Rapid { to: p(0.0, 0.0, 10.0) },
+        ]
+    );
+    // With a dwell it is refused there, as a drilled hole's dwell is: that post's dwell is not verified.
+    let e = Post::builtin("fanuc_mill").unwrap().write(&one_hole(DrillCycle::Ream { dwell: 0.5 }, 1.0), &ctx()).unwrap_err();
+    assert!(e.to_string().contains("dwell"), "{e}");
+}

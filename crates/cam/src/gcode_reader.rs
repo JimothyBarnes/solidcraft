@@ -383,7 +383,7 @@ impl Machine {
         for &g in &gs {
             let unsupported = match g {
                 382 => Some("probing (G38.2)"),
-                850..=890 => Some("boring cycles (G85-G89)"),
+                860..=880 => Some("boring cycles that stop the spindle or back-bore (G86-G88)"),
                 930 => Some("inverse-time feed (G93)"),
                 410 | 420 => Some("cutter radius compensation (G41/G42)"),
                 100 | 300 | 920..=923 => Some("moves and offsets in machine coordinates (G10, G30, G92)"),
@@ -545,14 +545,14 @@ impl Machine {
             self.motion = Motion::Cancelled;
             self.cycle = None;
         }
-        let cycle_code = gs.iter().copied().find(|g| matches!(g, 730 | 810 | 820 | 830 | 840));
+        let cycle_code = gs.iter().copied().find(|g| matches!(g, 730 | 810 | 820 | 830 | 840 | 850 | 890));
         for &g in &gs {
             self.motion = match g {
                 0 => Motion::Rapid,
                 10 => Motion::Linear,
                 20 => Motion::Arc(ArcDirection::Clockwise),
                 30 => Motion::Arc(ArcDirection::CounterClockwise),
-                730 | 810 | 820 | 830 | 840 => Motion::Cycle,
+                730 | 810 | 820 | 830 | 840 | 850 | 890 => Motion::Cycle,
                 _ => continue,
             };
             if self.motion != Motion::Cycle {
@@ -669,8 +669,15 @@ impl Machine {
         };
         let name = g_name(state.code);
         let mut cycle = match state.code {
-            810 | 820 | 840 if state.q.is_some() => return Err(format!("{name} takes no Q")),
-            730 | 810 | 830 | 840 if state.p.is_some() => return Err(format!("P (a dwell) on {name} is not supported")),
+            810 | 820 | 840 | 850 | 890 if state.q.is_some() => return Err(format!("{name} takes no Q")),
+            730 | 810 | 830 | 840 | 850 if state.p.is_some() => return Err(format!("P (a dwell) on {name} is not supported")),
+            // Fed in and fed back out: G85, and G89 with its dwell at the bottom.
+            850 => DrillCycle::Ream { dwell: 0.0 },
+            890 => match state.p {
+                Some(p) if p >= 0.0 => DrillCycle::Ream { dwell: p },
+                Some(p) => return Err(format!("dwell P{p} may not be negative")),
+                None => return Err("G89 needs P (the dwell in seconds)".into()),
+            },
             810 => DrillCycle::Drill { dwell: 0.0 },
             // Its pitch is its feed over the spindle speed: worked out below, with the feed.
             840 => match self.spindle {

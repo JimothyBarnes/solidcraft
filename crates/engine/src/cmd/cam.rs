@@ -68,7 +68,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
     CommandSpec::new("cam.op.drill", "Drill", crate::checked!("cam.op.drill", op_drill)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpDrillParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a drill, spot drill, reamer, tap or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle (a tap's is {type: tap, pitch}, its own pitch, and it takes a speed and no feed), order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
+        .params("setup: id, name?, tool: a drill, spot drill, reamer, tap or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle ({type: drill, dwell} | {type: peck | chip_break, peck} | {type: ream, dwell}: fed in and fed back out, for a reamer; a tap's is {type: tap, pitch}, its own pitch, and it takes a speed and no feed), order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
     CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpFaceParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
@@ -1071,6 +1071,8 @@ pub struct ToolChoice {
     pub diameter: f64,
     /// Its thread's pitch, mm, when it is a tap: it cuts holes with the tap cycle at this pitch.
     pub pitch: Option<f64>,
+    /// Whether it is a reamer: its holes are fed in and fed back out unless told otherwise.
+    pub reams: bool,
 }
 
 /// The design's tools that can do `operation` (`face`, `drill`, `contour`, `bore`, `pocket` or `chamfer`), for a form to offer; every
@@ -1106,7 +1108,13 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
     data.tools
         .iter()
         .filter(|t| can(t))
-        .map(|t| ToolChoice { number: t.number, name: t.name.clone(), diameter: t.geometry.diameter, pitch: pitch(t) })
+        .map(|t| ToolChoice {
+            number: t.number,
+            name: t.name.clone(),
+            diameter: t.geometry.diameter,
+            pitch: pitch(t),
+            reams: t.kind == solidcraft_cam::ToolKind::Reamer,
+        })
         .collect()
 }
 
@@ -1677,11 +1685,12 @@ fn origin_words(origin: &WcsOrigin) -> String {
     }
 }
 
-/// What an operation is, in a sheet's words: its kind, but a drilling that taps is a tap and a
-/// contour inside its openings says so.
+/// What an operation is, in a sheet's words: its kind, but a drilling that taps is a tap, one
+/// that reams is a ream, and a contour inside its openings says so.
 fn operation_words(operation: &OperationKind) -> String {
     match operation {
         OperationKind::Drill { drill } if matches!(drill.cycle, solidcraft_cam::DrillCycle::Tap { .. }) => "tap".into(),
+        OperationKind::Drill { drill } if matches!(drill.cycle, solidcraft_cam::DrillCycle::Ream { .. }) => "ream".into(),
         OperationKind::Contour { contour } if contour.side == ContourSide::Inside => "inside contour".into(),
         other => kind_words(other),
     }

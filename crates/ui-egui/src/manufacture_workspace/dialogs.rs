@@ -131,8 +131,12 @@ const ORIGINS: [(&str, [&str; 3]); 5] = [
     ("manufacture.origin_top_back_right", ["max", "max", "max"]),
 ];
 /// The drilling cycles Drill offers: the command's word and the label.
-const CYCLES: [(&str, &str); 3] =
-    [("drill", "manufacture.cycle_drill"), ("peck", "manufacture.cycle_peck"), ("chip_break", "manufacture.cycle_chip_break")];
+const CYCLES: [(&str, &str); 4] = [
+    ("drill", "manufacture.cycle_drill"),
+    ("peck", "manufacture.cycle_peck"),
+    ("chip_break", "manufacture.cycle_chip_break"),
+    ("ream", "manufacture.cycle_ream"),
+];
 /// How far past the part a through hole is drilled, at the drill's full diameter, mm.
 const BREAKTHROUGH: f64 = 1.0;
 /// How many pitches further a tap's tip goes through a through hole, so that its full thread
@@ -1256,6 +1260,9 @@ pub(crate) struct DrillForm {
     /// Whether the tool was picked by hand: until then it follows the holes' diameter.
     pub picked_tool: bool,
     pub cycle: usize,
+    /// Whether the cycle was picked by hand: until then a reamer's holes are fed in and fed
+    /// back out, and another tool's are drilled.
+    pub picked_cycle: bool,
     /// mm a peck, for the pecking cycles: the tool's diameter until it is typed.
     pub peck: f64,
     pub typed_peck: bool,
@@ -1291,6 +1298,7 @@ impl DrillForm {
             tool: 0,
             picked_tool: false,
             cycle: 0,
+            picked_cycle: false,
             peck: 0.0,
             typed_peck: false,
             depth: 0.0,
@@ -1317,7 +1325,7 @@ impl DrillForm {
         form.setups = vec![setup];
         form.setup = 0;
         (form.tool, form.picked_tool) = (form.tools.iter().position(|t| t.number == tool).unwrap_or(0), true);
-        form.cycle = CYCLES.iter().position(|c| Some(c.0) == base["cycle"]["type"].as_str()).unwrap_or(0);
+        (form.cycle, form.picked_cycle) = (CYCLES.iter().position(|c| Some(c.0) == base["cycle"]["type"].as_str()).unwrap_or(0), true);
         (form.peck, form.typed_peck) = base["cycle"]["peck"].as_f64().map_or((0.0, false), |v| (v, true));
         (form.depth, form.typed_depth) = (base["depth"].as_f64().unwrap_or(0.0), true);
         (form.rpm, form.typed_rpm) = base["rpm"].as_f64().map_or((0.0, false), |v| (v, true));
@@ -1347,11 +1355,12 @@ impl DrillForm {
     }
 
     /// The tool that suits holes of `diameter`: the widest that is no wider, else the narrowest.
-    /// A tap is never picked this way: it is wider than the hole it threads, and whether a hole
-    /// is to be tapped is not the model's to say.
+    /// A tap or a reamer is never picked this way: a tap is wider than the hole it threads, a
+    /// reamer finishes a hole another tool has made, and whether a hole is to be tapped or
+    /// reamed is not the model's to say.
     fn fitting_tool(&self, diameter: f64) -> usize {
         let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
-        let drills = || self.tools.iter().enumerate().filter(|(_, tool)| tool.pitch.is_none());
+        let drills = || self.tools.iter().enumerate().filter(|(_, tool)| tool.pitch.is_none() && !tool.reams);
         let fits = drills().filter(|(_, tool)| tool.diameter <= diameter + 1e-6).max_by(by_width);
         fits.or(drills().min_by(by_width)).map_or(0, |(at, _)| at)
     }
@@ -1378,14 +1387,14 @@ impl DrillForm {
     pub fn params(&self) -> Value {
         let cycle = match (self.tap(), word(&CYCLES, self.cycle)) {
             (Some(pitch), _) => json!({"type": "tap", "pitch": pitch}),
-            (None, "drill") => json!({"type": "drill", "dwell": 0.0}),
+            (None, plain @ ("drill" | "ream")) => json!({"type": plain, "dwell": 0.0}),
             (None, pecking) => json!({"type": pecking, "peck": self.peck}),
         };
         let mut drill = match (&self.editing, self.picked()) {
             (Some(edited), _) => {
                 let mut kept = edited.base.clone();
-                // A plain cycle's dwell stays as kept; the form does not show it.
-                let plain = cycle["type"] == "drill" && kept["cycle"]["type"] == "drill";
+                // A cycle's dwell stays as kept; the form does not show it.
+                let plain = cycle["type"] == kept["cycle"]["type"] && matches!(cycle["type"].as_str(), Some("drill" | "ream"));
                 kept["depth"] = json!(self.depth);
                 if !plain {
                     kept["cycle"] = cycle;
@@ -1435,6 +1444,16 @@ impl DrillForm {
         }
         if !self.typed_peck {
             self.peck = self.tools.get(self.tool).map_or(self.peck, |tool| tool.diameter);
+        }
+        // A reamer's holes are fed in and fed back out unless another cycle was picked, and
+        // another tool's are not unless that was.
+        if !self.picked_cycle {
+            let ream = CYCLES.iter().position(|c| c.0 == "ream").unwrap_or(0);
+            if self.tools.get(self.tool).is_some_and(|tool| tool.reams) {
+                self.cycle = ream;
+            } else if self.cycle == ream {
+                self.cycle = 0;
+            }
         }
         let params = self.params();
         if !self.worked.refresh(app, &params, || manufacture_preview(&app.session, "cam.op.drill", &params)) {
@@ -1554,8 +1573,10 @@ impl DrillForm {
                 if let Some(pitch) = tap {
                     ui_kit::value_row(ui, tr("manufacture.tool_thread_pitch"), &format_length(pitch, units, decimals));
                 } else {
+                    let cycle = self.cycle;
                     ui_kit::choice_row(ui, tr("manufacture.drill_cycle"), "manufacture_drill_cycle", &mut self.cycle, &cycles);
-                    if word(&CYCLES, self.cycle) != "drill" {
+                    self.picked_cycle |= self.cycle != cycle;
+                    if matches!(word(&CYCLES, self.cycle), "peck" | "chip_break") {
                         self.typed_peck |=
                             ui_kit::row(ui, tr("manufacture.drill_peck"), |ui| ui_kit::length_field(ui, &mut self.peck, units, decimals)).changed();
                     }

@@ -1936,3 +1936,50 @@ fn contour_takes_passes_sideways_and_keeps_its_tabs_for_one() {
         (json!(null), json!(null), json!({"count": 4, "width": null, "height": null}))
     );
 }
+
+#[test]
+fn drill_feeds_a_reamers_holes_in_and_back_out() {
+    let mut h = harness();
+    // The block with two holes of 10 through it, a 10 mm drill (T1) and a 10 mm reamer (T2).
+    block(&mut h);
+    for x in [15, 45] {
+        h.app.run("solid.cylinder", json!({"diameter": 10, "height": 30, "base": [x, 20, -5], "operation": "cut"})).unwrap();
+    }
+    add_tool(&mut h, "drill", 10.0);
+    add_tool(&mut h, "reamer", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.drill");
+    h.frames(3);
+    // As it opens: the drill, though the reamer is as wide (a reamer is never picked for a
+    // hole by its width), and a plain drilling cycle.
+    let form = drill_form(&mut h);
+    assert_eq!((form.tool, word(&CYCLES, form.cycle), form.picked_cycle), (0, "drill", false));
+    // The reamer picked: its holes are fed in and fed back out, with no peck to ask for.
+    let form = drill_form(&mut h);
+    (form.tool, form.picked_tool) = (1, true);
+    h.frames(3);
+    let form = drill_form(&mut h);
+    assert_eq!(word(&CYCLES, form.cycle), "ream");
+    assert_eq!(form.params()["drill"]["cycle"], json!({"type": "ream", "dwell": 0.0}));
+    assert!(h.widget(tr("manufacture.drill_peck")).is_none() && h.widget(tr("manufacture.drill_cycle")).is_some());
+    // Back to the drill, it drills again; a cycle picked by hand stays whatever the tool.
+    drill_form(&mut h).tool = 0;
+    h.frames(3);
+    assert_eq!(word(&CYCLES, drill_form(&mut h).cycle), "drill");
+    let form = drill_form(&mut h);
+    (form.tool, form.cycle, form.picked_cycle) = (1, 1, true);
+    h.frames(3);
+    assert_eq!(word(&CYCLES, drill_form(&mut h).cycle), "peck");
+    let form = drill_form(&mut h);
+    (form.cycle, form.picked_cycle) = (3, false);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["tool"].as_u64(), kept["operation"]["drill"]["cycle"].clone()), (Some(2), json!({"type": "ream", "dwell": 0.0})));
+    // Changed from its row it is still a reamed hole.
+    row_menu(&mut h, "Drill 1 (T2)", "manufacture.edit");
+    let form = drill_form(&mut h);
+    assert_eq!((word(&CYCLES, form.cycle), form.picked_cycle), ("ream", true));
+    press(&mut h, "OK");
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["drill"]["cycle"], json!({"type": "ream", "dwell": 0.0}));
+}
