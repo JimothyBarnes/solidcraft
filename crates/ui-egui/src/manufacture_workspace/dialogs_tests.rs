@@ -1553,3 +1553,46 @@ fn simulate_says_when_a_holder_is_in_the_stock() {
     assert!(h.widget(tr("manufacture.sim_no_body")).is_none() && h.widget(tr("manufacture.sim_no_gouge")).is_some());
     press(&mut h, "Close");
 }
+
+#[test]
+fn the_browser_copies_reorders_and_leaves_out_operations() {
+    let mut h = harness();
+    // The block faced (op-1), then contoured with the same tool (op-2).
+    faced(&mut h);
+    h.app.run("cam.op.contour", json!({"setup": "setup-1", "tool": 1})).unwrap();
+    h.frames(3);
+    let order = |h: &mut Harness| -> Vec<String> {
+        let ops = data(h)["setups"][0]["operations"].as_array().unwrap().clone();
+        ops.iter()
+            .map(|o| format!("{} {}{}", o["id"].as_str().unwrap(), o["name"].as_str().unwrap(), if o["suppressed"] == true { " (off)" } else { "" }))
+            .collect()
+    };
+    assert_eq!(order(&mut h), ["op-1 Face 1", "op-2 Contour 2"]);
+    // Move down on the facing puts it after the contour; Move up brings it back. The first row
+    // has no way up and the last no way down.
+    row_menu(&mut h, "Face 1 (T1)", "manufacture.move_down");
+    assert_eq!(order(&mut h), ["op-2 Contour 2", "op-1 Face 1"]);
+    row_menu(&mut h, "Face 1 (T1)", "manufacture.move_up");
+    assert_eq!(order(&mut h), ["op-1 Face 1", "op-2 Contour 2"]);
+    // (Their entries are there, greyed: asked all the same, nothing moves.)
+    row_menu(&mut h, "Face 1 (T1)", "manufacture.move_up");
+    row_menu(&mut h, "Contour 2 (T1)", "manufacture.move_down");
+    assert_eq!(order(&mut h), ["op-1 Face 1", "op-2 Contour 2"]);
+    // Duplicate adds a copy right after, named for what it copies.
+    row_menu(&mut h, "Face 1 (T1)", "cam.op.duplicate");
+    assert_eq!(order(&mut h), ["op-1 Face 1", "op-3 Face 1 (2)", "op-2 Contour 2"]);
+    // Suppress leaves an operation out of the program and of the drawing; the same entry, then
+    // Unsuppress, puts it back.
+    let lines = scene::counts(&h.app).2;
+    row_menu(&mut h, "Face 1 (2) (T1)", "cam.op.edit");
+    assert_eq!(order(&mut h), ["op-1 Face 1", "op-3 Face 1 (2) (off)", "op-2 Contour 2"]);
+    assert!(scene::counts(&h.app).2 < lines, "its toolpath is no longer drawn");
+    row_menu(&mut h, "Face 1 (2) (T1)", "cam.op.edit");
+    assert_eq!(order(&mut h), ["op-1 Face 1", "op-3 Face 1 (2)", "op-2 Contour 2"]);
+    assert_eq!(scene::counts(&h.app).2, lines);
+    // Each is one step to undo.
+    h.app.run("edit.undo", json!({})).unwrap();
+    h.app.run("edit.undo", json!({})).unwrap();
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(order(&mut h), ["op-1 Face 1", "op-2 Contour 2"]);
+}

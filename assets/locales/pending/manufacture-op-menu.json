@@ -1,0 +1,42 @@
+{
+  "en": {
+    "cmd.cam_op_duplicate": "Duplicate Operation",
+    "cmd.cam_op_move": "Move Operation",
+    "manufacture.duplicate": "Duplicate"
+  },
+  "ar": {
+    "cmd.cam_op_duplicate": "تكرار العملية",
+    "cmd.cam_op_move": "نقل العملية",
+    "manufacture.duplicate": "تكرار"
+  },
+  "he": {
+    "cmd.cam_op_duplicate": "שכפול פעולה",
+    "cmd.cam_op_move": "הזזת פעולה",
+    "manufacture.duplicate": "שכפול"
+  },
+  "ja": {
+    "cmd.cam_op_duplicate": "加工を複製",
+    "cmd.cam_op_move": "加工を移動",
+    "manufacture.duplicate": "複製"
+  },
+  "vi": {
+    "cmd.cam_op_duplicate": "Nhân bản nguyên công",
+    "cmd.cam_op_move": "Di chuyển nguyên công",
+    "manufacture.duplicate": "Nhân bản"
+  },
+  "zh": {
+    "cmd.cam_op_duplicate": "复制操作",
+    "cmd.cam_op_move": "移动操作",
+    "manufacture.duplicate": "复制"
+  },
+  "de": {
+    "cmd.cam_op_duplicate": "Bearbeitung duplizieren",
+    "cmd.cam_op_move": "Bearbeitung verschieben",
+    "manufacture.duplicate": "Duplizieren"
+  },
+  "ko": {
+    "cmd.cam_op_duplicate": "작업 복제",
+    "cmd.cam_op_move": "작업 이동",
+    "manufacture.duplicate": "복제"
+  }
+}

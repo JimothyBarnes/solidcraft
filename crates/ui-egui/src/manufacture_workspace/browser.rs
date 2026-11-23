@@ -1,6 +1,8 @@
 //! The Manufacture browser, in the shared Browser: the design's setups with their operations, and
 //! its tools, read from the design's Manufacture data. It only reads; every change is a `cam.*`
-//! command. A row's menu has Edit (its form, also a double click) and Delete (its command).
+//! command. A row's menu has Edit (its form, also a double click) and Delete (its command); an
+//! operation's has a copy, out of the program and back in, and earlier and later in its setup's
+//! order as well.
 use egui::Id;
 use serde_json::{Value, json};
 use solidcraft_theme::Tokens;
@@ -14,6 +16,10 @@ use crate::ui_kit::{
 
 /// The menu entry that opens a row's form; the other entries are commands.
 const EDIT: &str = "manufacture.edit";
+/// The entries that move an operation earlier and later in its setup's order: one command,
+/// `cam.op.move`, under two names.
+const MOVE_UP: &str = "manufacture.move_up";
+const MOVE_DOWN: &str = "manufacture.move_down";
 
 /// What a row's menu or a double click asked for.
 enum Ask {
@@ -26,12 +32,29 @@ fn menu(delete: &str, params: Value) -> Vec<Item> {
     vec![Item::action(EDIT, "Edit", "edit"), Item::action(delete, "Delete", "delete").with(params)]
 }
 
+/// An operation's menu: Edit, a copy, out of the program and back in, earlier and later in its
+/// setup's order (`place` of `count`), and Delete.
+fn operation_menu(id: &str, suppressed: bool, place: usize, count: usize, duplicate: &str) -> Vec<Item> {
+    vec![
+        Item::action(EDIT, "Edit", "edit"),
+        Item::action("cam.op.duplicate", duplicate, "copy").with(json!({"id": id})),
+        Item::action("cam.op.edit", if suppressed { "Unsuppress" } else { "Suppress" }, "suppress")
+            .with(json!({"id": id, "suppressed": !suppressed})),
+        Item::action(MOVE_UP, "Move up", "reorder").with(json!({"id": id, "to": place.saturating_sub(1)})).on(place > 0),
+        Item::action(MOVE_DOWN, "Move down", "reorder").with(json!({"id": id, "to": place + 1})).on(place + 1 < count),
+        Item::action("cam.op.delete", "Delete", "delete").with(json!({"id": id})),
+    ]
+}
+
 /// Notes what a row's events ask of the thing the row stands for.
 fn asked(events: Vec<Event>, target: impl Fn() -> Target, asks: &mut Vec<Ask>) {
     for event in events {
         match event {
             Event::Open(_) => asks.push(Ask::Edit(target())),
             Event::Action { action, .. } if action == EDIT => asks.push(Ask::Edit(target())),
+            Event::Action { action, params, .. } if action == MOVE_UP || action == MOVE_DOWN => {
+                asks.push(Ask::Run("cam.op.move".into(), params.unwrap_or(Value::Null)));
+            }
             Event::Action { action, params, .. } => asks.push(Ask::Run(action, params.unwrap_or(Value::Null))),
             _ => {}
         }
@@ -60,6 +83,7 @@ pub(crate) fn show(app: &mut SolveApp, rows: &mut Rows<'_>) {
         .or(data.setups.first())
         .map(|s| s.id.clone());
     let mut asks = Vec::new();
+    let duplicate = app.tr("manufacture.duplicate").to_string();
     for setup in &data.setups {
         let key = format!("manufacture:browser:setup:{}", setup.id);
         let label = format!("{} (G{})", setup.name, 53 + u32::from(setup.work_offset));
@@ -75,11 +99,13 @@ pub(crate) fn show(app: &mut SolveApp, rows: &mut Rows<'_>) {
             crate::ui_kit::text(rows.ui(), &why, Text::Note("manufacture_setup_trouble"));
         }
         if open {
-            for op in &setup.operations {
+            for (place, op) in setup.operations.iter().enumerate() {
                 let key = format!("manufacture:browser:op:{}", op.id);
                 let label = format!("{} (T{})", op.name, op.tool);
-                let entries = || menu("cam.op.delete", json!({"id": op.id}));
-                let out = row(rows, &key, Row { depth: 1, icon: "edit", label: &label, name: true, ..Row::default() }, NodeMenu::Items(&entries));
+                let entries = || operation_menu(&op.id, op.suppressed, place, setup.operations.len(), &duplicate);
+                // An operation left out of the program is listed faintly.
+                let item = Row { depth: 1, icon: "edit", label: &label, name: true, dim: op.suppressed, ..Row::default() };
+                let out = row(rows, &key, item, NodeMenu::Items(&entries));
                 asked(out.events, || Target::Operation(op.id.clone()), &mut asks);
                 // An operation whose toolpath can't be worked out says why, where it is listed.
                 if is_active && let Some(why) = super::scene::operation_trouble(app, &op.id) {

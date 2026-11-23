@@ -1785,3 +1785,69 @@ fn a_simulation_finds_a_holder_in_the_stock() {
     let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
     assert_eq!((sim["body_hit_count"].as_u64(), sim["body_hits"].clone()), (Some(0), json!([])));
 }
+
+#[test]
+fn operations_are_moved_and_copied_within_their_setup() {
+    // The block faced, contoured and drilled, in that order: op-1, op-2, op-3.
+    let mut s = milling();
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    let order = |s: &mut Session| -> Vec<(String, String)> {
+        let d = run(s, "cam.data", json!({}));
+        let ops = d["data"]["setups"][0]["operations"].as_array().unwrap().clone();
+        ops.iter().map(|o| (o["id"].as_str().unwrap().to_string(), o["name"].as_str().unwrap().to_string())).collect()
+    };
+    let ids = |s: &mut Session| order(s).into_iter().map(|(id, _)| id).collect::<Vec<_>>().join(" ");
+    assert_eq!(ids(&mut s), "op-1 op-2 op-3");
+    // The drilling first: holes before the part is cut round. The program follows the order.
+    let moved = run(&mut s, "cam.op.move", json!({"id": "op-3", "to": 0}));
+    assert_eq!((moved["id"].as_str(), moved["setup"].as_str(), moved["operations"].as_u64()), (Some("op-3"), Some("setup-1"), Some(3)));
+    assert_eq!(ids(&mut s), "op-3 op-1 op-2");
+    let text = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}))["text"].as_str().unwrap().to_string();
+    let (drill, mill) = (text.find("T3 M6").unwrap(), text.find("T4 M6").unwrap());
+    assert!(drill < mill, "the drill's tool change comes first: {text}");
+    // Past the end is the end; to its own place changes nothing; one undo puts a move back.
+    run(&mut s, "cam.op.move", json!({"id": "op-3", "to": 99}));
+    assert_eq!(ids(&mut s), "op-1 op-2 op-3");
+    run(&mut s, "cam.op.move", json!({"id": "op-2", "to": 1}));
+    assert_eq!(ids(&mut s), "op-1 op-2 op-3");
+    run(&mut s, "cam.op.move", json!({"id": "op-1", "to": 1}));
+    assert_eq!(ids(&mut s), "op-2 op-1 op-3");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(ids(&mut s), "op-1 op-2 op-3");
+
+    // A copy comes right after what it copies, with an id and a name of its own and the same
+    // tool and parameters; a second copy takes the next number.
+    let copy = run(&mut s, "cam.op.duplicate", json!({"id": "op-2"}));
+    assert_eq!((copy["id"].as_str(), copy["operations"].as_u64()), (Some("op-4"), Some(4)));
+    run(&mut s, "cam.op.duplicate", json!({"id": "op-2"}));
+    let named: Vec<String> = order(&mut s).into_iter().map(|(id, name)| format!("{id} {name}")).collect();
+    assert_eq!(named, ["op-1 Face 1", "op-2 Contour 2", "op-5 Contour 2 (3)", "op-4 Contour 2 (2)", "op-3 Drill 3"]);
+    let d = run(&mut s, "cam.data", json!({}));
+    let ops = &d["data"]["setups"][0]["operations"];
+    assert_eq!(
+        (ops[1]["operation"].clone(), ops[1]["tool"].clone(), ops[1]["suppressed"].clone()),
+        (ops[3]["operation"].clone(), ops[3]["tool"].clone(), ops[3]["suppressed"].clone())
+    );
+    let same = |a: &str, b: &str, s: &mut Session| {
+        run(s, "cam.op.toolpath", json!({"id": a}))["feed_length"] == run(s, "cam.op.toolpath", json!({"id": b}))["feed_length"]
+    };
+    assert!(same("op-2", "op-4", &mut s));
+    // A copy can be given its name, and a changed copy leaves what it was copied from alone.
+    let named = run(&mut s, "cam.op.duplicate", json!({"id": "op-3", "name": "Drill again"}));
+    run(&mut s, "cam.op.edit", json!({"id": named["id"], "suppressed": true}));
+    let d = run(&mut s, "cam.data", json!({}));
+    let ops = d["data"]["setups"][0]["operations"].as_array().unwrap();
+    assert_eq!(
+        (ops[5]["name"].as_str(), ops[5]["suppressed"].as_bool(), ops[4]["suppressed"].as_bool()),
+        (Some("Drill again"), Some(true), Some(false))
+    );
+
+    // What is not there is said; hostile numbers are refused, not run.
+    assert!(refused(&mut s, "cam.op.move", json!({"id": "op-99", "to": 0})).contains("no operation 'op-99'"));
+    assert!(refused(&mut s, "cam.op.duplicate", json!({"id": "op-99"})).contains("no operation 'op-99'"));
+    assert!(refused(&mut s, "cam.op.move", json!({"id": "op-1", "to": -1})).contains("invalid"));
+    assert!(refused(&mut s, "cam.op.move", json!({"id": "op-1"})).contains("to"));
+    assert!(refused(&mut s, "cam.op.duplicate", json!({"id": "op-1", "copies": 2})).contains("copies"));
+}

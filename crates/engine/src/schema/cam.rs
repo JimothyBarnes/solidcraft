@@ -293,6 +293,28 @@ pub struct CamOpDeleteParams {
     pub id: String,
 }
 
+/// Move an operation to another place in its setup's order.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpMoveParams {
+    /// The operation's id (`op-1`, …).
+    pub id: String,
+    /// Its place among its setup's operations, counted from 0; past the end is the end.
+    pub to: usize,
+}
+
+/// Add a copy of an operation right after it.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpDuplicateParams {
+    /// The operation's id (`op-1`, …).
+    pub id: String,
+    /// The copy's name; when not given, the operation's with the first of (2), (3), … that
+    /// its setup does not have yet.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// Change an operation: the fields given replace the operation's.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

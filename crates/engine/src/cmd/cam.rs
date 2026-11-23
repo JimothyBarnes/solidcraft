@@ -16,12 +16,12 @@ use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
 use crate::schema::cam::{
-    CamData, CamDataParams, CamOpChamferParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpEditParams, CamOpFaceParams,
-    CamOpManualParams, CamOpPocketParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams, CamPosted, CamSetupCreateParams,
-    CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams, CamSetupMeasured, CamSetupOutline,
-    CamSetupOutlineParams, CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamSimulateParams, CamSimulated, CamSimulatedHit,
-    CamSimulatedOperation, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, FoundPocket, HoleBottom, HoleGroup,
-    OutlineLoop,
+    CamData, CamDataParams, CamOpChamferParams, CamOpContourParams, CamOpDeleteParams, CamOpDrillParams, CamOpDuplicateParams, CamOpEditParams,
+    CamOpFaceParams, CamOpManualParams, CamOpMoveParams, CamOpPocketParams, CamOpToolpath, CamOpToolpathParams, CamOpWritten, CamPostParams,
+    CamPosted, CamSetupCreateParams, CamSetupDeleteParams, CamSetupEditParams, CamSetupHoles, CamSetupHolesParams, CamSetupMeasureParams,
+    CamSetupMeasured, CamSetupOutline, CamSetupOutlineParams, CamSetupPockets, CamSetupPocketsParams, CamSetupWritten, CamSimulateParams,
+    CamSimulated, CamSimulatedHit, CamSimulatedOperation, CamToolCreateParams, CamToolDeleteParams, CamToolEditParams, CamToolWritten, FoundPocket,
+    HoleBottom, HoleGroup, OutlineLoop,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session, params::bad};
@@ -87,6 +87,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
+    CommandSpec::new("cam.op.move", "Move Operation", crate::checked!("cam.op.move", op_move)).icon("reorder").doc_only()
+        .contract(&TypedContract::<CamOpMoveParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("id, to: its place among its setup's operations, from 0 (past the end is the end) → the operation runs there in the setup's order"),
+    CommandSpec::new("cam.op.duplicate", "Duplicate Operation", crate::checked!("cam.op.duplicate", op_duplicate)).icon("copy").doc_only()
+        .contract(&TypedContract::<CamOpDuplicateParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("id, name? → a copy of the operation right after it, with an id of its own (its name the operation's with (2) when none is given)"),
     CommandSpec::new("cam.simulate", "Simulate", crate::checked!("cam.simulate", simulate)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSimulateParams>::new()).output(output_schema_for::<CamSimulated>)
         .params("setup: id, cell?: mm → the setup's operations cut from its stock on a grid of heights: stock_volume, removed, over_part, beside_part (mm3), operations: [{id, name, removed, gouges, rapid_hits, body_hits, skipped?}], gouges and rapid_hits: [{operation, move, at: [x, y, z], depth}] with their counts, body_hits: [{operation, move, part: shank | holder, at, depth}] where a tool's shank or holder is in material, below_stock; the part's heights are read from the bodies' exact faces; a check as fine as its cells (cell, cells, tolerance), never a proof that a program is safe to run"),
@@ -1357,6 +1363,39 @@ fn op_delete(s: &mut Session, p: &Value) -> Result<Value> {
     let (setup_id, operations) = (setup.id.clone(), setup.operations.len());
     store(s, CMD, &d)?;
     reply(CMD, CamOpWritten { id: p.id, setup: setup_id, operations })
+}
+
+fn op_move(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.op.move";
+    let p: CamOpMoveParams = parse(CMD, "parameters", p)?;
+    let mut d = load(s, CMD)?;
+    let found = d.setups.iter_mut().find_map(|x| x.operations.iter().position(|o| o.id == p.id).map(|at| (x, at)));
+    let (setup, at) = found.ok_or_else(|| bad(CMD, format!("the design has no operation '{}'", p.id)))?;
+    let op = setup.operations.remove(at);
+    let to = p.to.min(setup.operations.len());
+    setup.operations.insert(to, op);
+    let (setup_id, operations) = (setup.id.clone(), setup.operations.len());
+    store(s, CMD, &d)?;
+    reply(CMD, CamOpWritten { id: p.id, setup: setup_id, operations })
+}
+
+fn op_duplicate(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.op.duplicate";
+    let p: CamOpDuplicateParams = parse(CMD, "parameters", p)?;
+    let mut d = load(s, CMD)?;
+    let id = next_id("op", d.setups.iter().flat_map(|x| &x.operations).map(|o| o.id.as_str()));
+    let found = d.setups.iter_mut().find_map(|x| x.operations.iter().position(|o| o.id == p.id).map(|at| (x, at)));
+    let (setup, at) = found.ok_or_else(|| bad(CMD, format!("the design has no operation '{}'", p.id)))?;
+    let Some(mut copy) = setup.operations.get(at).cloned() else { return Err(bad(CMD, format!("the design has no operation '{}'", p.id))) };
+    // Its own name: the one given, or the operation's with the first number its setup has not.
+    let taken = |name: &str| setup.operations.iter().any(|o| o.name == name);
+    let numbered = (2..setup.operations.len() + 3).map(|n| format!("{} ({n})", copy.name)).find(|name| !taken(name));
+    copy.name = p.name.or(numbered).unwrap_or_else(|| copy.name.clone());
+    copy.id.clone_from(&id);
+    setup.operations.insert(at + 1, copy);
+    let (setup_id, operations) = (setup.id.clone(), setup.operations.len());
+    store(s, CMD, &d)?;
+    reply(CMD, CamOpWritten { id, setup: setup_id, operations })
 }
 
 /// Where a setup's work origin is, in a sheet's words.
