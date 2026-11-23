@@ -289,6 +289,74 @@ impl Toolpath {
         })
     }
 
+    /// The toolpath without the changes that change nothing, as a program made of operations
+    /// one after another has between two that use the same tool (decision 0022 of the CAM work):
+    /// a tool change to the tool already in the spindle goes. With it go the spindle stop just
+    /// before it, when the spindle is started again before the tool next moves, and the coolant
+    /// off just before it, when the coolant is turned on again before then: they were for a
+    /// change that is not one. Then a spindle start at the speed and the way it is turning
+    /// already, and a coolant setting that is set already, go too. Everything else is as it
+    /// was: every move, and every change that changes something (another speed for the same
+    /// tool is still set, with the spindle turning).
+    pub fn without_needless_changes(&self) -> Toolpath {
+        let moves_tool = |m: &Move| matches!(m, Move::Rapid { .. } | Move::Linear { .. } | Move::Arc { .. } | Move::Drill { .. });
+        let mut moves: Vec<Move> = Vec::with_capacity(self.moves.len());
+        let (mut tool, mut spindle, mut coolant): (Option<u32>, Option<(f64, SpindleDirection)>, Option<Coolant>) = (None, None, None);
+        for (k, m) in self.moves.iter().enumerate() {
+            match *m {
+                Move::ToolChange { tool: number } if tool == Some(number) => {
+                    // What is turned on again before the tool next moves need not have stopped.
+                    let ahead = || self.moves.iter().skip(k + 1).take_while(|m| !moves_tool(m));
+                    let starts = ahead().any(|m| matches!(m, Move::Spindle { .. }));
+                    let flows = ahead().any(|m| matches!(m, Move::Coolant { mode } if *mode != Coolant::Off));
+                    let stopped = moves.iter().rev().take_while(|m| matches!(m, Move::SpindleStop | Move::Coolant { mode: Coolant::Off })).count();
+                    let kept: Vec<Move> = moves
+                        .split_off(moves.len() - stopped)
+                        .into_iter()
+                        .filter(|m| match m {
+                            Move::SpindleStop => !starts,
+                            _ => !flows,
+                        })
+                        .collect();
+                    moves.extend(kept);
+                    let turning = |m: &Move| match *m {
+                        Move::Spindle { rpm, direction } => Some(Some((rpm, direction))),
+                        Move::SpindleStop | Move::ToolChange { .. } => Some(None),
+                        _ => None,
+                    };
+                    let flowing = |m: &Move| match *m {
+                        Move::Coolant { mode } => Some(Some(mode)),
+                        Move::ToolChange { .. } => Some(None),
+                        _ => None,
+                    };
+                    spindle = moves.iter().rev().find_map(turning).flatten();
+                    coolant = moves.iter().rev().find_map(flowing).flatten();
+                }
+                Move::ToolChange { tool: number } => {
+                    // Another tool: what the spindle and the coolant do next is said whatever it is.
+                    (tool, spindle, coolant) = (Some(number), None, None);
+                    moves.push(*m);
+                }
+                Move::Spindle { rpm, direction } if spindle == Some((rpm, direction)) => {}
+                Move::Spindle { rpm, direction } => {
+                    spindle = Some((rpm, direction));
+                    moves.push(*m);
+                }
+                Move::SpindleStop => {
+                    spindle = None;
+                    moves.push(*m);
+                }
+                Move::Coolant { mode } if coolant == Some(mode) => {}
+                Move::Coolant { mode } => {
+                    coolant = Some(mode);
+                    moves.push(*m);
+                }
+                other => moves.push(other),
+            }
+        }
+        Toolpath { start: self.start, moves }
+    }
+
     /// Checks every number in the toolpath: coordinates finite and within [`MAX_COORDINATE`],
     /// feeds, speeds, dwells and tool numbers in range, arcs with matching start and end radii.
     pub fn validate(&self) -> Result<()> {

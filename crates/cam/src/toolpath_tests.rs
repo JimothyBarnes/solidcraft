@@ -166,3 +166,68 @@ fn a_toolpath_is_drawn_as_straight_pieces_that_say_how_they_move() {
     assert!(path.drawn(0.001).unwrap().len() > pieces.len());
     assert!(path.drawn(0.0).is_err() && path.drawn(f64::NAN).is_err());
 }
+
+/// One operation as the strategies write them: the tool, the spindle, the coolant, down from
+/// the clearance height at `x`, a cut, up again, and everything off.
+fn operation(tool: u32, rpm: f64, coolant: Coolant, x: f64) -> Vec<Move> {
+    let mut moves = vec![Move::ToolChange { tool }, Move::Spindle { rpm, direction: SpindleDirection::Clockwise }];
+    if coolant != Coolant::Off {
+        moves.push(Move::Coolant { mode: coolant });
+    }
+    moves.extend([Move::Rapid { to: p(x, 0.0, 25.0) }, Move::Linear { to: p(x, 0.0, -1.0), feed: 300.0 }, Move::Rapid { to: p(x, 0.0, 25.0) }]);
+    if coolant != Coolant::Off {
+        moves.push(Move::Coolant { mode: Coolant::Off });
+    }
+    moves.push(Move::SpindleStop);
+    moves
+}
+
+#[test]
+fn operations_one_after_another_with_the_same_tool_keep_it() {
+    let program = |operations: &[Vec<Move>]| Toolpath { start: p(0.0, 0.0, 25.0), moves: operations.concat() };
+    let (a, b, c) =
+        (operation(2, 6000.0, Coolant::Flood, 10.0), operation(2, 6000.0, Coolant::Flood, 20.0), operation(3, 4000.0, Coolant::Flood, 30.0));
+    // Tool 2 twice, then tool 3: between the first two nothing stops and nothing is changed or
+    // started again, only the moves are left; tool 3 is a change like any other.
+    let kept = program(&[a.clone(), b.clone(), c.clone()]).without_needless_changes();
+    let mut want = a[..a.len() - 2].to_vec();
+    want.extend_from_slice(&b[3..]);
+    want.extend_from_slice(&c);
+    assert_eq!(kept.moves, want);
+    assert_eq!(kept.moves.iter().filter(|m| matches!(m, Move::ToolChange { .. })).count(), 2);
+    kept.validate().unwrap();
+    // The moves themselves are all there, in their order, and it ends where it ended.
+    let motion = |t: &Toolpath| t.moves.iter().filter(|m| matches!(m, Move::Rapid { .. } | Move::Linear { .. })).copied().collect::<Vec<_>>();
+    assert_eq!(motion(&kept), motion(&program(&[a.clone(), b.clone(), c.clone()])));
+    // Done twice it is as done once; a program with nothing needless in it is as it was.
+    assert_eq!(kept.without_needless_changes(), kept);
+    let plain = program(&[a.clone(), c.clone(), a.clone()]);
+    assert_eq!(plain.without_needless_changes(), plain);
+    // The same tool at another speed: the spindle is told the new speed, turning; the coolant
+    // stays as it is. Without coolant in the second, it is turned off where the second begins.
+    let faster = program(&[a.clone(), operation(2, 9000.0, Coolant::Flood, 20.0)]).without_needless_changes();
+    let between: Vec<Move> = faster.moves[a.len() - 2..a.len()].to_vec();
+    assert_eq!(between, [Move::Spindle { rpm: 9000.0, direction: SpindleDirection::Clockwise }, Move::Rapid { to: p(20.0, 0.0, 25.0) }]);
+    // The second without coolant: the first's coolant is turned off as it was, since nothing
+    // turns it on again; the spindle goes on turning.
+    let dry = program(&[a.clone(), operation(2, 6000.0, Coolant::Off, 20.0)]).without_needless_changes();
+    assert_eq!(
+        dry.moves[a.len() - 2..a.len()],
+        [Move::Coolant { mode: Coolant::Off }, Move::Rapid { to: p(20.0, 0.0, 25.0) }],
+        "{:?}",
+        &dry.moves[a.len() - 3..]
+    );
+    assert_eq!(dry.moves.iter().filter(|m| matches!(m, Move::SpindleStop)).count(), 1);
+    // A tool change to the same tool with nothing started after it (a program that ends there)
+    // loses only the change: the spindle and the coolant stay stopped.
+    let mut ends = a.clone();
+    ends.push(Move::ToolChange { tool: 2 });
+    assert_eq!(program(&[ends]).without_needless_changes().moves, a);
+    // Three in a row, and a tool that comes back after another: only what is in a row is kept.
+    let thrice = program(&[a.clone(), b.clone(), a.clone(), c.clone(), a.clone()]).without_needless_changes();
+    let changes: Vec<u32> = thrice.moves.iter().filter_map(|m| if let Move::ToolChange { tool } = m { Some(*tool) } else { None }).collect();
+    assert_eq!(changes, [2, 3, 2]);
+    assert_eq!(thrice.moves.iter().filter(|m| matches!(m, Move::SpindleStop)).count(), 3);
+    // Nothing at all, and changes alone, are as they were.
+    assert_eq!(Toolpath::default().without_needless_changes(), Toolpath::default());
+}

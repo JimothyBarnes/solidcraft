@@ -632,3 +632,38 @@ fn an_inch_program_keeps_its_small_arcs_as_arcs() {
     };
     assert_eq!((as_lines(LengthUnit::Millimetre), as_lines(LengthUnit::Inch)), (0, 0), "arcs written as lines in millimetres and in inches");
 }
+
+#[test]
+fn two_operations_with_one_tool_post_with_one_tool_change() {
+    let operation = |x: f64| {
+        vec![
+            Move::ToolChange { tool: 2 },
+            Move::Spindle { rpm: 6000.0, direction: SpindleDirection::Clockwise },
+            Move::Coolant { mode: Coolant::Flood },
+            Move::Rapid { to: p(x, 0.0, 25.0) },
+            Move::Rapid { to: p(x, 0.0, 5.0) },
+            Move::Linear { to: p(x, 0.0, -1.0), feed: 300.0 },
+            Move::Linear { to: p(x + 10.0, 0.0, -1.0), feed: 600.0 },
+            Move::Rapid { to: p(x + 10.0, 0.0, 25.0) },
+            Move::Coolant { mode: Coolant::Off },
+            Move::SpindleStop,
+        ]
+    };
+    let both = Toolpath { start: p(0.0, 0.0, 50.0), moves: [operation(10.0), operation(40.0)].concat() };
+    let post = Post::builtin("haas_mill").unwrap();
+    let as_written = post.write(&both, &ctx()).unwrap();
+    let kept = post.write(&both.without_needless_changes(), &ctx()).unwrap();
+    let count = |text: &str, word: &str| text.lines().filter(|line| line.split_whitespace().any(|w| w == word)).count();
+    // As the operations were written, the tool is changed for itself, from machine home, with
+    // the spindle and the coolant stopped and started again; kept, once of each.
+    assert_eq!((count(&as_written.text, "M6"), count(&as_written.text, "M5"), count(&as_written.text, "M9")), (2, 2, 2));
+    assert_eq!(
+        (count(&kept.text, "M6"), count(&kept.text, "M3"), count(&kept.text, "M8"), count(&kept.text, "M5"), count(&kept.text, "M9")),
+        (1, 1, 1, 1, 1)
+    );
+    // Between the two the tool goes across at the clearance height and down again, turning.
+    assert!(kept.text.contains("X20. F600.\nG0 Z25.\nX40.\nZ5.\nG1 Z-1. F300.\nX50. F600.\nG0 Z25.\nM9\nM5\n"), "{}", kept.text);
+    assert!(kept.text.lines().count() < as_written.text.lines().count());
+    // Both read back as the moves they were given.
+    assert_eq!(kept.read_back.toolpath.moves.iter().filter(|m| matches!(m, Move::ToolChange { .. })).count(), 1);
+}

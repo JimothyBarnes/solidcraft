@@ -1798,7 +1798,9 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    let program = program.ok_or_else(|| bad(CMD, format!("setup '{}' has no operations to post", setup.id)))?;
+    // Operations that follow one another with the same tool keep it: no change to the tool that
+    // is in the spindle, and nothing stopped for one (decision 0022 of the CAM work).
+    let program = program.ok_or_else(|| bad(CMD, format!("setup '{}' has no operations to post", setup.id)))?.without_needless_changes();
     let ctx = ProgramContext {
         program_number: p.program_number.unwrap_or(1),
         program_name: p.program_name.unwrap_or_else(|| setup.name.clone()),

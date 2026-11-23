@@ -2080,3 +2080,27 @@ fn a_chamfer_of_all_the_edges_breaks_the_rims_of_the_openings_read_from_the_mode
     assert_eq!(kept["edges"], "all");
     assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "inside"}})).contains("unknown variant"));
 }
+
+#[test]
+fn operations_that_follow_one_another_with_one_tool_keep_it_in_the_program() {
+    // The block faced and then contoured with the same 20 mm tool (T4), then drilled (T3).
+    let mut s = milling();
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    for post in ["haas_mill", "fanuc_mill", "rs274"] {
+        let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": post}));
+        let text = posted["text"].as_str().unwrap();
+        let lines = |word: &str| text.lines().filter(|line| line.split_whitespace().any(|w| w == word)).count();
+        // One change to T4 for its two operations and one to T3; the spindle is started and
+        // stopped, and the coolant turned on and off, once for each tool.
+        assert_eq!((lines("M6"), text.matches("T4 M6").count(), text.matches("T3 M6").count()), (2, 1, 1), "{post}:\n{text}");
+        assert_eq!((lines("M3"), lines("M5"), lines("M8"), lines("M9")), (2, 2, 2, 2), "{post}:\n{text}");
+    }
+    // The contour's toolpath is the same toolpath: it is the program that leaves the change out.
+    let contour = run(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    assert_eq!(contour["toolpath"]["moves"][0], json!({"kind": "tool_change", "tool": 4}));
+    // The simulation and the setup sheet are as they were: each operation with its own tool.
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    assert_eq!((sheet["tools"].as_u64(), sheet["operations"].as_u64()), (Some(2), Some(3)));
+}
