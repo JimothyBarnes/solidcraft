@@ -18,6 +18,7 @@ use crate::contour::ContourOp;
 use crate::drill::DrillOp;
 use crate::face::FaceOp;
 use crate::pocket::PocketOp;
+use crate::slot::SlotOp;
 use crate::tool::Tool;
 use crate::toolpath::Toolpath;
 use crate::units::MAX_COORDINATE;
@@ -142,6 +143,8 @@ pub enum OperationKind {
     Pocket { pocket: PocketOp },
     /// The top outside edge of the part broken with a chamfer mill (decision 0018).
     Chamfer { chamfer: ChamferOp },
+    /// Slots milled along their middle, each named by a point in it (decision 0026).
+    Slot { slot: SlotOp },
 }
 
 /// One operation of a setup.
@@ -346,6 +349,7 @@ impl ManufactureData {
                 OperationKind::Contour { contour } => contour.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Pocket { pocket } => pocket.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Chamfer { chamfer } => chamfer.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Slot { slot } => slot.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())

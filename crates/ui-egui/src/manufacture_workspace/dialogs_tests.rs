@@ -56,6 +56,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Chamfer(_)) => "chamfer",
         Some(Dialog::Drill(_)) => "drill",
         Some(Dialog::Bore(_)) => "bore",
+        Some(Dialog::Slot(_)) => "slot",
         Some(Dialog::Simulate(_)) => "simulate",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
@@ -1982,4 +1983,123 @@ fn drill_feeds_a_reamers_holes_in_and_back_out() {
     assert_eq!((word(&CYCLES, form.cycle), form.picked_cycle), ("ream", true));
     press(&mut h, "OK");
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["drill"]["cycle"], json!({"type": "ream", "dwell": 0.0}));
+}
+
+fn slot_form(h: &mut Harness) -> &mut SlotForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Slot(form)) => form,
+        _ => panic!("Slot is not open"),
+    }
+}
+
+/// The app in Manufacture on a 100 x 80 x 20 plate with two slots drawn the way a user draws
+/// them, a slot in a sketch cut with an extrude: one 10 wide and 6 deep from the plate's top, 40
+/// between the centres of its ends, and one 12 wide through the plate, 30 between its centres.
+/// The plate is made in Design, where sketches are drawn.
+fn slotted_plate() -> Harness {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    let mut run = |command: &str, params: Value| {
+        h.app.run(command, params).unwrap_or_else(|e| panic!("{command}: {e}"));
+    };
+    run("solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"}));
+    run("sketch.create", json!({"plane": "XY", "offset": 20}));
+    run("sketch.slot.center_to_center", json!({"p0": [20, 15], "p1": [60, 15], "width": 10}));
+    run("sketch.finish", json!({}));
+    run("solid.extrude", json!({"distance": 6, "direction": "negative", "operation": "cut", "profiles": "all"}));
+    run("sketch.create", json!({"plane": "XY"}));
+    run("sketch.slot.center_to_center", json!({"p0": [85, 30], "p1": [85, 60], "width": 12}));
+    run("sketch.finish", json!({}));
+    run("solid.extrude", json!({"through_all": true, "direction": "symmetric", "operation": "cut", "profiles": "all"}));
+    crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+    h.frames(2);
+    h
+}
+
+#[test]
+fn slot_offers_the_slots_found_and_the_widest_tool_that_goes_into_them() {
+    let mut h = harness();
+    // No slots to find in a plain block: the form says what a slot is. Slot is in the Milling
+    // panel's menu, with Bore.
+    block(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    assert!(crate::scenario::handle_at("toolbar:cam.op.slot").is_none(), "no button of its own");
+    panel_menu(&mut h, "MILLING", "cam.op.slot");
+    assert_eq!(open(&h), "slot");
+    assert!(h.widget(tr("manufacture.slot_none")).is_some());
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("slot", json!([])));
+    press(&mut h, "Cancel");
+
+    // The plate's two slots, the one through it first. T1 is a 10 mm end mill, T2 a 12 mm one
+    // and T3 a 20 mm one.
+    let mut h = slotted_plate();
+    for diameter in [10.0, 12.0, 20.0] {
+        add_tool(&mut h, "flat_end_mill", diameter);
+    }
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    panel_menu(&mut h, "MILLING", "cam.op.slot");
+    let form = slot_form(&mut h);
+    let found: Vec<(bool, f64, f64, f64)> = form.slots().iter().map(|s| (s.through, s.width, s.length, s.depth)).collect();
+    assert_eq!(found, vec![(true, 12.0, 30.0, 20.0), (false, 10.0, 40.0, 6.0)]);
+    // Both at once, to begin with: the widest tool that goes into both is the 10 mm one, which
+    // leaves a millimetre on each wall of the wider slot, and the form says so.
+    assert_eq!((form.slot, form.tool, form.picked().len()), (0, 0, 2));
+    assert_eq!(form.params()["slot"]["slots"].as_array().map(Vec::len), Some(2));
+    let notes = form.worked.get().map(|(_, preview)| preview.notes.join(" ")).unwrap_or_default();
+    assert!(notes.contains("1.000 mm stays on each wall"), "{notes}");
+    assert!(h.widget(tr("manufacture.slot_note")).is_some() && h.widget(tr("manufacture.slot_tool_wide")).is_none());
+    // They end at different heights, so there is no one bottom to show.
+    assert!(h.widget(tr("manufacture.contour_bottom")).is_none());
+    // The one through the part alone: the 12 mm tool, as wide as it, down to the part's bottom
+    // unless a bottom is typed: a millimetre under it breaks through.
+    slot_form(&mut h).slot = 1;
+    h.frames(3);
+    let form = slot_form(&mut h);
+    assert_eq!((form.tool, form.picked().len(), form.stepdown, form.bottom, form.typed_bottom), (1, 1, 6.0, -21.0, false));
+    assert!(form.worked.get().is_some_and(|(_, preview)| preview.notes.is_empty()));
+    assert!(h.widget(tr("manufacture.contour_bottom")).is_some());
+    let last_level = |h: &mut Harness| slot_form(h).worked.get().and_then(|(_, preview)| preview.numbers["levels"][0].as_array()?.last()?.as_f64());
+    assert!(last_level(&mut h).is_some_and(|z| (z + 21.0).abs() < 1e-6));
+    let form = slot_form(&mut h);
+    (form.bottom, form.typed_bottom) = (-22.0, true);
+    h.frames(3);
+    assert_eq!((slot_form(&mut h).params()["slot"]["bottom"].as_f64(), last_level(&mut h)), (Some(-22.0), Some(-22.0)));
+    // The blind one alone: the 10 mm tool again, in two levels, and its own bottom again.
+    slot_form(&mut h).slot = 2;
+    h.frames(3);
+    let form = slot_form(&mut h);
+    assert_eq!((form.tool, form.stepdown, form.bottom, form.typed_bottom), (0, 5.0, -7.0, false));
+    let levels = form.worked.get().map(|(_, preview)| preview.numbers["levels"][0].as_array().map_or(0, Vec::len));
+    assert_eq!(levels, Some(2));
+    assert!(h.widget(tr("manufacture.contour_levels")).is_some());
+    // A tool picked by hand that is wider than the slot: the form says so, and nothing is made.
+    let form = slot_form(&mut h);
+    (form.tool, form.picked_tool) = (2, true);
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.slot_tool_wide")).is_some());
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("slot", json!([])));
+    // The 10 mm tool again, and Create makes the operation on that slot.
+    slot_form(&mut h).tool = 0;
+    h.frames(3);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["name"].as_str(), kept["tool"].as_u64(), kept["operation"]["kind"].as_str()), (Some("Slot 1"), Some(1), Some("slot")));
+    assert_eq!(kept["operation"]["slot"]["slots"].as_array().map(Vec::len), Some(1));
+    assert_eq!(kept["operation"]["slot"]["stepdown"], Value::Null);
+    // Changed from its row, its slots stay the ones it has, and a stepdown typed is kept.
+    row_menu(&mut h, "Slot 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "slot");
+    let form = slot_form(&mut h);
+    (form.stepdown, form.typed_stepdown) = (2.0, true);
+    h.frames(3);
+    let levels = slot_form(&mut h).worked.get().map(|(_, preview)| preview.numbers["levels"][0].as_array().map_or(0, Vec::len));
+    assert_eq!(levels, Some(4));
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let after = data(&mut h)["setups"][0]["operations"][0]["operation"]["slot"].clone();
+    assert_eq!((after["slots"].clone(), after["stepdown"].as_f64()), (kept["operation"]["slot"]["slots"].clone(), Some(2.0)));
 }

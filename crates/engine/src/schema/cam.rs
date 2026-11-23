@@ -302,6 +302,43 @@ pub struct CamSetupOpenings {
     pub openings: Vec<FoundOpening>,
 }
 
+/// Find the slots a setup has.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamSetupSlotsParams {
+    pub id: String,
+}
+
+/// A slot of a setup's bodies, in the setup's WCS, mm.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct FoundSlot {
+    /// A point in it, `[x, y]`: what a slot operation names it by.
+    pub at: [f64; 2],
+    /// The Z a slot operation cuts it down to unless told otherwise: the part's bottom for a
+    /// slot through it, else its floor.
+    pub bottom: f64,
+    /// Whether it goes through the part.
+    pub through: bool,
+    /// How far its bottom is below the part's top.
+    pub depth: f64,
+    /// How wide it is: a tool must be no wider.
+    pub width: f64,
+    /// How long its middle line is, from the centre of one end to the centre of the other.
+    pub length: f64,
+    /// Whether its middle line is an arc (its sides arcs about one centre), not a straight line.
+    pub curved: bool,
+}
+
+/// The slots of a setup's bodies, found on their exact faces (never a display mesh): its
+/// openings through the part and its closed pockets that have two half-round ends as wide as
+/// themselves with straight sides, or arcs about one centre, between them. The ones through the
+/// part first, each kind the largest first.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamSetupSlots {
+    pub id: String,
+    pub slots: Vec<FoundSlot>,
+}
+
 /// What a setup command left.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CamSetupWritten {
@@ -383,6 +420,9 @@ pub struct CamOpEditParams {
     /// A pocket operation's parameters, whole, as `cam.op.pocket` takes them.
     #[serde(default)]
     pub pocket: Option<Value>,
+    /// A slot operation's parameters, whole, as `cam.op.slot` takes them.
+    #[serde(default)]
+    pub slot: Option<Value>,
     /// A chamfer's parameters, whole, as `cam.op.chamfer` takes them.
     #[serde(default)]
     pub chamfer: Option<Value>,
@@ -469,6 +509,23 @@ pub struct CamOpPocketParams {
     /// half), leave?: mm of stock left on the walls (default 0), direction?: climb | conventional,
     /// ramp_angle?: radians (default 3 degrees), rpm?, feed?}`.
     pub pocket: Value,
+}
+
+/// Add a slot operation to a setup (decision 0026 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpSlotParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: a flat or bull-nose end mill no wider than the slots.
+    pub tool: u32,
+    /// `{slots: [[x, y], …] a point in each slot, in the WCS (as `cam.setup.slots` gives
+    /// them), top?: Z (default the stock top), bottom?: Z (default each slot's own floor, or
+    /// the part's bottom where it goes through), stepdown?: mm (default half the tool's
+    /// diameter), ramp_angle?: radians (default 3 degrees), rpm?, feed?}`.
+    pub slot: Value,
 }
 
 /// Add a chamfer to a setup (decision 0018 of the CAM work).

@@ -502,7 +502,7 @@ fn a_form_previews_an_operation_before_it_is_made() {
         (
             "cam.post",
             json!({"setup": "setup-1", "post": "rs274"}),
-            "not a command that adds a drill, face, contour, bore, pocket or chamfer operation",
+            "not a command that adds a drill, face, contour, bore, pocket, slot or chamfer operation",
         ),
     ] {
         let said = why(&s, command, params.clone());
@@ -588,6 +588,7 @@ fn commands_that_measure_the_model_bring_it_up_to_date_first() {
                 | "cam.setup.outline"
                 | "cam.setup.pockets"
                 | "cam.setup.sheet"
+                | "cam.setup.slots"
                 | "cam.op.toolpath"
                 | "cam.simulate"
                 | "cam.post"
@@ -2242,4 +2243,117 @@ fn a_reamed_hole_is_fed_in_and_fed_back_out_and_posts_as_g85() {
     // A dwell that is no dwell is refused when the toolpath is worked out, as a drilled hole's is.
     run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": reamed(-1.0)}));
     assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"})).contains("dwell must be 0 to"));
+}
+
+#[test]
+fn slots_are_found_on_the_model_and_milled_along_their_middle() {
+    use std::f64::consts::PI;
+    // The plate (X -50 to 50, Y -40 to 40 in the WCS, its top at Z -1, the 10 mm end mill as
+    // tool 2) with slots drawn the way a user draws them, a slot in a sketch cut with an extrude:
+    // from its top, 6 deep, a straight one 10 wide from (-30, -25) to (10, -25) and a curved one
+    // 8 wide, a quarter turn of radius 18 about (-15, 5) from (-15, 23) round to (-33, 5); and
+    // through it, a straight one 12 wide from (35, -10) to (35, 20). A round hole of 8 through
+    // it and a square pocket beside them are not slots.
+    let mut s = plate();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "offset": 20}));
+    run(&mut s, "sketch.slot.center_to_center", json!({"p0": [20, 15], "p1": [60, 15], "width": 10}));
+    let through = [35.0 - 18.0 * (PI / 4.0).cos(), 45.0 + 18.0 * (PI / 4.0).sin()];
+    run(&mut s, "sketch.slot.arc_three_point", json!({"start": [35, 63], "through": through, "end": [17, 45], "width": 8}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 6, "direction": "negative", "operation": "cut", "profiles": "all"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.slot.center_to_center", json!({"p0": [85, 30], "p1": [85, 60], "width": 12}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"through_all": true, "direction": "symmetric", "operation": "cut", "profiles": "all"}));
+    run(&mut s, "solid.cylinder", json!({"diameter": 8, "height": 30, "base": [60, 55, -5], "operation": "cut", "targets": ["Plate"]}));
+    boxed(&mut s, [55.0, 30.0, 14.0], [15.0, 12.0, 6.0], "cut");
+
+    // Found: the one through the part first, then the two with floors, the larger first. The
+    // hole and the pocket are not offered.
+    let found = run(&mut s, "cam.setup.slots", json!({"id": "setup-1"}));
+    let slots = found["slots"].as_array().unwrap();
+    assert_eq!(slots.len(), 3, "{found:#}");
+    let numbers = |slot: &Value| ["bottom", "depth", "width", "length"].map(|key| slot[key].as_f64().unwrap());
+    let near = |got: [f64; 4], want: [f64; 4]| got.iter().zip(want).all(|(got, want)| (got - want).abs() < 1e-6);
+    let kinds: Vec<(bool, bool)> = slots.iter().map(|slot| (slot["through"] == true, slot["curved"] == true)).collect();
+    assert_eq!(kinds, vec![(true, false), (false, false), (false, true)], "{found:#}");
+    assert!(near(numbers(&slots[0]), [-21.0, 20.0, 12.0, 30.0]), "{found:#}");
+    assert!(near(numbers(&slots[1]), [-7.0, 6.0, 10.0, 40.0]), "{found:#}");
+    assert!(near(numbers(&slots[2]), [-7.0, 6.0, 8.0, 9.0 * PI]), "{found:#}");
+    assert_eq!(crate::cmd::manufacture_slots(&s, "setup-1").unwrap().len(), 3);
+    let at = |k: usize| slots[k]["at"].clone();
+
+    // The straight one with a floor, with the tool as wide as it: two levels of 3.5, each two
+    // lengths of the slot down the ramp (40 x tan 3 degrees is 2.1 a length) and one at the level.
+    assert_eq!(run(&mut s, "cam.op.slot", json!({"setup": "setup-1", "tool": 2, "slot": {"slots": [at(1)]}}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert!(about(&n["levels"][0][0], -3.5) && about(&n["levels"][0][1], -7.0) && n["levels"][0].as_array().unwrap().len() == 2, "{n}");
+    assert!(n["legs"] == json!([2]) && about(&n["widths"][0], 10.0) && about(&n["lengths"][0], 40.0) && about(&n["stepdown"], 5.0), "{n}");
+    assert!(n["left"][0].as_f64().unwrap().abs() < 1e-6 && t["notes"] == json!([]), "{t}");
+    assert!((t["feed_length"].as_f64().unwrap() - (5.0 + 4.0 * 40.0_f64.hypot(1.75) + 80.0)).abs() < 1e-6, "{}", t["feed_length"]);
+
+    // The one through the part, to a millimetre under it, with the same tool: narrower than
+    // the slot by 2, so a millimetre stays on each wall, and the operation says so.
+    let under = json!({"slots": [at(0)], "bottom": -22});
+    assert_eq!(run(&mut s, "cam.op.slot", json!({"setup": "setup-1", "tool": 2, "slot": under}))["id"], "op-2");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    let n = &t["numbers"];
+    assert!(n["levels"][0].as_array().unwrap().len() == 5 && about(&n["levels"][0][4], -22.0) && n["legs"] == json!([3]), "{n}");
+    assert!((n["left"][0].as_f64().unwrap() - 1.0).abs() < 1e-6, "{n}");
+    let note = t["notes"][0].as_str().unwrap();
+    assert!(note.contains("is narrower than the slot at") && note.contains("1.000 mm stays on each wall"), "{note}");
+
+    // The curved one with an 8 mm tool (tool 6), as wide as it: along its arc, 9 pi long, two
+    // levels of 3.5, each three lengths down the ramp (9 pi x tan 3 degrees is 1.48 a length).
+    let mut mill8 = mill10();
+    (mill8["number"], mill8["name"]) = (json!(6), json!("8 mm flat end mill"));
+    (mill8["geometry"]["diameter"], mill8["geometry"]["shank_diameter"]) = (json!(8.0), json!(8.0));
+    run(&mut s, "cam.tool.create", json!({"tool": mill8}));
+    assert_eq!(run(&mut s, "cam.op.slot", json!({"setup": "setup-1", "tool": 6, "slot": {"slots": [at(2)]}}))["id"], "op-3");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-3"}));
+    let n = &t["numbers"];
+    assert!(n["legs"] == json!([3]) && (n["lengths"][0].as_f64().unwrap() - 9.0 * PI).abs() < 1e-6 && about(&n["stepdown"], 4.0), "{n}");
+    assert!(n["levels"][0].as_array().unwrap().len() == 2 && n["left"][0].as_f64().unwrap().abs() < 1e-6 && t["notes"] == json!([]), "{t}");
+    let arcs = t["toolpath"]["moves"].as_array().unwrap().iter().filter(|m| m["kind"] == "arc").count();
+    assert_eq!(arcs, 8, "three lengths of ramp and one at the level, for each of two levels");
+
+    // Simulated: nothing of the part is cut into by any of the three, tools as wide as their
+    // slots among them, and what each of those removes is its slot, 7 deep from the stock's
+    // top, as near as the cells are: (40 x 10 + 25 pi) x 7 = 3349.8 and (9 pi x 8 + 16 pi) x 7 = 1935.2.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.25}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let removed = |k: usize| sim["operations"][k]["removed"].as_f64().unwrap();
+    assert!((removed(0) - (400.0 + 25.0 * PI) * 7.0).abs() < 30.0, "{}", removed(0));
+    assert!((removed(2) - (72.0 * PI + 16.0 * PI) * 7.0).abs() < 30.0, "{}", removed(2));
+    // All three post, and the program reads back as written.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    assert!(posted["text"].as_str().unwrap().contains("Z-1.75"), "{}", posted["text"]);
+
+    // What is not a slot is refused when its toolpath is asked for, with what it is; so is a
+    // tool wider than the slot. The hole is at (10, 15) in the WCS.
+    run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
+    run(&mut s, "cam.op.slot", json!({"setup": "setup-1", "tool": 2, "slot": {"slots": [[10, 15]]}}));
+    assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-4"})).contains("it is round: drill it or bore it"));
+    run(&mut s, "cam.op.edit", json!({"id": "op-4", "tool": 4, "slot": {"slots": [at(1)]}}));
+    let wide = refused(&mut s, "cam.op.toolpath", json!({"id": "op-4"}));
+    assert!(wide.contains("tool 4 (20 mm across) is wider than the slot at") && wide.contains("use a narrower tool"), "{wide}");
+    // Its parameters are its own, and checked when they are given.
+    assert!(
+        refused(&mut s, "cam.op.edit", json!({"id": "op-4", "pocket": {"pockets": [[0, 0]]}}))
+            .contains("is a slot operation: it takes `slot`, not `pocket`")
+    );
+    assert!(
+        refused(&mut s, "cam.op.slot", json!({"setup": "setup-1", "tool": 2, "slot": {"slots": []}}))
+            .contains("a slot operation cuts 1 to 1000 slots, not 0")
+    );
+    assert!(
+        refused(&mut s, "cam.op.slot", json!({"setup": "setup-1", "tool": 2, "slot": {"slots": [[0, 0]], "ramp_angle": 2}}))
+            .contains("the ramp angle must be 0.5 to 30 degrees")
+    );
+    // Slot's form is offered the end mills, not the drill.
+    run(&mut s, "cam.tool.create", json!({"tool": drill10()}));
+    let mut offered: Vec<u32> = crate::cmd::manufacture_tools(&s.doc, "slot").iter().map(|t| t.number).collect();
+    offered.sort_unstable();
+    assert_eq!(offered, vec![2, 4, 6]);
 }

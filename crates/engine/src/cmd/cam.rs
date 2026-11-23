@@ -63,6 +63,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup.openings", "Find Openings", crate::checked!("cam.setup.openings", setup_openings)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamSetupOpeningsParams>::new()).output(output_schema_for::<CamSetupOpenings>)
         .params("id: the setup → openings: [{at: [x, y], bottom, through, depth, widest, size: [x, y], diameter?, islands, area}] in the setup's WCS (mm): what an inside contour (cam.op.contour with side inside) can go round, from the bodies' exact faces: the openings through the part, then its closed pockets, each kind the largest first; `at` is a point in the opening, which is what the contour names it by, `bottom` the Z it is cut down to unless told otherwise, `widest` how far across the widest circle that fits is, and `diameter` is given when the wall is a circle"),
+    CommandSpec::new("cam.setup.slots", "Find Slots", crate::checked!("cam.setup.slots", setup_slots)).icon("inspect").noundo().read_only()
+        .contract(&TypedContract::<crate::schema::cam::CamSetupSlotsParams>::new()).output(output_schema_for::<crate::schema::cam::CamSetupSlots>)
+        .params("id: the setup → slots: [{at: [x, y], bottom, through, depth, width, length, curved}] in the setup's WCS (mm): its openings through the part and its closed pockets that are slots, from the bodies' exact faces: two half-round ends as wide as the slot with two straight sides, or two arcs about one centre, between them; `at` is a point in the slot, which is what cam.op.slot names it by; the ones through the part first, each kind the largest first"),
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
@@ -81,6 +84,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpPocketParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring"),
+    CommandSpec::new("cam.op.slot", "Slot", crate::checked!("cam.op.slot", op_slot)).icon("edit").doc_only()
+        .contract(&TypedContract::<crate::schema::cam::CamOpSlotParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a flat or bull-nose end mill no wider than the slots, slot: {slots: [[x, y]] a point in each slot, top?, bottom?: Z (default each slot's floor, or the part's bottom where it goes through), stepdown?, ramp_angle?, rpm?, feed?} → id of the new operation: each slot (read from the model at its point when the toolpath is worked out) milled along its middle line, the tool going down along the line to and fro no steeper than the ramp angle and once along it at each level; a tool narrower than a slot leaves the same on each wall, which the toolpath's notes say"),
     CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpChamferParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), edges?: outside | all, direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge; with edges all, round the inside of every opening in the part's top and round what stands in it as well, but for an opening too narrow for the tool or not open as far down as its point, which is left sharp and said"),
@@ -89,7 +95,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
     CommandSpec::new("cam.op.edit", "Edit Operation", crate::checked!("cam.op.edit", op_edit)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpEditParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("id, then any of name, tool, suppressed, and the operation's own parameters whole: drill (a drill operation), face (a facing), contour (a contour), pocket (a pocket operation) or toolpath (a hand-made one) → replaces those; parameters of another kind of operation are refused"),
+        .params("id, then any of name, tool, suppressed, and the operation's own parameters whole: drill (a drill operation), face (a facing), contour (a contour), pocket (a pocket operation), chamfer (a chamfer), slot (a slot operation) or toolpath (a hand-made one) → replaces those; parameters of another kind of operation are refused"),
     CommandSpec::new("cam.op.delete", "Delete Operation", crate::checked!("cam.op.delete", op_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamOpDeleteParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id → removes the operation"),
@@ -773,6 +779,84 @@ pub fn manufacture_openings(s: &Session, id: &str) -> std::result::Result<Vec<Fo
     found_openings(s, CMD, setup)
 }
 
+/// The slots a slot operation cuts (decision 0026 of the CAM work), in the setup's WCS, one for
+/// each of `points` in their order: the opening read from the model where the point is, and how
+/// far down its wall was read: `bottom` when given (the part's own bottom when it is under
+/// that), else the floor under the point, or the part's bottom where it goes through. Whether
+/// each is a slot is the operation's to say.
+fn slots_of(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    points: &[[f64; 2]],
+    bottom: Option<f64>,
+) -> std::result::Result<Vec<solidcraft_cam::SlotShape>, String> {
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
+        let mut found = Vec::with_capacity(points.len());
+        for at in points {
+            let at = solidcore_record::Vec2 { x: at[0], y: at[1] };
+            let opening = finder.opening_at(at, bottom, p.model.min.z).map_err(|e| bad(cmd, e))?;
+            found.push(solidcraft_cam::SlotShape { bottom: opening.floor, region: opening.region });
+        }
+        Ok(found)
+    })
+    .map_err(said)
+}
+
+/// The slots the setup `setup` has, as a form or a script reads them: its openings through the
+/// part and its closed pockets that are slots (the operation's own test, so what is offered is
+/// what it cuts), the ones through the part first, each kind the largest first.
+fn found_slots(s: &Session, cmd: &str, setup: &Setup) -> std::result::Result<Vec<crate::schema::cam::FoundSlot>, String> {
+    let (model, _) = model_box(s, cmd, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    let windows = with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).windows(p.model.min.z).map_err(|e| bad(cmd, e))
+    })
+    .map_err(said)?;
+    let pockets = pockets_of(s, cmd, setup, &p, None)?;
+    // To a millionth of a micron, and a zero without a minus sign.
+    let round = |v: f64| (v * 1e9).round() / 1e9 + 0.0;
+    let found = windows.into_iter().map(|found| (true, found)).chain(pockets.into_iter().map(|found| (false, found)));
+    Ok(found
+        .filter_map(|(through, (at, opening))| {
+            let slot = solidcraft_cam::slot_line(&opening.region).ok()?;
+            Some(crate::schema::cam::FoundSlot {
+                at: [round(at.x), round(at.y)],
+                bottom: round(opening.floor),
+                through,
+                depth: round(p.model.max.z - opening.floor),
+                width: round(slot.width),
+                length: round(solidcraft_geom::Seg2Geom::length(&slot.line)),
+                curved: matches!(slot.line, solidcore_record::Seg2::Arc { .. }),
+            })
+        })
+        .collect())
+}
+
+fn setup_slots(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "cam.setup.slots";
+    let p: crate::schema::cam::CamSetupSlotsParams = parse(CMD, "parameters", p)?;
+    let d = load(s, CMD)?;
+    let setup = d.setups.iter().find(|x| x.id == p.id).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.id)))?;
+    let slots = found_slots(s, CMD, setup).map_err(|e| bad(CMD, e))?;
+    reply(CMD, crate::schema::cam::CamSetupSlots { id: p.id, slots })
+}
+
+/// The slots the setup `id` has, for a form to offer; why not, when the setup can't be placed or
+/// a body can't be read. It reads the design and changes nothing.
+pub fn manufacture_slots(s: &Session, id: &str) -> std::result::Result<Vec<crate::schema::cam::FoundSlot>, String> {
+    const CMD: &str = "cam.setup.slots";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    found_slots(s, CMD, setup)
+}
+
 fn setup_measure(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "cam.setup.measure";
     let p: CamSetupMeasureParams = parse(CMD, "parameters", p)?;
@@ -825,6 +909,10 @@ fn op_pocket(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.pocket", "Pocket", p)
 }
 
+fn op_slot(s: &mut Session, p: &Value) -> Result<Value> {
+    add_operation(s, "cam.op.slot", "Slot", p)
+}
+
 fn op_chamfer(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.chamfer", "Chamfer", p)
 }
@@ -869,6 +957,11 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             let pocket: PocketOp = parse(cmd, "pocket", &p.pocket)?;
             Ok((p.setup, p.name, p.tool, OperationKind::Pocket { pocket }))
         }
+        "cam.op.slot" => {
+            let p: crate::schema::cam::CamOpSlotParams = parse(cmd, "parameters", p)?;
+            let slot: solidcraft_cam::SlotOp = parse(cmd, "slot", &p.slot)?;
+            Ok((p.setup, p.name, p.tool, OperationKind::Slot { slot }))
+        }
         "cam.op.chamfer" => {
             let p: CamOpChamferParams = parse(cmd, "parameters", p)?;
             let chamfer: ChamferOp = match &p.chamfer {
@@ -877,7 +970,7 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             };
             Ok((p.setup, p.name, p.tool, OperationKind::Chamfer { chamfer }))
         }
-        other => Err(bad(other, "not a command that adds a drill, face, contour, bore, pocket or chamfer operation")),
+        other => Err(bad(other, "not a command that adds a drill, face, contour, bore, pocket, slot or chamfer operation")),
     }
 }
 
@@ -1001,6 +1094,19 @@ fn work(
             });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
         }
+        OperationKind::Slot { slot } => {
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            // Its numbers and tool first: what is wrong with them is said before the model is cut.
+            slot.validate(tool).map_err(failed)?;
+            let shapes = slots_of(s, cmd, setup, &placement, &slot.slots, slot.bottom).map_err(|e| bad(cmd, of(op, e)))?;
+            let done = slot.toolpath(start, tool, &placement, material, &shapes).map_err(failed)?;
+            let numbers = serde_json::json!({
+                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "ramp_feed": done.ramp_feed, "top": done.top,
+                "levels": done.levels, "stepdown": done.stepdown, "widths": done.widths, "lengths": done.lengths, "legs": done.legs,
+                "left": done.left
+            });
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
+        }
         OperationKind::Chamfer { chamfer } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
             // The wall is read a hair below the chamfer's lower edge, where the model has it
@@ -1102,6 +1208,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
         "drill" => drill.validate(tool).is_ok() || taps(tool),
         "contour" | "bore" => ContourOp::default().validate(tool).is_ok(),
         "pocket" => PocketOp { pockets: vec![[0.0, 0.0]], ..PocketOp::default() }.validate(tool).is_ok(),
+        "slot" => solidcraft_cam::SlotOp { slots: vec![[0.0, 0.0]], ..Default::default() }.validate(tool).is_ok(),
         "chamfer" => ChamferOp::default().validate(tool).is_ok(),
         _ => true,
     };
@@ -1562,9 +1669,17 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Contour { .. } => ("a contour", "contour"),
         OperationKind::Pocket { .. } => ("a pocket operation", "pocket"),
         OperationKind::Chamfer { .. } => ("a chamfer", "chamfer"),
+        OperationKind::Slot { .. } => ("a slot operation", "slot"),
     };
-    let given =
-        [(&p.toolpath, "toolpath"), (&p.drill, "drill"), (&p.face, "face"), (&p.contour, "contour"), (&p.pocket, "pocket"), (&p.chamfer, "chamfer")];
+    let given = [
+        (&p.toolpath, "toolpath"),
+        (&p.drill, "drill"),
+        (&p.face, "face"),
+        (&p.contour, "contour"),
+        (&p.pocket, "pocket"),
+        (&p.chamfer, "chamfer"),
+        (&p.slot, "slot"),
+    ];
     for (given, name) in given {
         if given.is_some() && name != takes {
             return Err(bad(CMD, format!("operation {} is {kind}: it takes `{takes}`, not `{name}`", op.id)));
@@ -1599,6 +1714,11 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Chamfer { chamfer } => {
             if let Some(v) = &p.chamfer {
                 *chamfer = parse(CMD, "chamfer", v)?;
+            }
+        }
+        OperationKind::Slot { slot } => {
+            if let Some(v) = &p.slot {
+                *slot = parse(CMD, "slot", v)?;
             }
         }
     }
