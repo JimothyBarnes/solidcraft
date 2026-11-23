@@ -420,6 +420,10 @@ crate::dialog_descriptor::dialog_descriptors! {
             PluginPick {
                 dialog: u64,
             },
+            /// What the open Manufacture form takes from the model (`manufacture_workspace::picking`):
+            /// the viewport picks into it as into any dialog's inputs, while the form's own window
+            /// says what was picked. No panel is drawn for it and nothing runs from it.
+            ManufacturePick,
             /// Joints and components (`dialogs_assembly`).
             Assembly(crate::dialogs_assembly::Asm),
             /// Sheet metal (`dialogs_sheet`).
@@ -2978,6 +2982,7 @@ fn title(k: &Kind) -> &'static str {
         Kind::Remove => "REMOVE",
         Kind::ChatContext => "PICK CONTEXT",
         Kind::PluginPick { .. } => "PLUGIN",
+        Kind::ManufacturePick => "MANUFACTURE",
         Kind::PathPattern { .. } => "PATTERN ON PATH",
         Kind::Split => "SPLIT BODY",
         Kind::Thread { .. } => "THREAD",
@@ -4351,7 +4356,7 @@ pub(crate) fn action_labels(kind: &Kind) -> (&'static str, &'static str) {
 /// a deletion asks in a modal card of its own, which the corner must not answer.
 pub(crate) fn corner_confirms(d: &Dialog) -> bool {
     // A plugin's picks are confirmed by Run in its own window.
-    !matches!(d.kind, Kind::ConfirmDelete { .. } | Kind::PluginPick { .. })
+    !matches!(d.kind, Kind::ConfirmDelete { .. } | Kind::PluginPick { .. } | Kind::ManufacturePick)
 }
 
 /// Show the active dialog (if any), docked flush to an edge of the viewport just below the axis
@@ -4381,6 +4386,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         } else {
             app.dialog = Some(d);
         }
+        return;
+    }
+    // A Manufacture form's picks: its own window says what they are, and closes on Escape.
+    if matches!(d.kind, Kind::ManufacturePick) {
+        app.dialog = Some(d);
         return;
     }
     // Edit Text lasts as long as its text: other design changes leave it open.
@@ -6117,6 +6127,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
     let (cmd, params): (&str, Value) = match &d.kind {
         Kind::ChatContext => return Err("the chat takes these picks; nothing runs".into()),
         Kind::PluginPick { .. } => return Err("the plugin's dialog takes these picks; nothing runs here".into()),
+        Kind::ManufacturePick => return Err("the Manufacture form takes these picks; nothing runs here".into()),
         Kind::Extrude {
             distance,
             direction,

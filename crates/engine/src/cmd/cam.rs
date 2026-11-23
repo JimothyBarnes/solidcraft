@@ -493,6 +493,50 @@ pub fn manufacture_holes(s: &Session, id: &str) -> std::result::Result<Vec<HoleG
     holes(s, CMD, setup).map_err(said)
 }
 
+/// How far off a hole's wall, or over its top, a point picked on it may be, mm.
+const HOLE_PICK_REACH: f64 = 0.5;
+
+/// Which hole of `groups` the point `at` (in the WCS) was picked on: its group and its place in
+/// the group (decision 0030 of the CAM work). The hole is one the point is in or on: no
+/// further from its axis than its wall and a little more, no higher than its top, and no lower
+/// than a drill's point may reach under its wall's end (the hole's own width). Of several (a
+/// counterbore over a smaller hole) the one whose wall the point is nearest.
+fn hole_picked(groups: &[HoleGroup], at: solidcore_record::Vec3) -> Option<(usize, usize)> {
+    if !(at.x.is_finite() && at.y.is_finite() && at.z.is_finite()) {
+        return None;
+    }
+    let mut best: Option<((usize, usize), f64)> = None;
+    for (g, group) in groups.iter().enumerate() {
+        let radius = 0.5 * group.diameter;
+        if at.z > group.top + HOLE_PICK_REACH || at.z < group.top - group.depth - group.diameter {
+            continue;
+        }
+        for (h, hole) in group.holes.iter().enumerate() {
+            let from_axis = (at.x - hole[0]).hypot(at.y - hole[1]);
+            let off_wall = (from_axis - radius).abs();
+            if from_axis <= radius + HOLE_PICK_REACH && best.is_none_or(|(_, nearest)| off_wall < nearest) {
+                best = Some(((g, h), off_wall));
+            }
+        }
+    }
+    best.map(|(found, _)| found)
+}
+
+/// Which of the holes [`manufacture_holes`] lists for the setup `id` the point `at` of the model
+/// was picked on, on its wall or on its bottom: the hole's group and its place in the group, or
+/// `None` where the point is on no hole. For a form to turn a click on the model into a hole;
+/// why not, when the setup can't be placed or a body can't be read. It reads the design and
+/// changes nothing.
+pub fn manufacture_hole_at(s: &Session, id: &str, at: solidcore_record::Vec3) -> std::result::Result<Option<(usize, usize)>, String> {
+    const CMD: &str = "cam.setup.holes";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let groups = holes(s, CMD, setup).map_err(said)?;
+    Ok(hole_picked(&groups, in_wcs(&p, at)))
+}
+
 /// The outlines read lately ([`outline_at`]), each under a number made of its bodies' geometry and
 /// its plane. Only outlines that were read are kept, never a refusal.
 static OUTLINES: std::sync::Mutex<Vec<(u64, Vec<solidcore_record::Loop2>)>> = std::sync::Mutex::new(Vec::new());
@@ -813,6 +857,28 @@ pub fn manufacture_pockets(s: &Session, id: &str) -> std::result::Result<Vec<Fou
     let d = manufacture_data(&s.doc)?;
     let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
     found_pockets(s, CMD, setup)
+}
+
+/// Which of the pockets [`manufacture_pockets`] lists for the setup `id` the point `at` of the
+/// model was picked on, on its floor or on its wall: its place in that list, or `None` where
+/// the point is on no pocket (decision 0030 of the CAM work). For a form to turn a click on the
+/// model into a pocket; why not, when the setup can't be placed or a body can't be read. It
+/// reads the design and changes nothing.
+pub fn manufacture_pocket_at(s: &Session, id: &str, at: solidcore_record::Vec3) -> std::result::Result<Option<usize>, String> {
+    const CMD: &str = "cam.setup.pockets";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let found = pockets_of(s, CMD, setup, &p, None)?;
+    Ok(super::cam_pockets::picked(found.iter().map(|(_, pocket)| pocket), in_wcs(&p, at), p.model.max.z))
+}
+
+/// A point of the model in a placed setup's WCS, where what was found on the model is measured.
+fn in_wcs(p: &Placement, at: solidcore_record::Vec3) -> solidcore_record::Vec3 {
+    let from = solidcore_record::Vec3 { x: at.x - p.origin.x, y: at.y - p.origin.y, z: at.z - p.origin.z };
+    let along = |axis: solidcore_record::Vec3| from.x * axis.x + from.y * axis.y + from.z * axis.z;
+    solidcore_record::Vec3 { x: along(p.x_axis), y: along(p.y_axis), z: along(p.z_axis) }
 }
 
 /// The diameter of a wall that is a circle: arcs about one centre, of one radius.

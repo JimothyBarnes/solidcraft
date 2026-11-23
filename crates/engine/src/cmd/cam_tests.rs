@@ -2553,3 +2553,73 @@ fn a_form_is_shown_the_program_before_it_is_saved() {
     }
     assert_eq!(s.undo.len(), undo);
 }
+
+#[test]
+fn a_point_picked_on_the_model_is_of_the_pocket_it_is_in() {
+    // The plate with a pocket 60 x 40, 6 deep, an island 10 x 10 left standing in it and a
+    // smaller pocket 20 x 10, 3 deeper, in its floor; and a round pocket of 16, 4 deep, near a
+    // corner. In the model the plate's corner is at the origin and its top at Z 20.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    boxed(&mut s, [25.0, 25.0, 14.0], [10.0, 10.0, 6.0], "join");
+    boxed(&mut s, [50.0, 30.0, 11.0], [20.0, 10.0, 3.0], "cut");
+    run(&mut s, "solid.cylinder", json!({"diameter": 16, "height": 10, "base": [10, 70, 16], "operation": "cut", "targets": ["Plate"]}));
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}));
+    let pockets = found["pockets"].as_array().unwrap();
+    let of_floor = |floor: f64| pockets.iter().position(|pocket| pocket["floor"].as_f64() == Some(floor)).unwrap_or(usize::MAX);
+    let (big, small, round) = (of_floor(-7.0), of_floor(-10.0), of_floor(-5.0));
+    assert!(pockets.len() == 3 && big < 3 && small < 3 && round < 3, "{found:#}");
+    let at = |x: f64, y: f64, z: f64| crate::cmd::manufacture_pocket_at(&s, "setup-1", solidcore_record::Vec3 { x, y, z }).unwrap();
+    // On a floor: that pocket.
+    assert_eq!((at(40.0, 50.0, 14.0), at(60.0, 35.0, 11.0), at(10.0, 70.0, 16.0)), (Some(big), Some(small), Some(round)));
+    // On a wall, anywhere between the floor and the part's top: a flat wall, the island's side
+    // (the pocket's wall too), and the round wall where a display mesh is off it either way.
+    assert_eq!((at(20.0, 40.0, 17.0), at(80.0, 59.0, 19.9), at(35.0, 30.0, 17.0)), (Some(big), Some(big), Some(big)));
+    assert_eq!((at(18.0, 70.0, 18.0), at(17.97, 70.0, 16.5), at(18.03, 70.0, 19.0)), (Some(round), Some(round), Some(round)));
+    // The small pocket's wall is below the big one's floor; on its rim, at the big one's floor,
+    // the point is in the big one all round and in the small one on one side only.
+    assert_eq!((at(50.0, 35.0, 12.5), at(50.0, 35.0, 14.0)), (Some(small), Some(big)));
+    // On no pocket: the plate's top, the island's top, an outside wall, off the part, over a
+    // pocket but above the part, and under a floor.
+    for (x, y, z) in [(5.0, 5.0, 20.0), (30.0, 30.0, 20.0), (0.0, 40.0, 10.0), (200.0, 0.0, 0.0), (40.0, 50.0, 30.0), (40.0, 50.0, 5.0)] {
+        assert_eq!(at(x, y, z), None, "{x} {y} {z}");
+    }
+    // Hostile points are on none, and a setup that is not there is said.
+    for hostile in [f64::NAN, f64::INFINITY, -f64::INFINITY, 1e300] {
+        assert_eq!((at(hostile, 50.0, 14.0), at(40.0, hostile, 14.0), at(40.0, 50.0, hostile)), (None, None, None), "{hostile}");
+    }
+    let origin = solidcore_record::Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    assert!(crate::cmd::manufacture_pocket_at(&s, "setup-9", origin).err().is_some_and(|why| why.contains("no setup 'setup-9'")));
+    // A part with no pockets has none to be on.
+    let plain = plate();
+    assert_eq!(crate::cmd::manufacture_pocket_at(&plain, "setup-1", solidcore_record::Vec3 { x: 50.0, y: 40.0, z: 20.0 }), Ok(None));
+}
+
+#[test]
+fn a_point_picked_on_the_model_is_of_the_hole_it_is_on() {
+    // The block with its holes: in the list three of 6 through it, two of 8 with flat floors
+    // 10 down, the fourth of 6 under its counterbore, and the counterbore of 12. In the model
+    // the block's corner is at the origin and its top at Z 20.
+    let s = holed();
+    let at = |x: f64, y: f64, z: f64| crate::cmd::manufacture_hole_at(&s, "setup-1", solidcore_record::Vec3 { x, y, z }).unwrap();
+    // On a wall, anywhere down it: the group and the hole's place in it (by Y, then X).
+    assert_eq!((at(53.0, 10.0, 12.0), at(10.0, 33.0, 5.0), at(47.0, 30.0, 18.0)), (Some((0, 0)), Some((0, 1)), Some((0, 2))));
+    assert_eq!((at(34.0, 10.0, 15.0), at(30.0, 26.0, 19.0)), (Some((1, 0)), Some((1, 1))));
+    // On a flat floor, and a little off a wall as a display mesh is.
+    assert_eq!((at(30.0, 10.0, 10.0), at(53.2, 10.0, 12.0), at(52.9, 10.0, 12.0)), (Some((1, 0)), Some((0, 0)), Some((0, 0))));
+    // The counterbore's wall and its floor are the counterbore's; under it the hole of 6, whose
+    // wall is the nearer close round its rim.
+    assert_eq!((at(16.0, 10.0, 18.0), at(14.5, 10.0, 16.0)), (Some((3, 0)), Some((3, 0))));
+    assert_eq!((at(13.0, 10.0, 8.0), at(13.2, 10.0, 16.0)), (Some((2, 0)), Some((2, 0))));
+    // On no hole a tool comes down into: the block's top, the quarter round down a corner, the
+    // hole from below, the hole along X, over a hole but above the part, and off the part.
+    for (x, y, z) in [(30.0, 20.0, 20.0), (56.5, 36.5, 10.0), (47.5, 20.0, 5.0), (20.0, 20.0, 17.0), (53.0, 10.0, 25.0), (200.0, 0.0, 0.0)] {
+        assert_eq!(at(x, y, z), None, "{x} {y} {z}");
+    }
+    // Hostile points are on none, and a setup that is not there is said.
+    for hostile in [f64::NAN, f64::INFINITY, -f64::INFINITY, 1e300] {
+        assert_eq!((at(hostile, 10.0, 12.0), at(53.0, hostile, 12.0), at(53.0, 10.0, hostile)), (None, None, None), "{hostile}");
+    }
+    let origin = solidcore_record::Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    assert!(crate::cmd::manufacture_hole_at(&s, "setup-9", origin).err().is_some_and(|why| why.contains("no setup 'setup-9'")));
+}

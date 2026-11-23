@@ -2354,3 +2354,280 @@ fn post_process_shows_the_program_it_would_save() {
     press(&mut h, "Cancel");
     assert_eq!(open(&h), "none");
 }
+
+#[test]
+fn pocket_takes_the_pockets_clicked_on_the_model() {
+    let mut h = harness();
+    // The plate's two pockets and a third, 30 x 10 and 5 deep, near another corner: in the list
+    // the 60 x 40 one, the 30 x 10 one, then the round one of 16.
+    pocketed_plate(&mut h);
+    h.app.run("solid.box", json!({"length": 30, "width": 10, "height": 5, "corner": [65, 5, 15], "operation": "cut", "targets": ["Plate"]})).unwrap();
+    add_tool(&mut h, "flat_end_mill", 6.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    // From above, where every floor faces the eye, and far enough back that the whole plate is
+    // in the middle of the view, clear of the Browser and of the form.
+    for view in ["top", "fit"] {
+        h.step(&json!({"call": "ui.view", "params": {"view": view}})).unwrap();
+    }
+    let distance = h.call("ui.camera", json!({}))["result"]["distance"].as_f64().unwrap();
+    h.step(&json!({"call": "ui.camera", "params": {"distance": 2.2 * distance}})).unwrap();
+    h.frames(3);
+    ribbon(&mut h, "cam.op.pocket");
+    let form = pocket_form(&mut h);
+    let sizes: Vec<[f64; 2]> = form.pockets().iter().map(|pocket| pocket.size).collect();
+    assert_eq!(sizes, vec![[60.0, 40.0], [30.0, 10.0], [16.0, 16.0]]);
+    assert_eq!((form.pocket, form.picked().len(), form.picks.clone()), (0, 3, vec![]));
+    // The form says its pockets can be clicked; the viewport picks for it once the pointer is
+    // put to use on the model, and not before.
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.pocket_pick_hint")).is_some());
+    let click = |h: &mut Harness, at: [f64; 3]| {
+        h.step(&json!({"click": {"world": at}})).unwrap_or_else(|e| panic!("a click at {at:?}: {e}"));
+        h.frames(3);
+    };
+    let (big, long, round, top) = ([50.0, 40.0, 14.0], [80.0, 10.0, 15.0], [10.0, 70.0, 16.0], [5.0, 40.0, 20.0]);
+    // A click on the big pocket's floor: that pocket alone, the row's own choice of it.
+    click(&mut h, big);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picked().len(), form.picks.clone(), form.pick_missed()), (1, 1, vec![], false));
+    assert_eq!(form.picked()[0].size, [60.0, 40.0]);
+    // A click on the round one adds it: two of the three, a choice the row gains.
+    click(&mut h, round);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picks.clone(), form.picked().len()), (4, vec![0, 2], 2));
+    assert_eq!(form.params()["pocket"]["pockets"].as_array().map(Vec::len), Some(2));
+    assert!(h.widget("2 of 3, picked on the model").is_some());
+    // A click on the plate's top is on no pocket: nothing changes, and the form says so.
+    click(&mut h, top);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.picks.clone(), form.pick_missed()), (vec![0, 2], true));
+    assert!(h.widget(tr("manufacture.pocket_pick_missed")).is_some());
+    // The big one's floor again takes it out: the round one alone.
+    click(&mut h, big);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picks.clone(), form.picked()[0].size, form.pick_missed()), (3, vec![], [16.0, 16.0], false));
+    // The round one's again: none is left picked, so it is all of them, as the form opened.
+    click(&mut h, round);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picked().len(), form.picks.clone()), (0, 3, vec![]));
+    // Every one picked, one after another, is all of them too.
+    for at in [long, big, round] {
+        click(&mut h, at);
+    }
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picked().len(), form.picks.clone()), (0, 3, vec![]));
+    // A choice from the row's list is the choice: what was picked is forgotten, and the next
+    // click picks afresh.
+    h.step(&json!({"widget": "All 3 pockets"})).unwrap();
+    h.frames(3);
+    h.step(&json!({"widget": "30.00 × 10.00 × 5.00 mm"})).unwrap();
+    h.frames(3);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picked().len(), form.picks.clone()), (2, 1, vec![]));
+    click(&mut h, round);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picks.clone(), form.picked()[0].size), (3, vec![], [16.0, 16.0]));
+    click(&mut h, big);
+    let form = pocket_form(&mut h);
+    assert_eq!((form.pocket, form.picks.clone()), (4, vec![0, 2]));
+    // Created: the operation cuts the two picked, and the viewport no longer picks for a form.
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let made = data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["pockets"].clone();
+    assert_eq!(made.as_array().map(Vec::len), Some(2), "{made}");
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.app.dialog.is_none());
+    // An operation being changed keeps its pockets: nothing is picked for it.
+    row_menu(&mut h, "Pocket 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "pocket");
+    h.frames(2);
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.pocket_pick_hint")).is_none());
+    press(&mut h, "Cancel");
+    // Cancel, another command's form and leaving Manufacture all stop the picking.
+    ribbon(&mut h, "cam.op.pocket");
+    click(&mut h, big);
+    assert!(crate::manufacture_workspace::picking::active(&h.app));
+    press(&mut h, "Cancel");
+    assert!(h.app.dialog.is_none());
+    // A form opened again picks nothing until the pointer is put to use on the model again:
+    // where it rests, on the ribbon's button, says nothing.
+    ribbon(&mut h, "cam.op.pocket");
+    h.frames(4);
+    assert_eq!((open(&h), pocket_form(&mut h).pocket, h.app.dialog.is_none()), ("pocket", 0, true));
+    click(&mut h, big);
+    assert!(crate::manufacture_workspace::picking::active(&h.app));
+    ribbon(&mut h, "cam.op.face");
+    h.frames(2);
+    assert_eq!((open(&h), h.app.dialog.is_none()), ("face", true));
+    press(&mut h, "Cancel");
+    ribbon(&mut h, "cam.op.pocket");
+    click(&mut h, big);
+    assert!(crate::manufacture_workspace::picking::active(&h.app));
+    crate::workspace::enter(&mut h.app, "design").unwrap();
+    h.frames(3);
+    assert_eq!((open(&h), h.app.dialog.is_none()), ("none", true));
+    // Escape closes the form, as it did before, and the picking goes with it.
+    crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+    h.frames(2);
+    ribbon(&mut h, "cam.op.pocket");
+    click(&mut h, big);
+    assert_eq!((open(&h), pocket_form(&mut h).pocket, crate::manufacture_workspace::picking::active(&h.app)), ("pocket", 1, true));
+    h.step(&json!({"key": "Escape"})).unwrap();
+    h.frames(3);
+    assert_eq!((open(&h), h.app.dialog.is_none()), ("none", true));
+}
+
+#[test]
+fn drill_takes_the_holes_clicked_on_the_model() {
+    let mut h = harness();
+    // The block's holes, as the form lists them: three of 6 through it, two of 8 with flat
+    // floors, the fourth of 6 under its counterbore, and the counterbore of 12. T1 is a 6 mm
+    // drill and T2 an 8 mm one.
+    holed(&mut h);
+    add_tool(&mut h, "drill", 6.0);
+    add_tool(&mut h, "drill", 8.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    // From the corner, far enough back that the block is in the middle of the view: the far
+    // side of each hole's wall is seen through its mouth.
+    for view in ["home", "fit"] {
+        h.step(&json!({"call": "ui.view", "params": {"view": view}})).unwrap();
+    }
+    let distance = h.call("ui.camera", json!({}))["result"]["distance"].as_f64().unwrap();
+    h.step(&json!({"call": "ui.camera", "params": {"distance": 2.2 * distance}})).unwrap();
+    h.frames(3);
+    ribbon(&mut h, "cam.op.drill");
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone(), form.groups().len()), (0, vec![], 4));
+    assert_eq!(form.params()["drill"]["holes"], json!([[20.0, -10.0], [-20.0, 10.0], [20.0, 10.0]]));
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.hole_pick_hint")).is_some());
+    // A point 2 mm down the far side of the wall of the hole at `x`, `y` of the block.
+    let wall = |x: f64, y: f64, diameter: f64| {
+        let across = std::f64::consts::FRAC_1_SQRT_2 * 0.5 * diameter;
+        [x - across, y + across, 18.0]
+    };
+    let click = |h: &mut Harness, at: [f64; 3]| {
+        h.step(&json!({"click": {"world": at}})).unwrap_or_else(|e| panic!("a click at {at:?}: {e}"));
+        h.frames(3);
+    };
+    // One of the three through holes: that hole alone is drilled, and the form says so.
+    click(&mut h, wall(50.0, 30.0, 6.0));
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone(), form.holes.missed()), (0, vec![2], false));
+    assert_eq!(form.params()["drill"]["holes"], json!([[20.0, 10.0]]));
+    assert!(h.widget("1 of these 3, picked on the model.").is_some());
+    // Another of them: two of the three.
+    click(&mut h, wall(50.0, 10.0, 6.0));
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone()), (0, vec![0, 2]));
+    assert_eq!(form.params()["drill"]["holes"], json!([[20.0, -10.0], [20.0, 10.0]]));
+    // The block's top is on no hole: nothing changes, and the form says so.
+    click(&mut h, [30.0, 20.0, 20.0]);
+    let form = drill_form(&mut h);
+    assert_eq!((form.holes.picks.clone(), form.holes.missed()), (vec![0, 2], true));
+    assert!(h.widget(tr("manufacture.hole_pick_missed")).is_some());
+    // A hole of another size: its group is the one drilled now, that hole alone, with the
+    // tool that suits it; the holes of 6 are picked no longer.
+    click(&mut h, wall(30.0, 10.0, 8.0));
+    let picked = h.app.dialog.as_ref().map(|d| d.inputs[0].items.len());
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone(), form.tool, picked), (1, vec![0], 1, Some(1)));
+    assert_eq!(form.params()["drill"]["holes"], json!([[0.0, -10.0]]));
+    // The other hole of 8: both are every hole of the group, as the row's own choice of it is.
+    click(&mut h, wall(30.0, 30.0, 8.0));
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone()), (1, vec![]));
+    assert!(h.widget(tr("manufacture.hole_pick_hint")).is_some());
+    // The first again takes it out: the other alone.
+    click(&mut h, wall(30.0, 10.0, 8.0));
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone()), (1, vec![1]));
+    // A choice from the row's list is the choice: what was picked is forgotten.
+    drill_form(&mut h).group = 0;
+    h.frames(3);
+    let picked = h.app.dialog.as_ref().map(|d| d.inputs[0].items.len());
+    let form = drill_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone(), form.tool, picked), (0, vec![], 0, Some(0)));
+    // Created with one hole picked: the operation drills that hole, and the picking stops.
+    click(&mut h, wall(10.0, 30.0, 6.0));
+    assert_eq!(drill_form(&mut h).holes.picks, vec![1]);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["drill"]["holes"], json!([[-20.0, 10.0]]));
+    assert!(h.app.dialog.is_none());
+    // An operation being changed keeps its holes: nothing is picked for it.
+    row_menu(&mut h, "Drill 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "drill");
+    h.frames(2);
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.hole_pick_hint")).is_none());
+    press(&mut h, "Cancel");
+    // From Drill's form to Pocket's and back, each picks its own things afresh.
+    ribbon(&mut h, "cam.op.drill");
+    click(&mut h, wall(50.0, 30.0, 6.0));
+    assert_eq!(drill_form(&mut h).holes.picks, vec![2]);
+    ribbon(&mut h, "cam.op.pocket");
+    h.frames(2);
+    assert_eq!((open(&h), h.app.dialog.is_none()), ("pocket", true), "the holes' picks went with their form");
+    click(&mut h, [30.0, 20.0, 20.0]);
+    assert!(crate::manufacture_workspace::picking::active(&h.app) && pocket_form(&mut h).pick_missed());
+    ribbon(&mut h, "cam.op.drill");
+    h.frames(2);
+    assert_eq!((drill_form(&mut h).holes.picks.clone(), h.app.dialog.is_none()), (vec![], true));
+    press(&mut h, "Cancel");
+    assert!(h.app.dialog.is_none());
+}
+
+#[test]
+fn bore_takes_the_holes_clicked_on_the_model() {
+    let mut h = harness();
+    // The block with a hole of 24 through it and two of 14, 8 deep, and end mills of 20 (T1)
+    // and 10 mm (T2). The two of 14 are the first group, the larger one.
+    block(&mut h);
+    h.app.run("solid.cylinder", json!({"diameter": 24, "height": 30, "base": [16, 20, -5], "operation": "cut"})).unwrap();
+    for y in [10.0, 30.0] {
+        h.app.run("solid.cylinder", json!({"diameter": 14, "height": 8, "base": [45, y, 12], "operation": "cut"})).unwrap();
+    }
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    for view in ["home", "fit"] {
+        h.step(&json!({"call": "ui.view", "params": {"view": view}})).unwrap();
+    }
+    let distance = h.call("ui.camera", json!({}))["result"]["distance"].as_f64().unwrap();
+    h.step(&json!({"call": "ui.camera", "params": {"distance": 2.2 * distance}})).unwrap();
+    h.frames(3);
+    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    h.frames(3);
+    let form = bore_form(&mut h);
+    let sizes: Vec<(f64, usize)> = form.groups().iter().map(|group| (group.diameter, group.holes.len())).collect();
+    assert_eq!((sizes, form.group, form.holes.picks.clone()), (vec![(14.0, 2), (24.0, 1)], 0, vec![]));
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.hole_pick_hint")).is_some());
+    let wall = |x: f64, y: f64, diameter: f64| {
+        let across = std::f64::consts::FRAC_1_SQRT_2 * 0.5 * diameter;
+        [x - across, y + across, 18.0]
+    };
+    let click = |h: &mut Harness, at: [f64; 3]| {
+        h.step(&json!({"click": {"world": at}})).unwrap_or_else(|e| panic!("a click at {at:?}: {e}"));
+        h.frames(3);
+    };
+    // One of the two holes of 14: that one alone is bored.
+    click(&mut h, wall(45.0, 30.0, 14.0));
+    let form = bore_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone(), form.tool), (0, vec![1], 1));
+    assert_eq!(form.params()["contour"]["openings"], json!([[15.0, 10.0]]));
+    assert!(h.widget("1 of these 2, picked on the model.").is_some());
+    // The hole of 24: its group now, the only hole of it, with the tool that suits it.
+    click(&mut h, wall(16.0, 20.0, 24.0));
+    let form = bore_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone(), form.tool), (1, vec![], 0));
+    assert_eq!(form.params()["contour"]["openings"], json!([[-14.0, 0.0]]));
+    // The block's top is on no hole.
+    click(&mut h, [30.0, 5.0, 20.0]);
+    assert!(bore_form(&mut h).holes.missed() && h.widget(tr("manufacture.hole_pick_missed")).is_some());
+    // The other hole of 14, and Create: the operation bores that hole, and the picking stops.
+    click(&mut h, wall(45.0, 10.0, 14.0));
+    let form = bore_form(&mut h);
+    assert_eq!((form.group, form.holes.picks.clone(), form.holes.missed()), (0, vec![0], false));
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let made = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((made["name"].as_str(), made["operation"]["contour"]["openings"].clone()), (Some("Bore 1"), json!([[15.0, -10.0]])));
+    assert!(h.app.dialog.is_none());
+}

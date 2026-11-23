@@ -87,6 +87,16 @@ pub(crate) enum Shown<'a> {
 }
 
 impl Dialog {
+    /// Whether the form takes what is clicked on the model (`super::picking`).
+    fn takes_picks(&self) -> bool {
+        match self {
+            Dialog::Pocket(form) => form.editing.is_none(),
+            Dialog::Drill(form) => form.editing.is_none(),
+            Dialog::Bore(_) => true,
+            _ => false,
+        }
+    }
+
     /// The operation the open form is changing, if it is changing one: its own toolpath gives way
     /// to the form's preview in the viewport.
     pub(crate) fn edited_operation(&self) -> Option<&str> {
@@ -1264,6 +1274,8 @@ pub(crate) struct DrillForm {
     /// The holes the setup picked can drill, in groups, as the engine found them.
     found: Worked<Vec<HoleGroup>>,
     pub group: usize,
+    /// The holes of the group picked on the model, when they are not all of them.
+    pub holes: super::picking::HolePicks,
     /// The group the depth and the tool were last suited to.
     suited_to: Option<usize>,
     pub tool: usize,
@@ -1304,6 +1316,7 @@ impl DrillForm {
             setup,
             found: Worked::new(),
             group: 0,
+            holes: super::picking::HolePicks::new(),
             suited_to: None,
             tool: 0,
             picked_tool: false,
@@ -1414,7 +1427,7 @@ impl DrillForm {
             (None, Some(group)) => {
                 let (suited, to) = self.suited_depth(group);
                 let depth = if self.typed_depth { self.depth } else { suited };
-                json!({"holes": group.holes, "top": group.top, "depth": depth, "depth_to": to, "cycle": cycle})
+                json!({"holes": self.holes.of(group), "top": group.top, "depth": depth, "depth_to": to, "cycle": cycle})
             }
             (None, None) => json!({"holes": [], "top": null, "depth": self.depth, "depth_to": "tip", "cycle": cycle}),
         };
@@ -1502,7 +1515,22 @@ impl DrillForm {
     }
 
     fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<DrillForm> {
+        // What is picked on the model is what is drilled (decision 0030 of the CAM work): a
+        // group chosen from the row's list forgets it, and a hole clicked is taken and worked out.
+        let picks = self.editing.is_none();
+        if picks {
+            self.holes.follow_row(app, self.group);
+        }
         self.refresh(app);
+        if picks {
+            let found = self.found.get().map(|(key, _)| key);
+            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            let groups = self.found.get().map_or(&[][..], |(_, groups)| groups.as_slice());
+            if self.holes.take(app, ctx, found, &setup, groups, &mut self.group) {
+                self.refresh(app);
+            }
+        }
+        let picking = self.picked().filter(|_| picks).map(|group| self.holes.says(group.holes.len()));
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
@@ -1570,6 +1598,9 @@ impl DrillForm {
                     return;
                 } else {
                     ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_drill_holes", &mut self.group, &group_labels);
+                    if let Some(picking) = &picking {
+                        ui_kit::text(ui, picking, ui_kit::Text::Note("manufacture_drill_pick"));
+                    }
                 }
                 let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_drill_tool", &mut self.tool, &tool_labels);
@@ -1842,8 +1873,10 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         app.set_status(why, true);
         return true;
     }
-    // A command started afresh has no window to come back to when its form closes.
+    // A command started afresh has no window to come back to when its form closes, and picks
+    // nothing another form's picking left.
     app.manufacture_workspace.resume = None;
+    super::picking::stop(app);
     if id == "cam.library.export" {
         // No form: the save prompt is all it asks.
         export_library(app);
@@ -1876,6 +1909,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
 /// status line.
 pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
     app.manufacture_workspace.resume = None;
+    super::picking::stop(app);
     let form = match target {
         Target::Tool(number) => ToolForm::edit(app, *number).map(Dialog::Tool),
         Target::Setup(id) => SetupForm::edit(app, id).map(Dialog::Setup),
@@ -1899,9 +1933,14 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
 /// The open form, if any. Called once a frame. One command's form is open at a time: a form
 /// closes when Manufacture is left, and when another command opens its own dialog or tool.
 pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
-    let Some(dialog) = app.manufacture_workspace.dialog.take() else { return };
-    if !super::active(app) || app.dialog.is_some() || app.tool.is_some() {
+    let Some(dialog) = app.manufacture_workspace.dialog.take() else {
+        super::picking::stop(app);
+        return;
+    };
+    // The viewport's picks for a form are the form's own; any other dialog closes it.
+    if !super::active(app) || app.dialog.as_ref().is_some_and(|d| !matches!(d.kind, crate::dialogs::Kind::ManufacturePick)) || app.tool.is_some() {
         app.manufacture_workspace.resume = None;
+        super::picking::stop(app);
         return;
     }
     let (units, decimals) = (app.session.doc.units.clone(), app.preferences.length_decimals);
@@ -1925,6 +1964,10 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
     // the window it was opened from (the tool library), when there is one.
     if app.manufacture_workspace.dialog.is_none() {
         app.manufacture_workspace.dialog = kept.or_else(|| app.manufacture_workspace.resume.take().map(|window| *window));
+    }
+    // The viewport picks only while a form that takes picks is open.
+    if !app.manufacture_workspace.dialog.as_ref().is_some_and(Dialog::takes_picks) {
+        super::picking::stop(app);
     }
 }
 

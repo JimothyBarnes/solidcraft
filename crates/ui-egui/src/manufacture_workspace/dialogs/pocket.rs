@@ -3,7 +3,9 @@
 //! `cam.op.edit` for a pocket operation being changed) and shows what they would cut before OK,
 //! as the other operations' forms do.
 use serde_json::{Value, json};
-use solidcraft_engine::cmd::{FoundPocket, OperationPreview, ToolChoice, manufacture_pockets, manufacture_preview, manufacture_tools};
+use solidcraft_engine::cmd::{
+    FoundPocket, OperationPreview, ToolChoice, manufacture_pocket_at, manufacture_pockets, manufacture_preview, manufacture_tools,
+};
 use solidcraft_engine::doc::display_units::{format_length, length_number};
 use solidcraft_ui_text::tr;
 
@@ -13,8 +15,11 @@ use super::{
     word,
 };
 use crate::SolveApp;
+use crate::manufacture_workspace::picking;
 use crate::ui_kit;
 
+/// What the form's picks on the model are called.
+const PICKED: &str = "Pockets";
 /// The stepover and the stepdown a pocket takes when none is typed, as shares of the tool's
 /// diameter (the engine's own defaults, shown in the fields).
 const STEPOVER_SHARE: f64 = 0.4;
@@ -28,10 +33,18 @@ pub(crate) struct PocketForm {
     /// The closed pockets the setup picked can cut, as the engine found them.
     found: Worked<Vec<FoundPocket>>,
     /// Which of the form's choices is picked: with more than one pocket found the first choice
-    /// is all of them, and the pockets follow it one by one.
+    /// is all of them, and the pockets follow it one by one; after them, while several are
+    /// picked on the model, a choice that stands for those.
     pub pocket: usize,
-    /// The choice the tool was last suited to.
-    suited_to: Option<usize>,
+    /// The pockets picked on the model, when they are several and not all: their places among
+    /// those found, in order. One pocket picked, or every one, is a choice of the row's own.
+    pub picks: Vec<usize>,
+    /// What was clicked on the model: the faces, each with the pocket it is of.
+    clicked: picking::Picks<usize>,
+    /// The choice as the clicks on the model last left it: another one since is the row's own.
+    left_at: usize,
+    /// The choice and the picks the tool was last suited to.
+    suited_to: Option<(usize, Vec<usize>)>,
     pub tool: usize,
     /// Whether the tool was picked by hand: until then it is the widest that passes everywhere
     /// in the pockets picked.
@@ -71,6 +84,9 @@ impl PocketForm {
             setup,
             found: Worked::new(),
             pocket: 0,
+            picks: Vec::new(),
+            clicked: picking::Picks::new(),
+            left_at: 0,
             suited_to: None,
             tool: 0,
             picked_tool: false,
@@ -123,15 +139,58 @@ impl PocketForm {
         self.pockets().len() > 1
     }
 
-    /// The pockets the choice picked stands for: all of them, or one.
-    pub fn picked(&self) -> &[FoundPocket] {
+    /// The pockets the choice picked stands for: all of them, one, or the several picked on
+    /// the model.
+    pub fn picked(&self) -> Vec<&FoundPocket> {
         let all = self.pockets();
-        let one = |at: usize| all.get(at..at.saturating_add(1)).unwrap_or(&[]);
-        match (self.offers_all(), self.pocket) {
-            (true, 0) => all,
-            (true, choice) => one(choice - 1),
-            (false, choice) => one(choice),
+        if !self.picks.is_empty() {
+            return self.picks.iter().filter_map(|at| all.get(*at)).collect();
         }
+        match (self.offers_all(), self.pocket) {
+            (true, 0) => all.iter().collect(),
+            (true, choice) => all.get(choice - 1).into_iter().collect(),
+            (false, choice) => all.get(choice).into_iter().collect(),
+        }
+    }
+
+    /// Whether the last click on the model was on no pocket.
+    #[cfg(test)]
+    pub fn pick_missed(&self) -> bool {
+        self.clicked.missed
+    }
+
+    /// Takes what was clicked on the model since the last frame (decision 0030 of the CAM
+    /// work) and makes it the choice: one pocket, all of them, or several. Whether the choice
+    /// changed.
+    fn take_picks(&mut self, app: &mut SolveApp, ctx: &egui::Context) -> bool {
+        if self.editing.is_some() {
+            return false;
+        }
+        let found = self.found.get().map(|(key, _)| key);
+        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+        let on_pocket = |app: &SolveApp, point| manufacture_pocket_at(&app.session, &setup, point).ok().flatten();
+        let Some(mut picks) = self.clicked.take(app, ctx, PICKED, found, on_pocket) else { return false };
+        picks.sort_unstable();
+        let (count, first) = (self.pockets().len(), usize::from(self.offers_all()));
+        // None left, or every one: all of them, the row's first choice. One: the row's own
+        // choice of it. Several: the choice the row gains for them, after the pockets.
+        let own = match picks.as_slice() {
+            [] => Some(0),
+            every if every.len() == count => Some(0),
+            [one] => Some(first + one),
+            _ => None,
+        };
+        (self.pocket, self.picks) = match own {
+            Some(choice) => (choice, Vec::new()),
+            None => (first + count, picks),
+        };
+        true
+    }
+
+    /// Forgets what was picked on the model: a choice from the row's list is the choice.
+    fn forget_picks(&mut self, app: &mut SolveApp) {
+        self.clicked.forget(app);
+        self.picks.clear();
     }
 
     /// What is missing before a pocket can be cut, if anything.
@@ -150,10 +209,10 @@ impl PocketForm {
     /// The tool that suits `pockets`: the widest that passes everywhere in every one of them
     /// (through their necks, round their islands), so each is cleared whole; when none does, the
     /// widest that fits in them all; else the narrowest there is.
-    fn fitting_tool(&self, pockets: &[FoundPocket]) -> usize {
+    fn fitting_tool(&self, pockets: &[&FoundPocket]) -> usize {
         let by_width = |a: &(usize, &ToolChoice), b: &(usize, &ToolChoice)| a.1.diameter.total_cmp(&b.1.diameter);
         let narrower = |than: f64| self.tools.iter().enumerate().filter(move |(_, tool)| tool.diameter < than - 1e-6).max_by(by_width);
-        let least = |of: fn(&FoundPocket) -> f64| pockets.iter().map(of).fold(f64::INFINITY, f64::min);
+        let least = |of: fn(&FoundPocket) -> f64| pockets.iter().map(|pocket| of(pocket)).fold(f64::INFINITY, f64::min);
         narrower(least(|pocket| pocket.passes))
             .or(narrower(least(|pocket| pocket.widest)))
             .or(self.tools.iter().enumerate().min_by(by_width))
@@ -196,13 +255,14 @@ impl PocketForm {
             if self.found.refresh(app, &json!({"id": setup}), || manufacture_pockets(&app.session, &setup)) {
                 self.suited_to = None;
             }
-            let choices = self.pockets().len() + usize::from(self.offers_all());
+            let choices = self.pockets().len() + usize::from(self.offers_all()) + usize::from(!self.picks.is_empty());
             self.pocket = self.pocket.min(choices.saturating_sub(1));
-            if self.suited_to != Some(self.pocket) && !self.picked().is_empty() {
+            let suited = self.suited_to.as_ref().is_some_and(|(choice, picks)| *choice == self.pocket && *picks == self.picks);
+            if !suited && !self.picked().is_empty() {
                 if !self.picked_tool {
-                    self.tool = self.fitting_tool(self.picked());
+                    self.tool = self.fitting_tool(&self.picked());
                 }
-                self.suited_to = Some(self.pocket);
+                self.suited_to = Some((self.pocket, self.picks.clone()));
             }
         }
         let diameter = self.tools.get(self.tool).map(|t| t.diameter);
@@ -275,14 +335,34 @@ impl PocketForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<PocketForm> {
+        // A choice from the row's list is the choice: what was picked on the model is forgotten.
+        if self.pocket != self.left_at {
+            self.forget_picks(app);
+        }
         self.refresh(app);
+        // What was clicked on the model is the choice, and what the choice makes is worked out.
+        if self.take_picks(app, ctx) {
+            self.refresh(app);
+        }
+        self.left_at = self.pocket;
+        let picking = self.editing.is_none();
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
         // All of them first, when there is more than one; then each by its size.
         let all = solidcraft_ui_text::format("manufacture.pocket_all", &[("count", &self.pockets().len().to_string())]);
-        let pocket_labels: Vec<String> =
-            self.offers_all().then_some(all).into_iter().chain(self.pockets().iter().map(|found| Self::label(found, units, decimals))).collect();
+        // After them, while several are picked on the model, the choice that stands for those.
+        let several = (!self.picks.is_empty()).then(|| {
+            let (count, of) = (self.picks.len().to_string(), self.pockets().len().to_string());
+            solidcraft_ui_text::format("manufacture.pocket_picked", &[("count", &count), ("of", &of)])
+        });
+        let pocket_labels: Vec<String> = self
+            .offers_all()
+            .then_some(all)
+            .into_iter()
+            .chain(self.pockets().iter().map(|found| Self::label(found, units, decimals)))
+            .chain(several)
+            .collect();
         let pocket_labels: Vec<&str> = pocket_labels.iter().map(String::as_str).collect();
         let kept = self.editing.as_ref().map(|edited| {
             let count = edited.base["pockets"].as_array().map_or(0, Vec::len).to_string();
@@ -328,6 +408,10 @@ impl PocketForm {
                     }
                     None => {
                         ui_kit::choice_row(ui, tr("manufacture.pocket_choice"), "manufacture_pocket_choice", &mut self.pocket, &pocket_labels);
+                        if picking {
+                            let said = if self.clicked.missed { "manufacture.pocket_pick_missed" } else { "manufacture.pocket_pick_hint" };
+                            ui_kit::text(ui, tr(said), ui_kit::Text::Note("manufacture_pocket_pick"));
+                        }
                     }
                 }
                 if ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_pocket_tool", &mut self.tool, &tool_labels).changed() {

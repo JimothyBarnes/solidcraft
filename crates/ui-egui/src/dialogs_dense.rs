@@ -1013,6 +1013,7 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
         | Kind::Midplane
         | Kind::ChatContext
         | Kind::PluginPick { .. }
+        | Kind::ManufacturePick
         | Kind::Construct { t: None, .. } => {}
         Kind::Rib { thickness, depth, flip, normal, extend, .. } => {
             form_row(ui, "Direction", |ui| {

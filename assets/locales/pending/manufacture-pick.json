@@ -1,0 +1,66 @@
+{
+  "en": {
+    "manufacture.hole_pick_hint": "Or click holes on the model.",
+    "manufacture.hole_pick_missed": "That face is on no hole found on this setup.",
+    "manufacture.hole_picked": "{count} of these {of}, picked on the model.",
+    "manufacture.pocket_pick_hint": "Or click the pockets to cut on the model.",
+    "manufacture.pocket_pick_missed": "That face is on no pocket this setup can cut.",
+    "manufacture.pocket_picked": "{count} of {of}, picked on the model"
+  },
+  "ar": {
+    "manufacture.hole_pick_hint": "أو انقر على الثقوب على النموذج.",
+    "manufacture.hole_pick_missed": "هذا الوجه ليس على ثقب وُجد في هذا الإعداد.",
+    "manufacture.hole_picked": "{count} من هذه الـ {of}، مختارة على النموذج.",
+    "manufacture.pocket_pick_hint": "أو انقر على الجيوب المراد قطعها على النموذج.",
+    "manufacture.pocket_pick_missed": "هذا الوجه ليس على جيب يمكن لهذا الإعداد قطعه.",
+    "manufacture.pocket_picked": "{count} من {of}، مختارة على النموذج"
+  },
+  "he": {
+    "manufacture.hole_pick_hint": "או לחצו על קדחים במודל.",
+    "manufacture.hole_pick_missed": "הפאה הזו אינה על קדח שנמצא בהגדרה הזו.",
+    "manufacture.hole_picked": "{count} מתוך {of} אלה, נבחרו במודל.",
+    "manufacture.pocket_pick_hint": "או לחצו במודל על הכיסים שיש לחתוך.",
+    "manufacture.pocket_pick_missed": "הפאה הזו אינה על כיס שההגדרה הזו יכולה לחתוך.",
+    "manufacture.pocket_picked": "{count} מתוך {of}, נבחרו במודל"
+  },
+  "ja": {
+    "manufacture.hole_pick_hint": "または、モデル上で穴をクリックします。",
+    "manufacture.hole_pick_missed": "その面は、このセットアップで見つかった穴の面ではありません。",
+    "manufacture.hole_picked": "この {of} 個中 {count} 個（モデル上で選択）。",
+    "manufacture.pocket_pick_hint": "または、加工するポケットをモデル上でクリックします。",
+    "manufacture.pocket_pick_missed": "その面は、このセットアップで加工できるポケットの面ではありません。",
+    "manufacture.pocket_picked": "{of} 個中 {count} 個（モデル上で選択）"
+  },
+  "vi": {
+    "manufacture.hole_pick_hint": "Hoặc nhấp vào các lỗ trên mô hình.",
+    "manufacture.hole_pick_missed": "Mặt đó không thuộc lỗ nào tìm thấy trong thiết lập này.",
+    "manufacture.hole_picked": "{count} trong {of} lỗ này, chọn trên mô hình.",
+    "manufacture.pocket_pick_hint": "Hoặc nhấp vào các hốc cần cắt trên mô hình.",
+    "manufacture.pocket_pick_missed": "Mặt đó không thuộc hốc nào mà thiết lập này cắt được.",
+    "manufacture.pocket_picked": "{count} trên {of}, chọn trên mô hình"
+  },
+  "zh": {
+    "manufacture.hole_pick_hint": "或在模型上单击孔。",
+    "manufacture.hole_pick_missed": "该面不属于此装夹中找到的任何孔。",
+    "manufacture.hole_picked": "这 {of} 个中的 {count} 个，在模型上选取。",
+    "manufacture.pocket_pick_hint": "或在模型上单击要加工的型腔。",
+    "manufacture.pocket_pick_missed": "该面不属于此装夹可加工的任何型腔。",
+    "manufacture.pocket_picked": "{of} 个中的 {count} 个，在模型上选取"
+  },
+  "de": {
+    "manufacture.hole_pick_hint": "Oder Bohrungen am Modell anklicken.",
+    "manufacture.hole_pick_missed": "Diese Fläche gehört zu keiner Bohrung, die in dieser Aufspannung gefunden wurde.",
+    "manufacture.hole_picked": "{count} von diesen {of}, am Modell gewählt.",
+    "manufacture.pocket_pick_hint": "Oder die zu fräsenden Taschen am Modell anklicken.",
+    "manufacture.pocket_pick_missed": "Diese Fläche gehört zu keiner Tasche, die diese Aufspannung fräsen kann.",
+    "manufacture.pocket_picked": "{count} von {of}, am Modell gewählt"
+  },
+  "ko": {
+    "manufacture.hole_pick_hint": "또는 모델에서 구멍을 클릭하십시오.",
+    "manufacture.hole_pick_missed": "그 면은 이 셋업에서 찾은 구멍의 면이 아닙니다.",
+    "manufacture.hole_picked": "이 {of}개 중 {count}개, 모델에서 선택.",
+    "manufacture.pocket_pick_hint": "또는 모델에서 가공할 포켓을 클릭하십시오.",
+    "manufacture.pocket_pick_missed": "그 면은 이 셋업이 가공할 수 있는 포켓의 면이 아닙니다.",
+    "manufacture.pocket_picked": "{of}개 중 {count}개, 모델에서 선택"
+  }
+}

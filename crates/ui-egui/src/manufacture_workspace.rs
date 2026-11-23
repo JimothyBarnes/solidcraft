@@ -9,6 +9,7 @@ use solidcraft_viewport::Camera;
 
 pub(crate) mod browser;
 pub(crate) mod dialogs;
+pub(crate) mod picking;
 pub(crate) mod scene;
 
 /// Manufacture's ribbon tabs.

@@ -12,7 +12,7 @@
 //! list of a part's pockets, which a form shows as it opens, looks up from places along each
 //! pocket's wall with rays instead (a sample, as the holes' list is), so a part with dozens of
 //! counterbores lists at once. What the rays miss is refused, with the reason, when it is cut.
-use solidcore_record::{Loop2, Plane, Region2, Vec2};
+use solidcore_record::{Loop2, Plane, Region2, Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 use solidcraft_kernel::{Body, BoolOp};
 
@@ -32,6 +32,42 @@ pub(super) struct Pocket {
     pub floor: f64,
     /// The air just above its floor: the wall's outline, with the islands as holes.
     pub region: Region2,
+}
+
+/// How far round a picked point the pockets are asked about, near and far: a point picked on a
+/// wall is on a region's edge, and a display mesh is a little off a curved wall.
+const PICK_REACH: [f64; 2] = [0.05, 0.5];
+
+/// Which of `pockets` the point `at` was picked on (decision 0030 of the CAM work): `at` is in
+/// the plane's X and Y with its height above the plane as Z, and `top` is the height of the
+/// part's top. The pocket is one whose region the point is in, on its floor or on its wall
+/// between the floor and the top. The region is asked about the point and about places close
+/// round it: the pocket most of them are in is the one, and of two that tie (a pocket in
+/// another's floor, one wall over the other) the one whose floor is nearer below the point.
+pub(super) fn picked<'p>(pockets: impl Iterator<Item = &'p Pocket>, at: Vec3, top: f64) -> Option<usize> {
+    if !(at.x.is_finite() && at.y.is_finite() && at.z.is_finite() && top.is_finite()) {
+        return None;
+    }
+    let round = PICK_REACH.iter().flat_map(|reach| {
+        (0..8).map(move |k| {
+            let turn = f64::from(k) * std::f64::consts::FRAC_PI_4;
+            Vec2 { x: at.x + reach * turn.cos(), y: at.y + reach * turn.sin() }
+        })
+    });
+    let places: Vec<Vec2> = std::iter::once(Vec2 { x: at.x, y: at.y }).chain(round).collect();
+    // The pocket, how many of the places are in it, and how far its floor is below the point.
+    let mut best: Option<(usize, usize, f64)> = None;
+    for (index, pocket) in pockets.enumerate() {
+        if at.z < pocket.floor - PICK_REACH[0] || at.z > top + PICK_REACH[0] {
+            continue;
+        }
+        let inside = places.iter().filter(|place| pocket.region.contains(**place)).count();
+        let below = at.z - pocket.floor;
+        if inside > 0 && best.is_none_or(|(_, most, nearest)| inside > most || (inside == most && below < nearest)) {
+            best = Some((index, inside, below));
+        }
+    }
+    best.map(|(index, ..)| index)
 }
 
 /// What is under a point of the plane, seen from above.

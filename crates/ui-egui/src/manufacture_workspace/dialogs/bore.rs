@@ -12,6 +12,7 @@ use super::{
     SetupChoice, Worked, group_label, labels, minutes_seconds, preview_note, refusal, set_or_clear, setups, speed_and_feed, window_words, word,
 };
 use crate::SolveApp;
+use crate::manufacture_workspace::picking;
 use crate::ui_kit;
 
 /// The widest tool picked for a hole, as a share of the hole's diameter: room for the helix.
@@ -25,6 +26,8 @@ pub(crate) struct BoreForm {
     /// The holes the setup picked has, in groups, as the engine found them.
     found: Worked<Vec<HoleGroup>>,
     pub group: usize,
+    /// The holes of the group picked on the model, when they are not all of them.
+    pub holes: picking::HolePicks,
     /// The group the tool was last suited to.
     suited_to: Option<usize>,
     pub tool: usize,
@@ -59,6 +62,7 @@ impl BoreForm {
             setup,
             found: Worked::new(),
             group: 0,
+            holes: picking::HolePicks::new(),
             suited_to: None,
             tool: 0,
             picked_tool: false,
@@ -116,7 +120,7 @@ impl BoreForm {
                     HoleBottom::Through => Value::Null,
                     HoleBottom::Flat | HoleBottom::Point => json!(group.top - group.depth),
                 };
-                json!({"side": "inside", "openings": group.holes, "bottom": bottom})
+                json!({"side": "inside", "openings": self.holes.of(group), "bottom": bottom})
             }
             None => json!({"side": "inside", "openings": []}),
         };
@@ -183,7 +187,17 @@ impl BoreForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<BoreForm> {
+        // What is picked on the model is what is bored (decision 0030 of the CAM work): a group
+        // chosen from the row's list forgets it, and a hole clicked is taken and worked out.
+        self.holes.follow_row(app, self.group);
         self.refresh(app);
+        let found = self.found.get().map(|(key, _)| key);
+        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+        let groups = self.found.get().map_or(&[][..], |(_, groups)| groups.as_slice());
+        if self.holes.take(app, ctx, found, &setup, groups, &mut self.group) {
+            self.refresh(app);
+        }
+        let picking = self.picked().map(|group| self.holes.says(group.holes.len()));
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
@@ -223,6 +237,9 @@ impl BoreForm {
                     return;
                 }
                 ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_bore_holes", &mut self.group, &group_labels);
+                if let Some(picking) = &picking {
+                    ui_kit::text(ui, picking, ui_kit::Text::Note("manufacture_bore_pick"));
+                }
                 let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_bore_tool", &mut self.tool, &tool_labels);
                 self.picked_tool |= self.tool != tool;
