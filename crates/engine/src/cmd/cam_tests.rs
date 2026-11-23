@@ -90,7 +90,7 @@ fn a_setup_posts_on_every_built_in_post_and_reads_back() {
     let text = fanuc["text"].as_str().unwrap();
     assert!(text.starts_with("%\nO0001 (SETUP 1)\nN10 (UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)\n"), "{text}");
     assert!(
-        text.contains("\nN90 G0 X10. Y0.\nN100 G43 H1 Z5.\n") && text.contains(" G3 X0. Y10. I-10. J0. F400.\n") && text.ends_with("M30\n%\n"),
+        text.contains("\nN110 G0 X10. Y0.\nN120 G43 H1 Z5.\n") && text.contains(" G3 X0. Y10. I-10. J0. F400.\n") && text.ends_with("M30\n%\n"),
         "{text}"
     );
     assert_eq!((fanuc["moves"].as_u64(), fanuc["machine_retracts"].as_u64()), (Some(7), Some(2)));
@@ -303,7 +303,7 @@ fn a_faced_and_drilled_part_posts_as_one_program() {
     // optional stop, the tool at home), and comes in from the clearance height.
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = haas["text"].as_str().unwrap();
-    let join = "\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\nG28 G91 Z0.\nG90\nM1\nT3 M6\nS3183 M3\nM8\nG0 X-20. Y-10.\nG43 H3 Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\n";
+    let join = "\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\nG28 G91 Z0.\nG90\nM1\n(DRILL 2)\nT3 M6 (10 MM DRILL)\nS3183 M3\nM8\nG0 X-20. Y-10.\nG43 H3 Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\n";
     assert!(text.contains(join), "{text}");
     assert!(haas["notes"].as_array().unwrap().is_empty(), "{haas}");
     for post in ["rs274", "fanuc_mill"] {
@@ -359,7 +359,7 @@ fn a_facing_operation_takes_the_stock_top_down_to_the_part() {
     assert!(near(&t["min"], [-43.0, -17.0, -1.0]) && near(&t["max"], [43.0, 17.0, 25.0]), "{t}");
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = haas["text"].as_str().unwrap();
-    let expected = "\nT4 M6\nS3183 M3\nM8\nG0 X-43. Y17.\nG43 H4 Z25.\nZ5.\nG1 Z-1. F318.3\nX43. F636.6\nY5.667\nX-43.\nY-5.667\nX43.\nY-17.\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\n";
+    let expected = "\n(FACE 1)\nT4 M6 (20 MM FLAT END MILL)\nS3183 M3\nM8\nG0 X-43. Y17.\nG43 H4 Z25.\nZ5.\nG1 Z-1. F318.3\nX43. F636.6\nY5.667\nX-43.\nY-5.667\nX43.\nY-17.\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\n";
     assert!(text.contains(expected), "{text}");
     // Changed like any parameter: one way, in two levels to 2 mm below the stock top.
     run(
@@ -2436,7 +2436,7 @@ fn a_program_stops_if_asked_before_every_tool_change_but_the_first() {
     // The Haas post: an optional stop after the trip home and before the second tool; none
     // before the first, and none when the program is asked for none.
     let haas = posted(&mut s, json!({"setup": "setup-1", "post": "haas_mill"}));
-    assert!(haas.contains("\nG28 G91 Z0.\nG90\nM1\nT3 M6\n"), "{haas}");
+    assert!(haas.contains("\nG28 G91 Z0.\nG90\nM1\n(DRILL 2)\nT3 M6 (10 MM DRILL)\n"), "{haas}");
     assert_eq!(haas.matches("\nM1\n").count(), 1, "{haas}");
     assert!(haas.find("T4 M6").is_some_and(|first| first < haas.find("\nM1\n").unwrap_or(0)), "{haas}");
     let without = posted(&mut s, json!({"setup": "setup-1", "post": "haas_mill", "optional_stop": false}));
@@ -2448,4 +2448,64 @@ fn a_program_stops_if_asked_before_every_tool_change_but_the_first() {
     // A form is told which posts have one.
     assert_eq!(["haas_mill", "fanuc_mill", "rs274"].map(crate::cmd::manufacture_post_stops), [true, true, false]);
     assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "optional_stop": "yes"})).contains("parameters"));
+}
+
+#[test]
+fn a_program_names_its_operations_and_its_tools_unless_asked_not_to() {
+    // The block faced and contoured with the 20 mm end mill (tool 4), the contour named by
+    // hand, then drilled with the 10 mm drill (tool 3). The design has a tool the setup never
+    // takes too, and an operation that is switched off.
+    let mut s = milling();
+    run(&mut s, "cam.tool.create", json!({"tool": mill10()}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4, "name": "Outside (rough), 50%"}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    let off = run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2, "name": "Switched off"}));
+    run(&mut s, "cam.op.edit", json!({"id": off["id"], "suppressed": true}));
+    let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = haas["text"].as_str().unwrap();
+    // The tools at the program's start, in the order it takes them: not the one it never takes.
+    assert!(
+        text.contains("(PROVE OUT FIRST: AIR CUT, SINGLE BLOCK)\n(T4 20 MM FLAT END MILL - DIA 20.)\n(T3 10 MM DRILL - DIA 10.)\nG17 "),
+        "{text}"
+    );
+    assert!(!text.contains("10 MM FLAT END MILL") && !text.contains("SWITCHED OFF"), "{text}");
+    // Each operation's name where it starts: right before its tool's line, which names the
+    // tool, or before its own first line where it keeps the tool of the one before. A name is
+    // written as a control takes a comment: no parenthesis and no % in it.
+    assert!(text.contains("\nG90\n(FACE 1)\nT4 M6 (20 MM FLAT END MILL)\nS3183 M3\n"), "{text}");
+    assert!(text.contains("\nG0 Z5.\nZ25.\n(OUTSIDE ROUGH 50)\nG0 X2. Y-33.\nZ5.\n"), "{text}");
+    assert!(text.contains("\nG28 G91 Z0.\nG90\nM1\n(DRILL 3)\nT3 M6 (10 MM DRILL)\nS3183 M3\n"), "{text}");
+    assert!(haas["notes"].as_array().unwrap().is_empty(), "{haas}");
+    // The diameters are in the program's units.
+    let inch = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "units": "inch"}));
+    let inch = inch["text"].as_str().unwrap();
+    assert!(inch.contains("\n(T4 20 MM FLAT END MILL - DIA 0.7874)\n(T3 10 MM DRILL - DIA 0.3937)\nG17 "), "{inch}");
+    // The other posts say the same: on numbered lines, or as the names were typed.
+    let fanuc = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "fanuc_mill"}));
+    let fanuc = fanuc["text"].as_str().unwrap();
+    for said in [" (T3 10 MM DRILL - DIA 10.)", " (OUTSIDE ROUGH 50)", " T3 M6 (10 MM DRILL)"] {
+        assert_eq!(fanuc.lines().filter(|line| line.starts_with('N') && line.ends_with(said)).count(), 1, "{said}:\n{fanuc}");
+    }
+    let reference = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "rs274"}));
+    let reference = reference["text"].as_str().unwrap();
+    for said in ["(T4 20 mm flat end mill - DIA 20.)", "(Face 1)", "(Outside rough 50)", "T3 M6 (10 mm drill)"] {
+        assert_eq!(reference.lines().filter(|line| *line == said).count(), 1, "{said}:\n{reference}");
+    }
+    // Asked for none: the two lines that say the program is unverified are all it says. Every
+    // other line is the same but the one after a name, which need not say again how it moves.
+    let without = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "comments": false}));
+    let bare = without["text"].as_str().unwrap();
+    assert_eq!(
+        bare.lines().filter(|line| line.contains('(')).collect::<Vec<_>>()[1..],
+        ["(UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)", "(PROVE OUT FIRST: AIR CUT, SINGLE BLOCK)"]
+    );
+    let words = |program: &str| {
+        program.lines().filter(|line| !line.starts_with('(')).map(|line| line.split(" (").next().unwrap_or(line).to_string()).collect::<Vec<_>>()
+    };
+    let differing: Vec<(String, String)> = words(bare).into_iter().zip(words(text)).filter(|(quiet, said)| quiet != said).collect();
+    assert_eq!(differing, [("X2. Y-33.".to_string(), "G0 X2. Y-33.".to_string())]);
+    assert_eq!(words(bare).len(), words(text).len());
+    assert_eq!((without["lines"].as_u64().unwrap() + 5, &without["moves"]), (haas["lines"].as_u64().unwrap(), &haas["moves"]));
+    assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "comments": "none"})).contains("parameters"));
 }

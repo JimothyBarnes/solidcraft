@@ -7,8 +7,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
     BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferEdges, ChamferOp, ContourOp, ContourSide, DrillOp, FaceOp, LengthUnit,
-    MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, SafeHeights,
-    Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
+    MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, ProgramTool,
+    SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_doc::plugin_data::DATA;
 use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
@@ -116,7 +116,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, units?: mm | inch (default the design's), date?: text to write on it, path?: also write it to this .html file, overwrite?: replace an existing file (default false) → html: one page for the shop with the stock, the work origin, the tools (how far each sticks out, the lowest its tip goes), the operations in order with speeds, feeds and times, the setup from above, and what to check (the operations' and the simulation's notes, a tool that goes deeper than it sticks out)"),
     CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("cam_post").noundo().read_only()
         .contract(&TypedContract::<CamPostParams>::new()).output(output_schema_for::<CamPosted>)
-        .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false), optional_stop?: write the post's optional stop (M1) before every tool change but the first, where the post has one (default true) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
+        .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false), optional_stop?: write the post's optional stop (M1) before every tool change but the first, where the post has one (default true), comments?: write the tools the program takes, each operation's name and each tool's name as comments (default true) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
 ];
 
 /// The built-in owner of `plugins/solidcraft-cam/`.
@@ -2088,11 +2088,14 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
     let mut program: Option<Toolpath> = None;
     let mut placed = None;
     let mut notes = Vec::new();
+    // Where each operation starts in the program, with its name (decision 0029 of the CAM work).
+    let mut starts: Vec<(usize, String)> = Vec::new();
     for op in setup.operations.iter().filter(|o| !o.suppressed) {
         let start = program.as_ref().map(|all| all.moves.iter().fold(all.start, |at, m| m.end(at)));
         let worked = work(s, CMD, &d, setup, op, start, &mut placed)?;
         notes.extend(worked.notes.into_iter().map(|n| format!("operation {}: {n}", op.id)));
         let toolpath = &worked.toolpath;
+        starts.push((program.as_ref().map_or(0, |all| all.moves.len()), op.name.clone()));
         match &mut program {
             None => program = Some(toolpath.clone()),
             Some(all) => {
@@ -2110,13 +2113,23 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // Operations that follow one another with the same tool keep it: no change to the tool that
     // is in the spindle, and nothing stopped for one (decision 0022 of the CAM work).
-    let program = program.ok_or_else(|| bad(CMD, format!("setup '{}' has no operations to post", setup.id)))?.without_needless_changes();
+    let marks: Vec<usize> = starts.iter().map(|start| start.0).collect();
+    let (program, at) =
+        program.ok_or_else(|| bad(CMD, format!("setup '{}' has no operations to post", setup.id)))?.without_needless_changes_marked(&marks);
+    // What the program says of itself: each operation's name where it starts, and its tools.
+    let said = p.comments.unwrap_or(true);
     let ctx = ProgramContext {
         program_number: p.program_number.unwrap_or(1),
         program_name: p.program_name.unwrap_or_else(|| setup.name.clone()),
         units,
         work_offset: setup.work_offset,
         optional_stop: p.optional_stop.unwrap_or(true),
+        comments: if said { at.into_iter().zip(starts.into_iter().map(|start| start.1)).collect() } else { Vec::new() },
+        tools: if said {
+            d.tools.iter().map(|tool| ProgramTool { number: tool.number, name: tool.name.clone(), diameter: tool.geometry.diameter }).collect()
+        } else {
+            Vec::new()
+        },
     };
     let posted = post.write(&program, &ctx).map_err(|e| bad(CMD, e.to_string()))?;
     if let Some(path) = &p.path {

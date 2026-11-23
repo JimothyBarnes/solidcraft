@@ -322,8 +322,17 @@ impl Toolpath {
     /// was: every move, and every change that changes something (another speed for the same
     /// tool is still set, with the spindle turning).
     pub fn without_needless_changes(&self) -> Toolpath {
+        self.without_needless_changes_marked(&[]).0
+    }
+
+    /// [`Toolpath::without_needless_changes`], and where in its result each of `marks` is. A
+    /// mark is the index of a move of this toolpath (the first of an operation, say); it comes
+    /// back as the index of the first move kept at or after it, which is the result's length
+    /// when none is.
+    pub fn without_needless_changes_marked(&self, marks: &[usize]) -> (Toolpath, Vec<usize>) {
         let moves_tool = |m: &Move| matches!(m, Move::Rapid { .. } | Move::Linear { .. } | Move::Arc { .. } | Move::Drill { .. });
-        let mut moves: Vec<Move> = Vec::with_capacity(self.moves.len());
+        // Each move kept, with its index in this toolpath.
+        let mut moves: Vec<(usize, Move)> = Vec::with_capacity(self.moves.len());
         let (mut tool, mut spindle, mut coolant): (Option<u32>, Option<(f64, SpindleDirection)>, Option<Coolant>) = (None, None, None);
         for (k, m) in self.moves.iter().enumerate() {
             match *m {
@@ -332,22 +341,23 @@ impl Toolpath {
                     let ahead = || self.moves.iter().skip(k + 1).take_while(|m| !moves_tool(m));
                     let starts = ahead().any(|m| matches!(m, Move::Spindle { .. }));
                     let flows = ahead().any(|m| matches!(m, Move::Coolant { mode } if *mode != Coolant::Off));
-                    let stopped = moves.iter().rev().take_while(|m| matches!(m, Move::SpindleStop | Move::Coolant { mode: Coolant::Off })).count();
-                    let kept: Vec<Move> = moves
+                    let stopped =
+                        moves.iter().rev().take_while(|(_, m)| matches!(m, Move::SpindleStop | Move::Coolant { mode: Coolant::Off })).count();
+                    let kept: Vec<(usize, Move)> = moves
                         .split_off(moves.len() - stopped)
                         .into_iter()
-                        .filter(|m| match m {
+                        .filter(|(_, m)| match m {
                             Move::SpindleStop => !starts,
                             _ => !flows,
                         })
                         .collect();
                     moves.extend(kept);
-                    let turning = |m: &Move| match *m {
+                    let turning = |m: &(usize, Move)| match m.1 {
                         Move::Spindle { rpm, direction } => Some(Some((rpm, direction))),
                         Move::SpindleStop | Move::ToolChange { .. } => Some(None),
                         _ => None,
                     };
-                    let flowing = |m: &Move| match *m {
+                    let flowing = |m: &(usize, Move)| match m.1 {
                         Move::Coolant { mode } => Some(Some(mode)),
                         Move::ToolChange { .. } => Some(None),
                         _ => None,
@@ -358,26 +368,28 @@ impl Toolpath {
                 Move::ToolChange { tool: number } => {
                     // Another tool: what the spindle and the coolant do next is said whatever it is.
                     (tool, spindle, coolant) = (Some(number), None, None);
-                    moves.push(*m);
+                    moves.push((k, *m));
                 }
                 Move::Spindle { rpm, direction } if spindle == Some((rpm, direction)) => {}
                 Move::Spindle { rpm, direction } => {
                     spindle = Some((rpm, direction));
-                    moves.push(*m);
+                    moves.push((k, *m));
                 }
                 Move::SpindleStop => {
                     spindle = None;
-                    moves.push(*m);
+                    moves.push((k, *m));
                 }
                 Move::Coolant { mode } if coolant == Some(mode) => {}
                 Move::Coolant { mode } => {
                     coolant = Some(mode);
-                    moves.push(*m);
+                    moves.push((k, *m));
                 }
-                other => moves.push(other),
+                other => moves.push((k, other)),
             }
         }
-        Toolpath { start: self.start, moves }
+        // The moves kept are in the order they were in: a mark is at as many as come before it.
+        let at = marks.iter().map(|mark| moves.partition_point(|(k, _)| k < mark)).collect();
+        (Toolpath { start: self.start, moves: moves.into_iter().map(|(_, m)| m).collect() }, at)
     }
 
     /// Checks every number in the toolpath: coordinates finite and within [`MAX_COORDINATE`],

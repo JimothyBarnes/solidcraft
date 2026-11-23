@@ -25,7 +25,15 @@ fn bracket() -> Toolpath {
 }
 
 fn ctx() -> ProgramContext {
-    ProgramContext { program_number: 1, program_name: "Bracket op1".into(), units: LengthUnit::Millimetre, work_offset: 1, optional_stop: true }
+    ProgramContext { program_number: 1, program_name: "Bracket op1".into(), ..ProgramContext::default() }
+}
+
+/// A line without its number, where the post numbers its lines.
+fn unnumbered(line: &str) -> &str {
+    match line.strip_prefix('N').and_then(|rest| rest.split_once(' ')) {
+        Some((number, words)) if number.chars().all(|c| c.is_ascii_digit()) => words,
+        _ => line,
+    }
 }
 
 /// The largest difference between two toolpaths' positions and arc centres, in mm.
@@ -724,15 +732,7 @@ fn an_optional_stop_is_written_before_every_tool_change_but_the_first() {
         let post = Post::builtin(id).unwrap();
         assert_eq!(post.optional_stop.as_deref(), Some("M1"), "{id}");
         let posted = post.write(&three, &ctx()).unwrap();
-        // The lines without their numbers, where the post numbers them.
-        let lines: Vec<&str> = posted
-            .text
-            .lines()
-            .map(|line| match line.strip_prefix('N').and_then(|rest| rest.split_once(' ')) {
-                Some((number, words)) if number.chars().all(|c| c.is_ascii_digit()) => words,
-                _ => line,
-            })
-            .collect();
+        let lines: Vec<&str> = posted.text.lines().map(unnumbered).collect();
         // One before the second tool and one before the third, each on its own line right
         // before the tool change, after the trip to machine home; none before the first.
         let stops: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| **line == "M1").map(|(at, _)| at).collect();
@@ -758,4 +758,169 @@ fn an_optional_stop_is_written_before_every_tool_change_but_the_first() {
     let mut wrong = Post::builtin("haas_mill").unwrap();
     wrong.optional_stop = Some("M0".into());
     assert!(wrong.check().unwrap_err().to_string().contains("optional_stop must be M1 or M01"));
+}
+
+/// Three operations as a setup's program has them: two with tool 1, the second keeping it, then
+/// one with tool 2. Moves 0, 5 and 9 are their first.
+fn three_operations() -> Toolpath {
+    let cut =
+        |x: f64| vec![Move::Rapid { to: p(x, 0.0, 10.0) }, Move::Linear { to: p(x, 0.0, -1.0), feed: 100.0 }, Move::Rapid { to: p(x, 0.0, 10.0) }];
+    let on = Move::Spindle { rpm: 1000.0, direction: SpindleDirection::Clockwise };
+    let moves = [
+        vec![Move::ToolChange { tool: 1 }, on],
+        cut(0.0),
+        cut(10.0),
+        vec![Move::SpindleStop, Move::ToolChange { tool: 2 }, on],
+        cut(20.0),
+        vec![Move::SpindleStop],
+    ]
+    .concat();
+    Toolpath { start: p(0.0, 0.0, 50.0), moves }
+}
+
+/// What the three operations are called, and the tools: one more than the program takes.
+fn named() -> ProgramContext {
+    ProgramContext {
+        comments: vec![(0, "Face 1".into()), (5, "Contour 2".into()), (9, "Drill 3 (through)".into())],
+        tools: vec![
+            ProgramTool { number: 2, name: "6 mm Drill".into(), diameter: 6.0 },
+            ProgramTool { number: 1, name: "20 mm Flat end mill".into(), diameter: 20.0 },
+            ProgramTool { number: 9, name: "Never taken".into(), diameter: 3.0 },
+        ],
+        ..ctx()
+    }
+}
+
+#[test]
+fn a_program_lists_its_tools_and_names_its_operations_and_its_tool_changes() {
+    let tp = three_operations();
+    let posted = Post::builtin("haas_mill").unwrap().write(&tp, &named()).unwrap();
+    let text = &posted.text;
+    // The tools the program takes, in the order it takes them, right after the two lines that
+    // say what the program is. One it never takes is not listed.
+    assert!(text.contains("(PROVE OUT FIRST: AIR CUT, SINGLE BLOCK)\n(T1 20 MM FLAT END MILL - DIA 20.)\n(T2 6 MM DRILL - DIA 6.)\nG17 "), "{text}");
+    assert!(!text.contains("NEVER TAKEN"), "{text}");
+    // The first operation's name right before its tool's line, which names the tool.
+    assert!(text.contains("\nG90\n(FACE 1)\nT1 M6 (20 MM FLAT END MILL)\nS1000 M3\n"), "{text}");
+    // The second keeps the tool: its name before its first line, which says how it moves
+    // though the line before the name said so too.
+    assert!(text.contains("\nG0 Z10.\n(CONTOUR 2)\nG0 X10.\n"), "{text}");
+    // The third changes it: the trip home, the optional stop, its name, then the tool by name.
+    // A parenthesis in a name is a space.
+    assert!(text.contains("\nM5\nG28 G91 Z0.\nG90\nM1\n(DRILL 3 THROUGH)\nT2 M6 (6 MM DRILL)\n"), "{text}");
+    // What is read back is the moves, as before: a comment is not one, and is no note.
+    assert_eq!(posted.written.moves, tp.moves);
+    assert!(posted.notes.is_empty() && posted.read_back.notes.is_empty(), "{:?} {:?}", posted.notes, posted.read_back.notes);
+    // A program told nothing says no more than it did: five lines fewer, and a bare tool change.
+    let plain = Post::builtin("haas_mill").unwrap().write(&tp, &ctx()).unwrap();
+    assert_eq!(plain.text.lines().count() + 5, text.lines().count());
+    assert!(plain.text.contains("\nT2 M6\n") && !plain.text.contains("(T1"), "{}", plain.text);
+    // The other posts say the same in their own way: on numbered lines, or in small letters.
+    let fanuc = Post::builtin("fanuc_mill").unwrap().write(&tp, &named()).unwrap();
+    let lines: Vec<&str> = fanuc.text.lines().map(unnumbered).collect();
+    for line in ["(T2 6 MM DRILL - DIA 6.)", "(CONTOUR 2)", "T2 M6 (6 MM DRILL)"] {
+        assert!(lines.contains(&line), "{line}:\n{}", fanuc.text);
+    }
+    assert_eq!(fanuc.written.moves, tp.moves);
+    let reference = Post::builtin("rs274").unwrap().write(&tp, &named()).unwrap();
+    for line in ["(Contour 2)", "(Drill 3 through)", "T2 M6 (6 mm Drill)"] {
+        assert!(reference.text.lines().any(|l| l == line), "{line}:\n{}", reference.text);
+    }
+    assert!(reference.text.contains("\n(T1 20 mm Flat end mill - DIA 20"), "{}", reference.text);
+    assert_eq!(reference.written.moves, tp.moves);
+}
+
+#[test]
+fn a_comment_holds_only_what_a_control_takes_as_one() {
+    let tp = three_operations();
+    let haas = Post::builtin("haas_mill").unwrap();
+    // The line before the second operation's first, for a name.
+    let said = |name: &str| {
+        let text = haas.write(&tp, &ProgramContext { comments: vec![(5, name.into())], ..ctx() }).unwrap().text;
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines.iter().position(|line| line.ends_with("X10.")).unwrap();
+        // With nothing said the line is as it was; after a comment it says how it moves.
+        assert_eq!(lines[at], if lines[at - 1].starts_with('(') { "G0 X10." } else { "X10." }, "{name:?}");
+        lines[at - 1].to_string()
+    };
+    assert_eq!(said("Pocket 2"), "(POCKET 2)");
+    // A parenthesis would end the comment early, a % is a program's first and last line, and a ;
+    // ends a block on a control: each is a space, runs of spaces are one, and none is at an end.
+    assert_eq!(said(" 50% deep; (rough) "), "(50 DEEP ROUGH)");
+    assert_eq!(said("tab\there\nand there"), "(TAB HERE AND THERE)");
+    // No name is a message for the operator's display, spaced out or not; a comma further on stays.
+    assert_eq!(said("MSG, stop here"), "(MSG STOP HERE)");
+    assert_eq!(said(" m s g , stop"), "(M S G STOP)");
+    assert_eq!(said("Pocket 2, rough"), "(POCKET 2, ROUGH)");
+    // Nothing a comment can hold: no line at all.
+    for name in ["穴あけ", "()", "  ", ""] {
+        assert_eq!(said(name), "G0 Z10.", "{name:?}");
+    }
+    // Cut to the post's 60 characters, parentheses and all.
+    assert_eq!(said(&"A".repeat(200)), format!("({})", "A".repeat(58)));
+    // The program's name is cleaned the same way.
+    let top = ProgramContext { program_name: "Op 1 (top) 100%".into(), ..ctx() };
+    let text = haas.write(&tp, &top).unwrap().text;
+    assert!(text.starts_with("%\nO00001 (OP 1 TOP 100)\n"), "{text}");
+    // Two before one move are both written, in the order given; one before a move that is not
+    // there is not written, and stops nothing.
+    let more = vec![(5, "One".to_string()), (99, "Never".to_string()), (5, "Two".to_string()), (usize::MAX, "Never".to_string())];
+    let text = haas.write(&tp, &ProgramContext { comments: more, ..ctx() }).unwrap().text;
+    assert!(text.contains("\n(ONE)\n(TWO)\nG0 X10.\n") && !text.contains("NEVER"), "{text}");
+}
+
+#[test]
+fn a_tools_line_keeps_its_number_and_its_diameter_whatever_its_name() {
+    let tp = three_operations();
+    let haas = Post::builtin("haas_mill").unwrap();
+    let tool = |name: &str, diameter: f64| ProgramTool { number: 1, name: name.into(), diameter };
+    let written = |tools: Vec<ProgramTool>, units: LengthUnit| haas.write(&tp, &ProgramContext { tools, units, ..ctx() }).unwrap().text;
+    let line = |tool: ProgramTool, units: LengthUnit| written(vec![tool], units).lines().find(|line| line.starts_with("(T1")).map(str::to_string);
+    assert_eq!(line(tool("20 mm Flat end mill", 20.0), LengthUnit::Millimetre).as_deref(), Some("(T1 20 MM FLAT END MILL - DIA 20.)"));
+    // In the program's units, whatever the name says.
+    assert_eq!(line(tool("20 mm Flat end mill", 20.0), LengthUnit::Inch).as_deref(), Some("(T1 20 MM FLAT END MILL - DIA 0.7874)"));
+    // A long name gives way to the diameter, within the post's 60 characters.
+    let long = line(tool(&"Rougher ".repeat(20), 12.7), LengthUnit::Millimetre).unwrap();
+    assert!(long.len() <= 60 && long.starts_with("(T1 ROUGHER ROUGHER") && long.ends_with(" - DIA 12.7)"), "{long}");
+    // And on its tool change the line is no longer than a comment may be.
+    let text = written(vec![tool(&"Rougher ".repeat(20), 12.7)], LengthUnit::Millimetre);
+    let change = text.lines().find(|line| line.starts_with("T1 M6")).unwrap();
+    assert_eq!((change, change.len()), (format!("T1 M6 ({}ROUG)", "ROUGHER ".repeat(6)).as_str(), 60));
+    // A name with nothing a comment can hold; a diameter that is none.
+    assert_eq!(line(tool("刃", 6.0), LengthUnit::Millimetre).as_deref(), Some("(T1 DIA 6.)"));
+    for none in [0.0, -3.0, f64::NAN, f64::INFINITY, 1e300] {
+        assert_eq!(line(tool("Probe", none), LengthUnit::Millimetre).as_deref(), Some("(T1 PROBE)"), "{none}");
+    }
+    assert_eq!(line(tool("", f64::NAN), LengthUnit::Millimetre).as_deref(), Some("(T1)"));
+    // The tool change says the name alone, and nothing for a name that is none.
+    let text = written(vec![tool("20 mm Flat end mill", 20.0)], LengthUnit::Millimetre);
+    assert!(text.contains("\nT1 M6 (20 MM FLAT END MILL)\n") && text.contains("\nT2 M6\n"), "{text}");
+    assert!(written(vec![tool("刃", 6.0)], LengthUnit::Millimetre).contains("\nT1 M6\n"));
+    // Told twice of a tool, a program takes the first.
+    let twice = written(vec![tool("First", 1.0), tool("Second", 2.0)], LengthUnit::Millimetre);
+    assert!(twice.contains("(T1 FIRST - DIA 1.)") && !twice.contains("SECOND"), "{twice}");
+}
+
+#[test]
+fn a_comment_before_a_hole_ends_the_cycle_before_it() {
+    let hole = |x: f64| Move::Drill { to: p(x, 0.0, -5.0), r: 1.0, retract: 1.0, cycle: DrillCycle::Drill { dwell: 0.0 }, feed: 100.0 };
+    let tp = Toolpath {
+        start: p(0.0, 0.0, 50.0),
+        moves: vec![Move::ToolChange { tool: 1 }, Move::Rapid { to: p(0.0, 0.0, 10.0) }, hole(0.0), hole(10.0), hole(20.0)],
+    };
+    for id in ["rs274", "fanuc_mill", "haas_mill"] {
+        let post = Post::builtin(id).unwrap();
+        // Three holes of one cycle: one cycle line, two more holes, one G80.
+        let plain = post.write(&tp, &ctx()).unwrap();
+        assert_eq!(plain.text.matches("G81").count(), 1, "{id}:\n{}", plain.text);
+        // Something said before the second: the cycle is ended, the comment, the cycle again.
+        let posted = post.write(&tp, &ProgramContext { comments: vec![(3, "Second".into())], ..ctx() }).unwrap();
+        let lines: Vec<&str> = posted.text.lines().map(unnumbered).collect();
+        let at = lines.iter().position(|line| line.eq_ignore_ascii_case("(second)")).unwrap();
+        assert_eq!(lines[at - 1], "G80", "{id}:\n{}", posted.text);
+        assert!(lines[at + 1].contains("G81"), "{id}:\n{}", posted.text);
+        assert_eq!(posted.text.matches("G81").count(), 2, "{id}:\n{}", posted.text);
+        assert_eq!(posted.written.moves, tp.moves, "{id}");
+        assert_eq!(posted.read_back.toolpath.moves, plain.read_back.toolpath.moves, "{id}");
+    }
 }

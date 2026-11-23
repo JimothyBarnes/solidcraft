@@ -10,6 +10,7 @@
 //! The output is never "safe to run": every program starts by saying it is unverified and must
 //! be proven on the machine first (air cut, single block).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ use solidcore_record::Vec3;
 use crate::cycle::{self, CycleMotion, DrillCycle, G98Rule};
 use crate::gcode_reader::{ReadBack, ReadSettings, read};
 use crate::toolpath::{ArcDirection, ArcGeom, Coolant, Move, Plane, SpindleDirection, Toolpath, arc_radius_tolerance};
-use crate::units::LengthUnit;
+use crate::units::{LengthUnit, MAX_COORDINATE};
 use crate::{Error, Result};
 
 /// The post file format this build reads.
@@ -177,6 +178,16 @@ pub struct Post {
     pub sequences: Sequences,
 }
 
+/// A tool as a program names it in its comments (decision 0029 of the CAM work).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgramTool {
+    pub number: u32,
+    /// The tool's name, as whoever keeps the tools calls it.
+    pub name: String,
+    /// The diameter it cuts, mm.
+    pub diameter: f64,
+}
+
 /// What a program is for, beyond its moves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProgramContext {
@@ -188,11 +199,29 @@ pub struct ProgramContext {
     pub work_offset: u8,
     /// Whether the post's optional stop is written before tool changes, where it has one.
     pub optional_stop: bool,
+    /// What the program says along the way, as `(index, text)`: `text` as a comment on a line of
+    /// its own before the lines that move `index` of the toolpath writes (an operation's name,
+    /// where the operation starts). Before a tool change it goes right before the tool's own
+    /// line, after the lines that take the last tool home. An index past the last move says
+    /// nothing, and neither does a text with nothing a comment can hold.
+    pub comments: Vec<(usize, String)>,
+    /// What the tools are. Each one the toolpath changes to is listed at the program's start,
+    /// in the order they are first taken, and named on the line that changes to it; a tool that
+    /// is not here is changed to without a word.
+    pub tools: Vec<ProgramTool>,
 }
 
 impl Default for ProgramContext {
     fn default() -> Self {
-        Self { program_number: 1, program_name: "PROGRAM".into(), units: LengthUnit::Millimetre, work_offset: 1, optional_stop: true }
+        Self {
+            program_number: 1,
+            program_name: "PROGRAM".into(),
+            units: LengthUnit::Millimetre,
+            work_offset: 1,
+            optional_stop: true,
+            comments: Vec::new(),
+            tools: Vec::new(),
+        }
     }
 }
 
@@ -425,6 +454,10 @@ struct Writer<'a> {
     pending_offset: Option<u32>,
     /// How many tool changes have been written.
     tool_changes: usize,
+    /// What is still to be said, by the index of the move it goes before.
+    comments: BTreeMap<usize, Vec<&'a str>>,
+    /// The tools the program can name, by number.
+    tools: BTreeMap<u32, &'a ProgramTool>,
     /// Whether the machine's position is known: not at the program start (the machine is
     /// wherever it was) nor after a tool change. Until it is, the next move must be a rapid,
     /// and it writes all three axes.
@@ -449,6 +482,14 @@ impl<'a> Writer<'a> {
             LengthUnit::Millimetre => (post.numbers.length_mm, post.numbers.feed_mm),
             LengthUnit::Inch => (post.numbers.length_inch, post.numbers.feed_inch),
         };
+        let mut comments: BTreeMap<usize, Vec<&str>> = BTreeMap::new();
+        for (index, text) in &ctx.comments {
+            comments.entry(*index).or_default().push(text.as_str());
+        }
+        let mut tools = BTreeMap::new();
+        for tool in &ctx.tools {
+            tools.entry(tool.number).or_insert(tool);
+        }
         Ok(Self {
             post,
             ctx,
@@ -465,6 +506,8 @@ impl<'a> Writer<'a> {
             spindle_speed: None,
             pending_offset: None,
             tool_changes: 0,
+            comments,
+            tools,
             position_known: false,
             cycle: None,
             written: Vec::new(),
@@ -482,11 +525,64 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// Text safe inside a comment: printable ASCII, no parentheses, cut to length.
+    /// Text safe inside a comment: printable ASCII, with a space for anything else, for a
+    /// parenthesis, for `%` (a program's first and last line, and nowhere between) and for `;`
+    /// (the end of a block on a control's screen); runs of spaces as one, none at either end,
+    /// cut to length. And never a message: a comment whose first printing characters are
+    /// `MSG,`, spaced or in small letters, is one for the operator's display (NIST IR 6556
+    /// 3.3.4), so a comma that follows nothing but letters loses its place to a space.
     fn comment_text(&self, text: &str) -> String {
-        let cleaned: String = text.chars().map(|c| if (c.is_ascii_graphic() && c != '(' && c != ')') || c == ' ' { c } else { ' ' }).collect();
+        let mut cleaned: String = text.chars().map(|c| if c.is_ascii_graphic() && !matches!(c, '(' | ')' | '%' | ';') { c } else { ' ' }).collect();
+        if let Some(at) = cleaned.find(|c: char| !(c.is_ascii_alphabetic() || c == ' '))
+            && cleaned.get(at..=at) == Some(",")
+        {
+            cleaned.replace_range(at..=at, " ");
+        }
+        let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
         let cleaned = if self.post.comments.upper_case { cleaned.to_ascii_uppercase() } else { cleaned };
-        cleaned.chars().take(self.post.comments.max_length.saturating_sub(2)).collect()
+        let cut: String = cleaned.chars().take(self.post.comments.max_length.saturating_sub(2)).collect();
+        cut.trim_end().to_string()
+    }
+
+    /// Writes each of `comments`, cleaned already, on a line of its own. The line that moves
+    /// next says how it moves, whatever the line before the comments said: an operation read
+    /// from its name down starts with a line that is whole.
+    fn say(&mut self, comments: &[String]) {
+        for comment in comments {
+            self.emit(format!("({comment})"));
+        }
+        if !comments.is_empty() {
+            self.motion = None;
+        }
+    }
+
+    /// A tool's name as a comment holds it, cut to `room` characters: `None` for a tool the
+    /// program was told nothing of, and for a name with nothing a comment can hold.
+    fn tool_name(&self, tool: u32, room: usize) -> Option<String> {
+        let name: String = self.comment_text(&self.tools.get(&tool)?.name).chars().take(room).collect();
+        let name = name.trim_end();
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// A tool's line in the list at the program's start: its number, its name and the diameter
+    /// it cuts, in the program's units. A long name gives way: the number and the diameter are
+    /// what a wrong tool is caught by.
+    fn tool_line(&self, tool: u32) -> Option<String> {
+        let known = *self.tools.get(&tool)?;
+        let room = self.post.comments.max_length.saturating_sub(2);
+        let head = format!("T{tool}");
+        let diameter =
+            if known.diameter > 0.0 && known.diameter <= MAX_COORDINATE { format!("DIA {}", self.length(known.diameter).0) } else { String::new() };
+        // "T1 NAME - DIA 20.": a space, and " - " where there is a diameter.
+        let taken = head.len() + 1 + if diameter.is_empty() { 0 } else { diameter.len() + 3 };
+        let name = self.tool_name(tool, room.saturating_sub(taken)).unwrap_or_default();
+        let line = match (name.is_empty(), diameter.is_empty()) {
+            (false, false) => format!("{head} {name} - {diameter}"),
+            (false, true) => format!("{head} {name}"),
+            (true, false) => format!("{head} {diameter}"),
+            (true, true) => head,
+        };
+        Some(line.chars().take(room).collect())
     }
 
     fn emit(&mut self, line: String) {
@@ -517,6 +613,16 @@ impl<'a> Writer<'a> {
         for text in SAFETY_LINES {
             let c = self.comment_text(text);
             self.emit(format!("({c})"));
+        }
+        // The tools the program takes, in the order it first takes them (decision 0029).
+        let mut listed = BTreeSet::new();
+        for m in &toolpath.moves {
+            if let Move::ToolChange { tool } = *m
+                && listed.insert(tool)
+                && let Some(line) = self.tool_line(tool)
+            {
+                self.emit(format!("({line})"));
+            }
         }
         self.sequence(&s.safe_start.clone(), None)?;
         self.sequence(&s.operation_start.clone(), None)?;
@@ -572,8 +678,22 @@ impl<'a> Writer<'a> {
     fn one(&mut self, index: usize, m: &Move) -> Result<()> {
         let bad = |reason: String| Error::BadMove { index, reason };
         let first_after_change = !self.position_known;
-        if !matches!(m, Move::Drill { .. }) {
+        // What is said before this move, as a comment holds it: never in the middle of a
+        // canned cycle, so one is ended for it. A text with nothing to say ends nothing.
+        let said: Vec<String> = self
+            .comments
+            .remove(&index)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|text| self.comment_text(text))
+            .filter(|text| !text.is_empty())
+            .collect();
+        if !said.is_empty() || !matches!(m, Move::Drill { .. }) {
             self.end_cycle();
+        }
+        // Before the lines the move writes; a tool change says it later, before its own line.
+        if !matches!(m, Move::ToolChange { .. }) {
+            self.say(&said);
         }
         match *m {
             Move::Rapid { to } => {
@@ -643,7 +763,16 @@ impl<'a> Writer<'a> {
                     self.emit(word);
                 }
                 self.tool_changes += 1;
-                self.emit(format!("T{tool} M6"));
+                // The operation that starts with this tool, then the tool by its name, where
+                // whoever runs the program in single block reads them (decision 0029).
+                self.say(&said);
+                // A long name is cut: the line is no longer than a comment alone may be.
+                let line = format!("T{tool} M6");
+                let room = self.post.comments.max_length.saturating_sub(line.len() + 3);
+                match self.tool_name(tool, room) {
+                    Some(name) => self.emit(format!("{line} ({name})")),
+                    None => self.emit(line),
+                }
                 self.sequence(&self.post.sequences.tool_change_after.clone(), Some(tool))?;
                 self.out = [None, None, None];
                 self.pending_offset = Some(tool);

@@ -798,6 +798,11 @@ pub struct CamPostParams {
     /// post has one (default true): with the control's Optional Stop on, the machine waits there.
     #[serde(default)]
     pub optional_stop: Option<bool>,
+    /// Write what the program is doing as comments (default true): the tools it takes, listed at
+    /// its start, each operation's name where the operation starts, and each tool's name on the
+    /// line that changes to it.
+    #[serde(default)]
+    pub comments: Option<bool>,
 }
 
 /// A posted program and what reading it back found. The program is never "safe to run": it says

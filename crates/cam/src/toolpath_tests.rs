@@ -336,3 +336,28 @@ fn a_hole_is_cut_off_as_the_moves_it_makes() {
     // All of it is the hole written out.
     assert_eq!(hole.upto(length).unwrap().toolpath, plain);
 }
+
+#[test]
+fn an_operations_first_move_is_found_once_the_needless_changes_are_gone() {
+    let program = |operations: &[Vec<Move>]| Toolpath { start: p(0.0, 0.0, 25.0), moves: operations.concat() };
+    let (a, b, c) =
+        (operation(2, 6000.0, Coolant::Flood, 10.0), operation(2, 6000.0, Coolant::Flood, 20.0), operation(3, 4000.0, Coolant::Flood, 30.0));
+    let joined = program(&[a.clone(), b.clone(), c.clone()]);
+    let (kept, at) = joined.without_needless_changes_marked(&[0, a.len(), a.len() + b.len(), joined.moves.len(), usize::MAX]);
+    assert_eq!(kept, joined.without_needless_changes());
+    // The first operation starts the program. The second keeps the tool: what is left of its
+    // start is its first rapid, where the first operation's two stops were. The third starts
+    // with its tool change. A mark at the end, or past it, is at the end.
+    assert_eq!(at, [0, a.len() - 2, a.len() - 2 + b.len() - 3, kept.moves.len(), kept.moves.len()]);
+    assert_eq!(kept.moves[at[1]], b[3]);
+    assert_eq!(kept.moves[at[2]], Move::ToolChange { tool: 3 });
+    // At another speed the second starts with the spindle's new speed; without coolant, after
+    // the first's coolant is turned off.
+    let (faster, at) = program(&[a.clone(), operation(2, 9000.0, Coolant::Flood, 20.0)]).without_needless_changes_marked(&[a.len()]);
+    assert_eq!(faster.moves[at[0]], Move::Spindle { rpm: 9000.0, direction: SpindleDirection::Clockwise });
+    let (dry, at) = program(&[a.clone(), operation(2, 6000.0, Coolant::Off, 20.0)]).without_needless_changes_marked(&[a.len()]);
+    assert_eq!(dry.moves[at[0] - 1..=at[0]], [Move::Coolant { mode: Coolant::Off }, Move::Rapid { to: p(20.0, 0.0, 25.0) }]);
+    // Marks in any order come back in theirs, and an empty program has them all at 0.
+    assert_eq!(joined.without_needless_changes_marked(&[a.len(), 0]).1, [a.len() - 2, 0]);
+    assert_eq!(Toolpath::default().without_needless_changes_marked(&[0, 5]).1, [0, 0]);
+}

@@ -238,7 +238,9 @@ fn a_part_goes_from_a_tool_to_a_saved_program_through_the_forms() {
     assert_eq!(Some(text.as_str()), again["text"].as_str());
     assert_eq!((Some(lines), Some(moves)), (again["lines"].as_u64(), again["moves"].as_u64()));
     assert!(
-        text.starts_with("%\nO01001 (SETUP 1)\n") && text.contains("\nT1 M6\nS3183 M3\n") && text.contains("\nG1 Z-1. F318.3\nX43. F636.6\n"),
+        text.starts_with("%\nO01001 (SETUP 1)\n")
+            && text.contains("\n(FACE 1)\nT1 M6 (20 MM FLAT END MILL)\nS3183 M3\n")
+            && text.contains("\nG1 Z-1. F318.3\nX43. F636.6\n"),
         "{text}"
     );
     assert!(h.widget(&format!("{lines} lines written to {}", file.to_string_lossy())).is_some());
@@ -686,7 +688,7 @@ fn drill_offers_the_holes_found_on_the_model_and_suits_the_tool_and_depth_to_the
     // above the stock.
     let posted = h.app.run("cam.post", json!({"setup": "setup-1", "post": "haas_mill"})).unwrap();
     let text = posted["text"].as_str().unwrap();
-    assert!(text.contains("\nT1 M6\nS10000 M3\n"), "{text}");
+    assert!(text.contains("\n(DRILL 1)\nT1 M6 (6 MM DRILL)\nS10000 M3\n"), "{text}");
     assert!(text.contains("G99 G81 X20. Y-10. Z-23.803 R5. F1000.\nX20. Y10.\nX-20. Y10.\nG80\n"), "{text}");
 }
 

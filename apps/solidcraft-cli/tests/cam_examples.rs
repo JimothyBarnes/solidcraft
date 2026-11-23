@@ -305,8 +305,33 @@ fn the_p1_plate_is_cut_out_with_nothing_cut_into_and_posts() {
     let haas = &programs[0];
     assert!(haas.starts_with("%\nO01101 ") && haas.trim_end().ends_with('%'), "{}", &haas[..200.min(haas.len())]);
     for tool in 1..=7 {
-        assert!(haas.contains(&format!("\nT{tool} M6\n")), "no tool change to T{tool}");
+        assert!(haas.contains(&format!("\nT{tool} M6 (")), "no tool change to T{tool}");
     }
+    // The program says what it is doing: the tools it takes, in the order it takes them, then
+    // each operation's name where it starts. A parenthesis in a tool's name is a space.
+    let said: Vec<&str> = haas.lines().filter(|line| line.starts_with('(')).collect();
+    assert_eq!(
+        said,
+        [
+            "(UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM)",
+            "(PROVE OUT FIRST: AIR CUT, SINGLE BLOCK)",
+            "(T1 20 MM FLAT END MILL - DIA 20.)",
+            "(T2 8 MM FLAT END MILL - DIA 8.)",
+            "(T4 6 MM DRILL - DIA 6.)",
+            "(T5 5 MM DRILL M6 TAP DRILL - DIA 5.)",
+            "(T6 M6 X 1 TAP - DIA 6.)",
+            "(T3 10 MM FLAT END MILL - DIA 10.)",
+            "(T7 10 MM 90 DEGREE CHAMFER MILL - DIA 10.)",
+            "(FACE 1)",
+            "(POCKET 2)",
+            "(DRILL 6 THROUGH)",
+            "(DRILL 5 FOR M6)",
+            "(TAP M6)",
+            "(CONTOUR 6)",
+            "(CHAMFER 7)",
+        ]
+    );
+    assert!(haas.contains("\nM1\n(TAP M6)\nT6 M6 (M6 X 1 TAP)\n"), "{haas}");
     assert!(haas.contains("G83") && haas.contains("G84") && haas.contains("UNVERIFIED OUTPUT FROM SOLIDCRAFT CAM"));
     assert!(programs[1].contains("G84") && !programs[1].contains('%'));
     assert!(programs[2].contains("G20") && programs[2].starts_with("%\nO01102 "));
