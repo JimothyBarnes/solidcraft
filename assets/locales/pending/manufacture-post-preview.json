@@ -1,0 +1,26 @@
+{
+  "en": {
+    "manufacture.post_program_lines": "The program, {lines} lines:"
+  },
+  "ar": {
+    "manufacture.post_program_lines": "البرنامج، {lines} سطرًا:"
+  },
+  "he": {
+    "manufacture.post_program_lines": "התוכנית, {lines} שורות:"
+  },
+  "ja": {
+    "manufacture.post_program_lines": "プログラム（{lines} 行）："
+  },
+  "vi": {
+    "manufacture.post_program_lines": "Chương trình, {lines} dòng:"
+  },
+  "zh": {
+    "manufacture.post_program_lines": "程序，共 {lines} 行："
+  },
+  "de": {
+    "manufacture.post_program_lines": "Das Programm, {lines} Zeilen:"
+  },
+  "ko": {
+    "manufacture.post_program_lines": "프로그램, {lines}줄:"
+  }
+}

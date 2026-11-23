@@ -225,6 +225,10 @@ fn a_part_goes_from_a_tool_to_a_saved_program_through_the_forms() {
     form.program_number = 1001;
     let name = form.file_name(&design);
     assert!(h.widget(tr("manufacture.post_warning")).is_some(), "the form says the output is unverified");
+    // The program is in the form before it is saved: its tool and its facing by name.
+    h.frames(2);
+    let shown = post_form(&mut h).worked.get().map(|(_, program)| program.text.clone()).unwrap_or_default();
+    assert!(h.widget("T1 M6 (20 MM FLAT END MILL)").is_some() && h.widget("(FACE 1)").is_some(), "{shown}");
     press(&mut h, "Save Program…");
     h.frames(5);
     assert_eq!(open(&h), "posted", "{:?}", h.app.status);
@@ -233,6 +237,7 @@ fn a_part_goes_from_a_tool_to_a_saved_program_through_the_forms() {
     assert_eq!(posted.path, file.to_string_lossy());
     let (lines, moves) = (posted.lines, posted.moves);
     let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text, shown, "what was saved is what the form showed");
     // The file is the program the command gives for the same parameters, read back by the command.
     let again = h.app.run("cam.post", json!({"setup": "setup-1", "post": "haas_mill", "units": "mm", "program_number": 1001})).unwrap();
     assert_eq!(Some(text.as_str()), again["text"].as_str());
@@ -486,23 +491,37 @@ fn post_process_names_the_file_and_comes_back_when_nothing_is_saved() {
         form.params(),
         json!({"setup": "setup-1", "post": "haas_mill", "units": "mm", "program_number": 7, "optional_stop": true, "program_name": "TOP SIDE"})
     );
-    // No file chosen in the save prompt: the form is back as it was, and nothing was posted.
+    // The setup has nothing to post: the form says so in the command's words, and Save
+    // Program... asks for no file.
     let slot = crate::picker_test_support::Slot::default();
     crate::picker_test_support::save(&mut h.app, &slot);
+    h.frames(2);
+    let why = post_form(&mut h).worked.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("setup 'setup-1' has no operations to post"), "{why:?}");
+    assert!(h.widget(&why).is_some());
+    press(&mut h, "Save Program…");
+    assert_eq!(open(&h), "post", "nothing to save, so no save prompt");
+    // Faced (the setup names no material, so the speed and the feed are typed), the setup has a
+    // program and the form shows it.
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 1, "face": {"rpm": 3000, "feed": 600}})).unwrap();
+    h.frames(3);
+    assert_eq!((open(&h), post_form(&mut h).worked.trouble()), ("post", None));
+    assert!(h.widget("O00007 (TOP SIDE)").is_some() && h.widget(&why).is_none());
+    // No file chosen in the save prompt: the form is back as it was, and nothing was posted.
     press(&mut h, "Save Program…");
     assert_eq!(open(&h), "none", "the save prompt is up");
     *slot.borrow_mut() = Some(None);
     h.frames(5);
     assert_eq!((open(&h), post_form(&mut h).program_number, post_form(&mut h).error.clone()), ("post", 7, None));
-    // A file chosen, but the setup has nothing to post: the form is back with the command's reason
-    // and no file is written.
-    let file = h.dir.join("nothing.nc");
+    // A file chosen where none can be written: the form is back with the command's reason.
+    let file = h.dir.join("no such folder").join("top.nc");
     press(&mut h, "Save Program…");
     *slot.borrow_mut() = Some(Some(file.to_string_lossy().into_owned()));
     h.frames(5);
     assert_eq!(open(&h), "post");
     let why = post_form(&mut h).error.clone().unwrap_or_default();
-    assert!(why.contains("setup 'setup-1' has no operations to post"), "{why:?}");
+    assert!(why.contains("could not write the program"), "{why:?}");
     assert!(h.widget(&why).is_some() && !file.exists());
     assert_eq!(
         (minutes_seconds(0.195 * std::f64::consts::PI), minutes_seconds(2.0), minutes_seconds(61.51)),
@@ -2266,6 +2285,72 @@ fn post_process_offers_the_stop_between_tools_where_the_post_has_one() {
     post_form(&mut h).post = reference;
     h.frames(3);
     assert!(h.widget(tr("manufacture.post_optional_stop")).is_none());
+    press(&mut h, "Cancel");
+    assert_eq!(open(&h), "none");
+}
+
+#[test]
+fn post_process_shows_the_program_it_would_save() {
+    let mut h = harness();
+    // The block faced with a 20 mm end mill (T1) and drilled once with a 6 mm drill (T2).
+    faced(&mut h);
+    add_tool(&mut h, "drill", 6.0);
+    h.app
+        .run("cam.op.drill", json!({"setup": "setup-1", "tool": 2, "drill": {"holes": [[0, 0]], "depth": 5, "cycle": {"type": "drill", "dwell": 0}}}))
+        .unwrap();
+    ribbon(&mut h, "cam.post");
+    // The program as Save Program... would write it: the command's own, its lines counted, its
+    // tools and its operations named where the form opens on it.
+    let (lines, text) = post_form(&mut h).worked.get().map(|(_, program)| (program.lines, program.text.clone())).unwrap();
+    let params = post_form(&mut h).params();
+    let posted = h.app.run("cam.post", params).unwrap();
+    assert_eq!((Some(text.as_str()), Some(lines as u64)), (posted["text"].as_str(), posted["lines"].as_u64()));
+    assert!(h.widget(&solidcraft_ui_text::format("manufacture.post_program_lines", &[("lines", &lines.to_string())])).is_some());
+    for line in ["(T1 20 MM FLAT END MILL - DIA 20.)", "(T2 6 MM DRILL - DIA 6.)", "(FACE 1)", "T1 M6 (20 MM FLAT END MILL)"] {
+        assert!(h.widget(line).is_some(), "{line}:\n{text}");
+    }
+    // The pane scrolls with the wheel, to the program's last line and back to its first.
+    assert!(h.widget("M30").is_none(), "the end is out of view as the form opens:\n{text}");
+    let at = h.widget("(FACE 1)").map(|at| egui::pos2(at[0] as f32, at[1] as f32)).unwrap();
+    let wheel = |h: &mut Harness, turn: f32| {
+        for _ in 0..40 {
+            h.app.synthetic.push(egui::Event::PointerMoved(at));
+            h.app.synthetic.push(egui::Event::MouseWheel {
+                source: egui::MouseWheelSource::Unknown,
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, turn),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            });
+            h.frames(2);
+        }
+        // egui's smoothed scrolling runs on for some frames after the last wheel event.
+        h.frames(30);
+    };
+    wheel(&mut h, -400.0);
+    assert!(h.widget("M30").is_some() && h.widget("(FACE 1)").is_none(), "the wheel reaches the end of the program");
+    wheel(&mut h, 400.0);
+    assert!(h.widget("M30").is_none() && h.widget("(FACE 1)").is_some(), "and comes back to its start");
+    // It follows the form: without the stop it is a line shorter, in inches it says so, and
+    // for another controller it is that controller's.
+    post_form(&mut h).optional_stop = false;
+    h.frames(2);
+    assert_eq!(post_form(&mut h).worked.get().map(|(_, program)| program.lines), Some(lines - 1));
+    post_form(&mut h).units = 1;
+    h.frames(2);
+    assert!(h.widget("G17 G40 G49 G80 G90 G94 G20").is_some());
+    let reference = manufacture_posts().iter().position(|(id, _)| id == "rs274").unwrap();
+    post_form(&mut h).post = reference;
+    h.frames(2);
+    assert!(h.widget("(T1 20 mm Flat end mill - DIA 0.7874)").is_some());
+    // Nothing left to post: the reason takes the program's place, and there is nothing to save.
+    for id in ["op-1", "op-2"] {
+        h.app.run("cam.op.edit", json!({"id": id, "suppressed": true})).unwrap();
+    }
+    h.frames(3);
+    let why = post_form(&mut h).worked.trouble().unwrap_or_default().to_string();
+    assert!(why.contains("no operations to post"), "{why:?}");
+    assert!(h.widget(&why).is_some() && h.widget("(T1 20 mm Flat end mill - DIA 0.7874)").is_none());
     press(&mut h, "Cancel");
     assert_eq!(open(&h), "none");
 }

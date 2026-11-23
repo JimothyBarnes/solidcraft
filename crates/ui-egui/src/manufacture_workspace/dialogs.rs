@@ -5,7 +5,8 @@
 //!
 //! New Setup, Face, Contour, Pocket and Drill show what they would make before OK: the engine works it out from the
 //! parameters as they are typed (`manufacture_setup_preview`, `manufacture_preview`), the viewport
-//! draws it (`super::scene`), and the form says why when there would be nothing to make. A form
+//! draws it (`super::scene`), and the form says why when there would be nothing to make. Post
+//! Process shows the program it would save in the same way (`manufacture_program`). A form
 //! also stays open with the command's own words when the command refuses, so the reason is
 //! beside the fields that fix it.
 //!
@@ -15,9 +16,9 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, Simulated, ToolAt, ToolChoice, manufacture_data,
-    manufacture_holes, manufacture_library, manufacture_post_stops, manufacture_posts, manufacture_preview, manufacture_setup_preview,
-    manufacture_tools,
+    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, ProgramPreview, Simulated, ToolAt, ToolChoice,
+    manufacture_data, manufacture_holes, manufacture_library, manufacture_post_stops, manufacture_posts, manufacture_preview, manufacture_program,
+    manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
@@ -1646,6 +1647,8 @@ pub(crate) struct PostForm {
     pub program_name: String,
     /// Whether the post's optional stop is written before tool changes, where it has one.
     pub optional_stop: bool,
+    /// The program these choices would save, or why there would be none.
+    worked: Worked<ProgramPreview>,
     pub error: Option<String>,
 }
 
@@ -1656,7 +1659,18 @@ impl PostForm {
         let posts = manufacture_posts();
         let post = posts.iter().position(|(id, _)| id == "haas_mill").unwrap_or(0);
         let units = usize::from(imperial(&app.session.doc.units));
-        PostForm { setups, posts, setup, post, units, program_number: 1, program_name: String::new(), optional_stop: true, error: None }
+        PostForm {
+            setups,
+            posts,
+            setup,
+            post,
+            units,
+            program_number: 1,
+            program_name: String::new(),
+            optional_stop: true,
+            worked: Worked::new(),
+            error: None,
+        }
     }
 
     /// The `cam.post` parameters, without the file.
@@ -1713,14 +1727,23 @@ impl PostForm {
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let post_labels: Vec<&str> = self.posts.iter().map(|p| p.1.as_str()).collect();
         let units = labels(&UNITS);
-        let ready = !self.setups.is_empty();
+        let has_setup = !self.setups.is_empty();
+        // The program as these choices would save it, worked out again when they or the design
+        // change: what there is to save is seen before it is, and so is why there is nothing.
+        if has_setup {
+            let params = self.params();
+            if self.worked.refresh(app, &params, || manufacture_program(&app.session, &params)) {
+                self.error = None;
+            }
+        }
+        let ready = has_setup && self.worked.result.is_ok();
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_post"), "cam_post", tr("cmd.cam_post"))
             .placed(pivot, at)
             .fields()
             .actions(tr("manufacture.post_save"), tr("ui.cancel"), None)
             .show(ctx, ready, |ui| {
-                if !ready {
+                if !has_setup {
                     ui_kit::text(ui, tr("manufacture.no_setup"), ui_kit::Text::Note("manufacture_post_missing"));
                     return;
                 }
@@ -1735,7 +1758,17 @@ impl PostForm {
                     ui_kit::checkbox(ui, tr("manufacture.post_optional_stop"), &mut self.optional_stop);
                 }
                 ui_kit::status_line(ui, tr("manufacture.post_warning"), ui_kit::StatusTone::Warning);
-                refusal(ui, self.error.as_deref());
+                refusal(ui, self.error.as_deref().or(self.worked.trouble()));
+                // The program comes last: in a window too short for the form it is the program's
+                // pane that runs off the end, never the warning or what the operations had to say.
+                if let Some((_, program)) = self.worked.get() {
+                    for note in &program.notes {
+                        ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_post_program_note"));
+                    }
+                    let lines = solidcraft_ui_text::format("manufacture.post_program_lines", &[("lines", &program.lines.to_string())]);
+                    ui_kit::text(ui, &lines, ui_kit::Text::Note("manufacture_post_program_lines"));
+                    ui_kit::text_lines(ui, "manufacture_post_program", &program.text);
+                }
             });
         match action {
             ui_kit::Action::Ok if ready => self.accept(app),

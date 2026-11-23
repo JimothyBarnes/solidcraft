@@ -2509,3 +2509,47 @@ fn a_program_names_its_operations_and_its_tools_unless_asked_not_to() {
     assert_eq!((without["lines"].as_u64().unwrap() + 5, &without["moves"]), (haas["lines"].as_u64().unwrap(), &haas["moves"]));
     assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "comments": "none"})).contains("parameters"));
 }
+
+#[test]
+fn a_form_is_shown_the_program_before_it_is_saved() {
+    // The block with its drill and its end mill, and nothing to cut yet: the reason, as
+    // `cam.post` gives it.
+    let mut s = milling();
+    let params = json!({"setup": "setup-1", "post": "haas_mill", "program_number": 12});
+    let why = crate::cmd::manufacture_program(&s, &params).err().unwrap_or_default();
+    assert!(why.contains("setup 'setup-1' has no operations to post"), "{why:?}");
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    let undo = s.undo.len();
+    // Faced and drilled: the program shown is the program the command gives, line for line.
+    let shown = crate::cmd::manufacture_program(&s, &params).unwrap();
+    let posted = run(&mut s, "cam.post", params.clone());
+    assert_eq!(Some(shown.text.as_str()), posted["text"].as_str());
+    assert_eq!((Some(shown.lines as u64), Some(shown.moves as u64)), (posted["lines"].as_u64(), posted["moves"].as_u64()));
+    assert!(shown.text.starts_with("%\nO00012 (SETUP 1)\n") && shown.text.contains("\n(DRILL 2)\nT3 M6 (10 MM DRILL)\n"), "{}", shown.text);
+    assert!(shown.notes.is_empty(), "{:?}", shown.notes);
+    // It follows what is asked, and writes no file whatever it is told.
+    let dir = std::env::temp_dir().join(format!("solidcraft-cam-shown-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("shown.nc");
+    let quiet =
+        json!({"setup": "setup-1", "post": "haas_mill", "units": "inch", "optional_stop": false, "comments": false, "path": file.to_string_lossy()});
+    let quiet = crate::cmd::manufacture_program(&s, &quiet).unwrap();
+    assert!(quiet.text.contains("G20") && !quiet.text.contains("M1\n") && !quiet.text.contains("(DRILL 2)"), "{}", quiet.text);
+    assert_eq!(quiet.lines + 5, shown.lines, "two tools, two names and a stop fewer");
+    assert!(!file.exists());
+    // What the command would refuse is refused in its words, never a panic, and nothing changes.
+    for (hostile, reason) in [
+        (json!(null), "parameters"),
+        (json!([1, 2]), "parameters"),
+        (json!({"setup": "setup-9", "post": "haas_mill"}), "no setup 'setup-9'"),
+        (json!({"setup": "setup-1", "post": "none"}), "no post 'none'"),
+        (json!({"setup": "setup-1", "post": "haas_mill", "units": "furlong"}), "units must be mm or inch"),
+        (json!({"setup": "setup-1", "post": "haas_mill", "comments": 1}), "parameters"),
+    ] {
+        let why = crate::cmd::manufacture_program(&s, &hostile).err().unwrap_or_default();
+        assert!(why.contains(reason), "{hostile}: {why:?}");
+    }
+    assert_eq!(s.undo.len(), undo);
+}
