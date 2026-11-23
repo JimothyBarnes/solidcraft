@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, Simulated, ToolChoice, manufacture_data,
+    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, Simulated, ToolAt, ToolChoice, manufacture_data,
     manufacture_holes, manufacture_library, manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
@@ -73,8 +73,9 @@ pub(crate) enum Shown<'a> {
     Setup(&'a Placement),
     /// An operation not made yet: its toolpath, with the active setup.
     Operation(&'a OperationPreview),
-    /// A simulation: the stock as the setup's operations leave it, in place of the stock box.
-    Stock(&'a Simulated),
+    /// A simulation: the stock as the setup's operations leave it, or as far as they have come
+    /// with the tool where it is then, in place of the stock box.
+    Stock(&'a Simulated, Option<&'a ToolAt>),
 }
 
 impl Dialog {
@@ -101,7 +102,7 @@ impl Dialog {
             Dialog::Chamfer(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Drill(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Bore(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
-            Dialog::Simulate(form) => form.worked.get().map(|(key, simulated)| (key, Shown::Stock(simulated))),
+            Dialog::Simulate(form) => form.worked.get().map(|(key, shown)| (key, Shown::Stock(&shown.0, shown.1.as_ref()))),
             _ => None,
         }
     }

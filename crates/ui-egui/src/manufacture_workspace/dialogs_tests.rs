@@ -1827,3 +1827,50 @@ fn chamfer_breaks_all_the_top_edges_when_asked() {
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"]["edges"], "outside");
 }
+
+#[test]
+fn simulate_shows_the_stock_part_of_the_way_with_the_tool_and_plays_it_through() {
+    let mut h = harness();
+    faced(&mut h);
+    ribbon(&mut h, "cam.simulate");
+    h.frames(3);
+    // All the way, as it opens: the facing's millimetre is gone, and no tool is drawn.
+    let form = simulate_form(&mut h);
+    let (length, whole) = (form.length(), form.simulated().expect("a simulation").stock.removed);
+    assert!(length > 0.0 && whole > 0.0 && form.along.is_none() && form.tool().is_none() && !form.playing);
+    assert_eq!(scene::tool_triangles(&h.app), (0, 0));
+    assert!(h.widget(tr("manufacture.sim_position")).is_some() && h.widget(tr("manufacture.sim_tool_done")).is_some());
+    // Half way along: less is removed, the tool is the facing's, and it is drawn: solid, with
+    // no holder, which the tool's data does not describe.
+    simulate_form(&mut h).along = Some(0.5 * length);
+    h.frames(3);
+    let form = simulate_form(&mut h);
+    let (half, tool) = (form.simulated().expect("a simulation").stock.removed, form.tool().expect("the tool").clone());
+    assert!(half > 0.0 && half < whole, "{half} of {whole}");
+    assert_eq!((tool.operation, tool.tool.number), (0, 1));
+    // (Its flat end and its top are 32 triangles each, its sides 64 for each part of it.)
+    let (solid, see_through) = scene::tool_triangles(&h.app);
+    assert!(solid >= 128 && solid % 32 == 0 && see_through == 0, "{solid} and {see_through}");
+    let said =
+        solidcraft_ui_text::format("manufacture.sim_tool_value", &[("tool", "1"), ("operation", "Face 1"), ("time", &minutes_seconds(tool.minutes))]);
+    assert!(h.widget(&said).is_some(), "{said}");
+    // Play goes on from there by itself; Pause stops it where it is.
+    press(&mut h, "Play");
+    assert!(simulate_form(&mut h).playing);
+    h.frames(5);
+    let later = simulate_form(&mut h).along.expect("still on its way");
+    assert!(later > 0.5 * length, "{later}");
+    press(&mut h, "Pause");
+    let stopped = simulate_form(&mut h).along;
+    h.frames(5);
+    assert_eq!((simulate_form(&mut h).playing, simulate_form(&mut h).along), (false, stopped));
+    // Played from all the way it starts again from the start; and it ends all the way, stopped.
+    simulate_form(&mut h).along = None;
+    press(&mut h, "Play");
+    assert!(simulate_form(&mut h).along.is_some_and(|along| along < 0.5 * length) && simulate_form(&mut h).playing);
+    simulate_form(&mut h).along = Some(length - 1e-6);
+    h.frames(5);
+    let form = simulate_form(&mut h);
+    assert!(form.along.is_none() && !form.playing && form.tool().is_none());
+    assert_eq!(form.simulated().expect("a simulation").stock.removed, whole);
+}

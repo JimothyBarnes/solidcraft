@@ -4,17 +4,20 @@
 //! until the next. It goes into the highlight scene, which is built again only when its key
 //! changes. An open form adds what it would make (`super::dialogs::Shown`): New Setup its stock
 //! and origin in place of the active setup's, an operation's form its toolpath, and Simulate the
-//! stock as the operations leave it in place of the stock's box.
+//! stock as the operations leave it in place of the stock's box, with the tool where it is when
+//! the stock is shown part of the way.
 //!
 //! Colours: Manufacture has no theme tokens of its own yet (one is a line in every theme file),
 //! so it borrows tokens by meaning: the reference-geometry colours for the stock, the one X/Y/Z
 //! set for the origin, the manipulator blue for cutting moves, the joint amber for rapids and the
 //! proposed-geometry green for plunges. Each already has its colour-vision variants. The stock a
 //! simulation leaves is the reference-geometry colour where it still stands above the part, the
-//! figures' "ok" where it is cut to size and the interference colour where it is cut into.
+//! figures' "ok" where it is cut to size and the interference colour where it is cut into. The
+//! tool is the cutting moves' blue where it cuts, a body's own colour along its shank and a
+//! body's edge colour for its holder.
 use std::hash::{Hash, Hasher};
 
-use solidcraft_engine::cmd::{Drawn, Placement, SetupView, Simulated, manufacture_view};
+use solidcraft_engine::cmd::{Drawn, Placement, SetupView, Simulated, ToolAt, ToolShape, manufacture_view};
 use solidcraft_theme::Tokens;
 
 use super::dialogs::Shown;
@@ -33,6 +36,8 @@ const MAX_STOCK_TRIANGLES: usize = 400_000;
 const STOCK_LIFT: f64 = 0.02;
 /// How far from the part's height the stock still counts as cut to size, mm.
 const TO_SIZE: f64 = 0.02;
+/// How many flat sides the tool is drawn with round its axis.
+const TOOL_SIDES: usize = 32;
 
 /// The active setup's view, kept until the design or the active setup changes.
 #[derive(Default)]
@@ -102,12 +107,15 @@ pub(crate) fn draw(app: &SolveApp, sc: &mut GpuScene) {
     }
     // A simulation shows the stock as it is left, in place of the box it started as.
     let simulated = match form {
-        Some(Shown::Stock(simulated)) => Some(simulated),
+        Some(Shown::Stock(simulated, tool)) => {
+            stock_left(sc, simulated);
+            if let Some(tool) = tool {
+                tool_there(sc, &simulated.placement, tool);
+            }
+            Some(simulated)
+        }
         _ => None,
     };
-    if let Some(simulated) = simulated {
-        stock_left(sc, simulated);
-    }
     let mut left = MAX_PIECES;
     // An operation its form is changing is drawn as the form would leave it, not as it is.
     let changing = app.manufacture_workspace.dialog.as_ref().and_then(|dialog| dialog.edited_operation());
@@ -271,6 +279,59 @@ fn stock_left(sc: &mut GpuScene, simulated: &Simulated) {
     }
 }
 
+/// The tool where a simulation shown part of the way has it (decision 0023 of the CAM work):
+/// its shape as the simulation cuts and checks with it ([`ToolShape`]), turned about its axis in
+/// [`TOOL_SIDES`] flat sides, closed at its top. What cuts and the shank are solid; the holder,
+/// which is wide and close above the cut, is see-through like the stock's box, with its rings
+/// drawn as lines.
+fn tool_there(sc: &mut GpuScene, p: &Placement, tool: &ToolAt) {
+    let t = Tokens::get();
+    let shape = ToolShape::of(&tool.tool);
+    let (cutting, shank) = (sc.color(c4(t.manipulator)), sc.color(c4(t.body)));
+    let (holder, holder_edge) = (sc.color(c4(t.construction_plane)), sc.color(c4(t.construction_geom)));
+    let mut parts = vec![(shape.cutting, cutting, true), (shape.shank, shank, true), (shape.holder, holder, false)];
+    parts.retain(|(outline, ..)| outline.len() > 1);
+    // Closed at its top: from the last ring in to the axis.
+    if let Some((outline, ..)) = parts.last_mut()
+        && let Some(&[_, top]) = outline.last()
+    {
+        outline.push([0.0, top]);
+    }
+    let ring = |out: f64, above: f64, side: usize| {
+        let turned = std::f64::consts::TAU * side as f64 / TOOL_SIDES as f64;
+        on_model(p, tool.at.x + out * turned.cos(), tool.at.y + out * turned.sin(), tool.at.z + above)
+    };
+    for (outline, colour, solid) in &parts {
+        for (&[out0, above0], &[out1, above1]) in outline.iter().zip(outline.iter().skip(1)) {
+            for side in 0..TOOL_SIDES {
+                // One flat piece between two rings, facing out: its corners counter-clockwise
+                // seen from outside the tool.
+                let corners = [ring(out0, above0, side), ring(out0, above0, side + 1), ring(out1, above1, side + 1), ring(out1, above1, side)];
+                for [u, v, w] in [[corners[0], corners[1], corners[2]], [corners[0], corners[2], corners[3]]] {
+                    let (e, f) = ([v[0] - u[0], v[1] - u[1], v[2] - u[2]], [w[0] - u[0], w[1] - u[1], w[2] - u[2]]);
+                    let n = [e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0]];
+                    let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    // A piece that comes to a point at the axis is one triangle, not two.
+                    if length > 0.0 {
+                        let n = [n[0] / length, n[1] / length, n[2] / length];
+                        for vertex in [u, v, w] {
+                            if *solid {
+                                sc.tri(vertex, n, *colour);
+                            } else {
+                                sc.guide_tri(vertex, *colour);
+                            }
+                        }
+                    }
+                }
+                // What is see-through shows its shape by its rings.
+                if !*solid && out0 > 0.0 {
+                    sc.guide_line(corners[0], corners[1], holder_edge, 1.2);
+                }
+            }
+        }
+    }
+}
+
 /// A toolpath's pieces, up to `left` of them: rapids thin, cuts heavier; where the model hides a
 /// piece it shows faintly.
 fn toolpath(sc: &mut GpuScene, p: &Placement, pieces: &[(Drawn, solidcore_record::Vec3, solidcore_record::Vec3)], left: &mut usize) {
@@ -289,6 +350,17 @@ fn toolpath(sc: &mut GpuScene, p: &Placement, pieces: &[(Drawn, solidcore_record
         sc.line(a, b, colour, width, false);
         sc.hidden_line(a, b, colour, 1.0);
     }
+}
+
+/// How many triangles the tool is drawn with where a simulation shown part of the way has it,
+/// solid ones and see-through ones, for tests: none when no tool is shown.
+#[cfg(test)]
+pub(crate) fn tool_triangles(app: &SolveApp) -> (usize, usize) {
+    let mut sc = GpuScene::default();
+    if let Some(Shown::Stock(simulated, Some(tool))) = form(app).map(|(_, shown)| shown) {
+        tool_there(&mut sc, &simulated.placement, tool);
+    }
+    (sc.tris.len() / crate::gpu::TRI_SIZE / 3, sc.guide_trans.len() / crate::gpu::TRI_SIZE / 3)
 }
 
 /// How many triangles the stock a simulation left is drawn with, for tests.

@@ -2104,3 +2104,60 @@ fn operations_that_follow_one_another_with_one_tool_keep_it_in_the_program() {
     let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
     assert_eq!((sheet["tools"].as_u64(), sheet["operations"].as_u64()), (Some(2), Some(3)));
 }
+
+#[test]
+fn a_simulation_is_cut_any_part_of_the_way_and_says_where_the_tool_is() {
+    // The block faced and contoured with the 20 mm tool (T4), and three holes pecked with the
+    // 10 mm drill (T3): the program is the three toolpaths one after another.
+    let mut s = milling();
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    let lengths: Vec<f64> = ["op-1", "op-2", "op-3"]
+        .iter()
+        .map(|id| {
+            let t = run(&mut s, "cam.op.toolpath", json!({"id": id}));
+            t["feed_length"].as_f64().unwrap() + t["rapid_length"].as_f64().unwrap()
+        })
+        .collect();
+    let whole = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
+    let length = whole["length"].as_f64().unwrap();
+    // One after another they are as long as each alone and the two ways across between them,
+    // at the clearance height: each less than the block's own diagonal and its stock (75 mm).
+    let between = length - lengths.iter().sum::<f64>();
+    assert!(between > 0.0 && between < 150.0 && whole["along"] == whole["length"] && whole["tool"].is_null(), "{between} in {whole:#}");
+    let at = |s: &mut Session, along: f64| run(s, "cam.simulate", json!({"setup": "setup-1", "along": along}));
+    // At the start nothing is cut, and the tool is the first operation's, where its toolpath
+    // starts.
+    let start = at(&mut s, 0.0);
+    assert_eq!(
+        (start["removed"].as_f64(), start["tool"]["operation"].as_str(), start["tool"]["number"].as_u64()),
+        (Some(0.0), Some("op-1"), Some(4))
+    );
+    assert_eq!(start["tool"]["at"], run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["toolpath"]["start"]);
+    // Half way through the contour: the facing is done whole, the drill has done nothing, the
+    // tool is the contour's, and the contour has removed some of what it will.
+    let part = at(&mut s, lengths[0] + 0.5 * lengths[1]);
+    assert_eq!(part["operations"][0]["removed"], whole["operations"][0]["removed"]);
+    assert_eq!((part["operations"][2]["removed"].as_f64(), part["tool"]["operation"].as_str()), (Some(0.0), Some("op-2")));
+    let contoured = (part["operations"][1]["removed"].as_f64().unwrap(), whole["operations"][1]["removed"].as_f64().unwrap());
+    assert!(contoured.0 > 0.0 && contoured.0 < contoured.1 && part["tool"]["minutes"].as_f64().is_some_and(|minutes| minutes > 0.0), "{contoured:?}");
+    // The further along, the more is removed, never less; all the way is the simulation,
+    // number for number.
+    let mut removed = 0.0;
+    for k in 0..=20 {
+        let now = at(&mut s, length * f64::from(k) / 20.0)["removed"].as_f64().unwrap();
+        assert!(now >= removed - 1e-9, "{k}: {now} after {removed}");
+        removed = now;
+    }
+    let end = at(&mut s, length);
+    for key in ["removed", "over_part", "beside_part", "gouge_count", "gouges", "rapid_hit_count", "body_hit_count", "operations"] {
+        assert_eq!(end[key], whole[key], "{key}");
+    }
+    assert!(end["tool"].is_null());
+    // Past the end is the end, before the start the start; what is no number is refused.
+    assert_eq!(at(&mut s, 1e9)["removed"], whole["removed"]);
+    assert_eq!(at(&mut s, -5.0)["removed"].as_f64(), Some(0.0));
+    let why = refused(&mut s, "cam.simulate", json!({"setup": "setup-1", "along": "half"}));
+    assert!(why.contains("invalid type: string \"half\", expected f64"), "{why}");
+}

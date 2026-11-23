@@ -1,0 +1,66 @@
+{
+  "en": {
+    "manufacture.sim_pause": "Pause",
+    "manufacture.sim_play": "Play",
+    "manufacture.sim_position": "Shown up to",
+    "manufacture.sim_tool": "Tool",
+    "manufacture.sim_tool_done": "Every operation is done",
+    "manufacture.sim_tool_value": "T{tool} in {operation}, {time} cut there"
+  },
+  "ar": {
+    "manufacture.sim_pause": "إيقاف مؤقت",
+    "manufacture.sim_play": "تشغيل",
+    "manufacture.sim_position": "المعروض حتى",
+    "manufacture.sim_tool": "الأداة",
+    "manufacture.sim_tool_done": "اكتملت كل العمليات",
+    "manufacture.sim_tool_value": "T{tool} في {operation}، قُطع فيها {time}"
+  },
+  "he": {
+    "manufacture.sim_pause": "השהה",
+    "manufacture.sim_play": "נגן",
+    "manufacture.sim_position": "מוצג עד",
+    "manufacture.sim_tool": "כלי",
+    "manufacture.sim_tool_done": "כל הפעולות הושלמו",
+    "manufacture.sim_tool_value": "T{tool} בתוך {operation}, נחתכו בה {time}"
+  },
+  "ja": {
+    "manufacture.sim_pause": "一時停止",
+    "manufacture.sim_play": "再生",
+    "manufacture.sim_position": "表示位置",
+    "manufacture.sim_tool": "工具",
+    "manufacture.sim_tool_done": "すべての操作が完了",
+    "manufacture.sim_tool_value": "T{tool}（{operation}）、切削 {time}"
+  },
+  "vi": {
+    "manufacture.sim_pause": "Tạm dừng",
+    "manufacture.sim_play": "Phát",
+    "manufacture.sim_position": "Hiển thị đến",
+    "manufacture.sim_tool": "Dao",
+    "manufacture.sim_tool_done": "Mọi nguyên công đã xong",
+    "manufacture.sim_tool_value": "T{tool} trong {operation}, đã cắt {time} ở đó"
+  },
+  "zh": {
+    "manufacture.sim_pause": "暂停",
+    "manufacture.sim_play": "播放",
+    "manufacture.sim_position": "显示到",
+    "manufacture.sim_tool": "刀具",
+    "manufacture.sim_tool_done": "所有工序已完成",
+    "manufacture.sim_tool_value": "T{tool}，在 {operation} 中，已切削 {time}"
+  },
+  "de": {
+    "manufacture.sim_pause": "Pause",
+    "manufacture.sim_play": "Abspielen",
+    "manufacture.sim_position": "Gezeigt bis",
+    "manufacture.sim_tool": "Werkzeug",
+    "manufacture.sim_tool_done": "Alle Operationen sind fertig",
+    "manufacture.sim_tool_value": "T{tool} in {operation}, dort {time} geschnitten"
+  },
+  "ko": {
+    "manufacture.sim_pause": "일시 정지",
+    "manufacture.sim_play": "재생",
+    "manufacture.sim_position": "표시 위치",
+    "manufacture.sim_tool": "공구",
+    "manufacture.sim_tool_done": "모든 작업 완료",
+    "manufacture.sim_tool_value": "T{tool}, {operation}에서 {time} 절삭"
+  }
+}

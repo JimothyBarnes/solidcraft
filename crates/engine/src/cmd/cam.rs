@@ -1033,7 +1033,7 @@ fn work(
 }
 
 // The Manufacture types a view of a setup is made of, for the UI above the engine.
-pub use solidcraft_cam::{BodyPart, Drawn, Placement};
+pub use solidcraft_cam::{BodyPart, Drawn, Placement, ToolShape};
 
 /// Writes `bytes` to the file `path` in one step; a file already there is replaced only when
 /// `overwrite`. `what` names the content in the error.
@@ -1282,12 +1282,98 @@ const SIMULATION_TOLERANCE: f64 = 0.01;
 const SIMULATION_CELLS: f64 = 400.0;
 const SIMULATION_CELL: (f64, f64) = (0.05, 1.0);
 
-/// The setup `id`'s operations (but those switched off) cut in turn from its stock, on a grid
-/// of cells `cell` mm a side (`None`: the stock's longer side over 400, between 0.05 and 1), and
-/// checked against the part, whose heights are read from the bodies' exact faces. An operation
-/// whose toolpath can't be worked out is left out, with the reason. It reads the design and
-/// changes nothing.
-pub fn manufacture_simulation(s: &Session, id: &str, cell: Option<f64>) -> std::result::Result<Simulated, String> {
+/// One operation of a setup made ready to be cut any part of the way ([`Playback`]).
+pub struct PlaybackOperation {
+    pub id: String,
+    pub name: String,
+    /// Its toolpath, its tool and how far it means to cut into the part as the model has it; or
+    /// why it is left out, when its toolpath can't be worked out or its tool can't be shown.
+    ready: std::result::Result<(Toolpath, Tool, f64), String>,
+    /// How long its toolpath is, mm: 0 when it is left out.
+    pub length: f64,
+}
+
+/// A setup made ready to be cut from its stock any part of the way (decision 0023 of the CAM
+/// work): where it sits, its stock uncut with the part's heights over it, and its operations'
+/// toolpaths in their order. Making it reads the model and works every toolpath out; cutting
+/// any part of the way from it ([`Playback::at`]) does neither again.
+pub struct Playback {
+    placement: Placement,
+    blank: solidcraft_cam::Simulation,
+    stock_volume: f64,
+    pub operations: Vec<PlaybackOperation>,
+    /// How long the toolpaths are together, mm.
+    pub length: f64,
+}
+
+/// Where the tool is part of the way through a setup's toolpaths.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolAt {
+    /// Which of the setup's operations (those not switched off, in their order) it is in.
+    pub operation: usize,
+    pub tool: Tool,
+    /// Its tip, in the setup's WCS.
+    pub at: solidcore_record::Vec3,
+    /// How far along that operation's toolpath it is, mm, and the time it has spent in it
+    /// cutting and dwelling, minutes.
+    pub along: f64,
+    pub minutes: f64,
+}
+
+impl Playback {
+    /// The stock after the first `along` mm of the setup's toolpaths (all of them at
+    /// [`Playback::length`] or past it; none below 0), with what was found while cutting that
+    /// far, and where the tool is then: nowhere once every toolpath is done. An operation the
+    /// tool has not reached has removed nothing.
+    pub fn at(&self, along: f64) -> std::result::Result<(Simulated, Option<ToolAt>), String> {
+        if along.is_nan() {
+            return Err("how far along a setup's toolpaths must be a number".into());
+        }
+        let whole = along >= self.length;
+        let mut stock = self.blank.clone();
+        let (mut left, mut tool_at) = (along.max(0.0), None);
+        let mut operations = Vec::with_capacity(self.operations.len());
+        for (index, op) in self.operations.iter().enumerate() {
+            let said = |cut: Option<solidcraft_cam::CutReport>, skipped: Option<String>| SimulatedOperation {
+                id: op.id.clone(),
+                name: op.name.clone(),
+                removed: cut.map_or(0.0, |cut| cut.removed),
+                gouges: cut.map_or(0, |cut| cut.gouges),
+                rapid_hits: cut.map_or(0, |cut| cut.rapid_hits),
+                body_hits: cut.map_or(0, |cut| cut.body_hits),
+                skipped,
+            };
+            operations.push(match &op.ready {
+                Err(why) => said(None, Some(why.clone())),
+                // Not reached: the tool is in an operation before it.
+                Ok(_) if tool_at.is_some() => said(None, None),
+                Ok((toolpath, tool, into_part)) => {
+                    let cut = if whole || left >= op.length {
+                        // Done whole: cut as it is, so that all of them done is the simulation.
+                        left -= op.length;
+                        stock.cut_into(index, toolpath, tool, *into_part)
+                    } else {
+                        let part = toolpath.upto(left).map_err(|e| e.to_string())?;
+                        tool_at = Some(ToolAt { operation: index, tool: tool.clone(), at: part.at, along: part.along, minutes: part.minutes });
+                        stock.cut_into(index, &part.toolpath, tool, *into_part)
+                    };
+                    match cut {
+                        Ok(cut) => said(Some(cut), None),
+                        Err(why) => said(None, Some(why.to_string())),
+                    }
+                }
+            });
+        }
+        Ok((Simulated { placement: self.placement, stock, stock_volume: self.stock_volume, operations }, tool_at))
+    }
+}
+
+/// The setup `id` made ready to be cut any part of the way: its operations (but those switched
+/// off) in turn, on a grid of cells `cell` mm a side (`None`: the stock's longer side over 400,
+/// between 0.05 and 1), the part's heights read from the bodies' exact faces. An operation
+/// whose toolpath can't be worked out, or whose tool a field of heights can't show, is left
+/// out, with the reason. It reads the design and changes nothing.
+pub fn manufacture_playback(s: &Session, id: &str, cell: Option<f64>) -> std::result::Result<Playback, String> {
     const CMD: &str = "cam.simulate";
     let d = manufacture_data(&s.doc)?;
     let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
@@ -1304,48 +1390,40 @@ pub fn manufacture_simulation(s: &Session, id: &str, cell: Option<f64>) -> std::
         super::cam_heights::part_heights(&named, &plane, &stock.stock, placement.model.max.z, placement.stock.min.z - 1.0).map_err(|e| bad(CMD, e))
     })
     .map_err(said)?;
-    let mut stock = stock.with_part(part).map_err(|e| e.to_string())?;
+    let blank = stock.with_part(part).map_err(|e| e.to_string())?;
     let mut placed = Some(placement);
     let mut at = None;
     let mut operations = Vec::new();
-    for (index, op) in setup.operations.iter().filter(|o| !o.suppressed).enumerate() {
+    for op in setup.operations.iter().filter(|o| !o.suppressed) {
         let tool = d.tools.iter().find(|t| t.number == op.tool);
-        let cut = work(s, CMD, &d, setup, op, at, &mut placed).map_err(said).and_then(|worked| {
+        let ready = work(s, CMD, &d, setup, op, at, &mut placed).map_err(said).and_then(|worked| {
             at = Some(worked.toolpath.moves.iter().fold(worked.toolpath.start, |p, m| m.end(p)));
             let tool = tool.ok_or_else(|| format!("the design has no tool {}", op.tool))?;
-            stock.cut_into(index, &worked.toolpath, tool, worked.into_part).map_err(|e| e.to_string())
+            solidcraft_cam::Simulation::cuts_with(tool).map_err(|e| e.to_string())?;
+            Ok((worked.toolpath, tool.clone(), worked.into_part))
         });
-        operations.push(match cut {
-            Ok(cut) => SimulatedOperation {
-                id: op.id.clone(),
-                name: op.name.clone(),
-                removed: cut.removed,
-                gouges: cut.gouges,
-                rapid_hits: cut.rapid_hits,
-                body_hits: cut.body_hits,
-                skipped: None,
-            },
-            Err(why) => {
-                at = None;
-                SimulatedOperation {
-                    id: op.id.clone(),
-                    name: op.name.clone(),
-                    removed: 0.0,
-                    gouges: 0,
-                    rapid_hits: 0,
-                    body_hits: 0,
-                    skipped: Some(why),
-                }
-            }
-        });
+        // Where an operation that is left out would have ended is not where the next begins.
+        if ready.is_err() {
+            at = None;
+        }
+        let length = ready.as_ref().ok().and_then(|(toolpath, ..)| toolpath.length().ok()).unwrap_or(0.0);
+        operations.push(PlaybackOperation { id: op.id.clone(), name: op.name.clone(), ready, length });
     }
-    Ok(Simulated { placement, stock, stock_volume, operations })
+    let length = operations.iter().map(|op| op.length).sum();
+    Ok(Playback { placement, blank, stock_volume, operations, length })
+}
+
+/// The setup `id`'s operations (but those switched off) cut in turn from its stock, and checked
+/// against the part: [`manufacture_playback`] cut all the way.
+pub fn manufacture_simulation(s: &Session, id: &str, cell: Option<f64>) -> std::result::Result<Simulated, String> {
+    manufacture_playback(s, id, cell)?.at(f64::INFINITY).map(|(simulated, _)| simulated)
 }
 
 fn simulate(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "cam.simulate";
     let p: CamSimulateParams = parse(CMD, "parameters", p)?;
-    let done = manufacture_simulation(s, &p.setup, p.cell).map_err(|e| bad(CMD, e))?;
+    let playback = manufacture_playback(s, &p.setup, p.cell).map_err(|e| bad(CMD, e))?;
+    let (done, tool) = playback.at(p.along.unwrap_or(f64::INFINITY)).map_err(|e| bad(CMD, e))?;
     let (over_part, beside_part) = done.stock.leftover();
     let id_of = |index: usize| done.operations.get(index).map_or_else(String::new, |op| op.id.clone());
     reply(
@@ -1360,6 +1438,14 @@ fn simulate(s: &mut Session, p: &Value) -> Result<Value> {
             over_part,
             beside_part,
             below_stock: done.stock.below_stock,
+            length: playback.length,
+            along: p.along.map_or(playback.length, |along| along.clamp(0.0, playback.length)),
+            tool: tool.map(|tool| crate::schema::cam::CamSimulatedTool {
+                operation: id_of(tool.operation),
+                number: tool.tool.number,
+                at: [tool.at.x, tool.at.y, tool.at.z],
+                minutes: tool.minutes,
+            }),
             operations: done
                 .operations
                 .iter()

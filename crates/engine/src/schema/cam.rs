@@ -536,6 +536,23 @@ pub struct CamSimulateParams {
     /// side over 400, kept between 0.05 and 1.
     #[serde(default)]
     pub cell: Option<f64>,
+    /// How far along the setup's toolpaths to cut, mm (their lengths one after another, rapids
+    /// as straight lines); left out, all the way. Below 0 is the start, past the end the end.
+    #[serde(default)]
+    pub along: Option<f64>,
+}
+
+/// Where the tool is in a simulation cut part of the way.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct CamSimulatedTool {
+    /// The operation it is in.
+    pub operation: String,
+    /// Its tool number.
+    pub number: u32,
+    /// Its tip, `[x, y, z]` in the setup's WCS.
+    pub at: [f64; 3],
+    /// The time it has spent in that operation cutting and dwelling, minutes.
+    pub minutes: f64,
 }
 
 /// What one operation did to the stock in a simulation.
@@ -604,6 +621,11 @@ pub struct CamSimulated {
     pub beside_part: f64,
     /// How far below the stock's bottom the lowest cut went, mm (0 when none did).
     pub below_stock: f64,
+    /// How long the setup's toolpaths are together, mm, how far along them this was cut, and
+    /// where the tool is then: nowhere when they were cut all the way.
+    pub length: f64,
+    pub along: f64,
+    pub tool: Option<CamSimulatedTool>,
     pub operations: Vec<CamSimulatedOperation>,
     /// How many moves cut into the part, and the first hundred of them.
     pub gouge_count: usize,
