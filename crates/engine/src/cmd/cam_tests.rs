@@ -2357,3 +2357,32 @@ fn slots_are_found_on_the_model_and_milled_along_their_middle() {
     offered.sort_unstable();
     assert_eq!(offered, vec![2, 4, 6]);
 }
+
+#[test]
+fn openings_read_lately_are_kept_and_read_again_when_the_model_changes() {
+    // The plate with a window 40 x 30 through it about (-15, 0), and a contour round its inside
+    // with the 10 mm tool: 30 x 20 and 100 round.
+    let mut s = plate();
+    boxed(&mut s, [15.0, 25.0, -5.0], [40.0, 30.0, 30.0], "cut");
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2, "contour": {"side": "inside", "openings": [[-15, 0]]}}));
+    let worked = |s: &mut Session| run(s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let first = worked(&mut s);
+    assert!(about(&first["numbers"]["round"], 100.0), "{}", first["numbers"]);
+    // Asked again, and after a change that leaves the window as it was (a speed), it is the same
+    // toolpath but for what was changed: the window is not read from the model again.
+    assert_eq!(worked(&mut s), first);
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "openings": [[-15, 0]], "rpm": 3000}}));
+    let faster = worked(&mut s);
+    assert!(about(&faster["numbers"]["round"], 100.0) && about(&faster["numbers"]["rpm"], 3000.0), "{}", faster["numbers"]);
+    assert_eq!(faster["toolpath"]["start"], first["toolpath"]["start"]);
+    // The window made 10 longer: what was kept is of another model, and the contour goes round
+    // the window as it is now, 40 x 20 and 120 round.
+    boxed(&mut s, [55.0, 25.0, -5.0], [10.0, 30.0, 30.0], "cut");
+    assert!(about(&worked(&mut s)["numbers"]["round"], 120.0));
+    // A point that is in no opening is refused each time it is asked: a refusal is never kept.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "openings": [[40, 30]]}}));
+    for _ in 0..2 {
+        let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+        assert!(why.contains("X 40 Y 30 is on top of the part, not in an opening"), "{why}");
+    }
+}

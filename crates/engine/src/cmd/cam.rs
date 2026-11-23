@@ -601,8 +601,80 @@ fn rims_of(
 ) -> std::result::Result<(Vec<solidcore_record::Region2>, usize), String> {
     let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
     with_bodies(s, cmd, setup, |bodies| {
-        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
-        super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).rims(at, tip).map_err(|e| bad(cmd, e))
+        read_or_kept(&RIMS, reading_key(bodies, &plane, &[p.model.max.z, at, tip]), || {
+            let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+            super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).rims(at, tip).map_err(|e| bad(cmd, e))
+        })
+    })
+    .map_err(said)
+}
+
+/// The rims and the openings read lately ([`rims_of`], [`openings_at`]), each under a number made
+/// of what the reading depends on ([`reading_key`]).
+static RIMS: std::sync::Mutex<Vec<(u64, (Vec<solidcore_record::Region2>, usize))>> = std::sync::Mutex::new(Vec::new());
+static OPENINGS: std::sync::Mutex<Vec<(u64, Vec<super::cam_pockets::Pocket>)>> = std::sync::Mutex::new(Vec::new());
+
+/// A number for what a reading of `bodies` in `plane` depends on: their geometry and names, the
+/// plane, and what else was asked of it (`asked`: heights, points). `None` when a body's
+/// geometry has no number, and nothing can be kept.
+fn reading_key(bodies: &[&solidcraft_doc::ModelBody], plane: &solidcore_record::Plane, asked: &[f64]) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let geometry = bodies.iter().map(|b| b.geometry_key()).collect::<Option<Vec<u64>>>()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    geometry.hash(&mut h);
+    bodies.iter().for_each(|b| b.name.hash(&mut h));
+    [plane.origin, plane.x, plane.y].iter().flat_map(|v| [v.x, v.y, v.z]).chain(asked.iter().copied()).for_each(|v| v.to_bits().hash(&mut h));
+    asked.len().hash(&mut h);
+    Some(h.finish())
+}
+
+/// What `read` gives, or what it gave lately under the same `key`. Reading openings cuts the
+/// bodies and checks exactly that nothing hangs over them, and a form asks again at every change
+/// of a number that leaves them as they were. Only what was read is kept, never a refusal.
+fn read_or_kept<T: Clone>(kept: &std::sync::Mutex<Vec<(u64, T)>>, key: Option<u64>, read: impl FnOnce() -> Result<T>) -> Result<T> {
+    let known = key.and_then(|k| kept.lock().ok().and_then(|kept| kept.iter().find(|(at, _)| *at == k).map(|(_, found)| found.clone())));
+    if let Some(found) = known {
+        return Ok(found);
+    }
+    let found = read()?;
+    if let Some(key) = key
+        && let Ok(mut kept) = kept.lock()
+    {
+        kept.retain(|(at, _)| *at != key);
+        kept.insert(0, (key, found.clone()));
+        kept.truncate(OUTLINES_KEPT);
+    }
+    Ok(found)
+}
+
+/// The opening each of `points` is in ([`super::cam_pockets::Finder::opening_at`]), in their
+/// order, in the setup's WCS: read from the model, or as read lately from the same geometry.
+fn openings_at(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    points: &[[f64; 2]],
+    bottom: Option<f64>,
+) -> std::result::Result<Vec<super::cam_pockets::Pocket>, String> {
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    // What the reading was asked: the part's top and bottom, the bottom given (or that none
+    // was), and the points.
+    let asked: Vec<f64> = [p.model.max.z, p.model.min.z, f64::from(u8::from(bottom.is_some())), bottom.unwrap_or(0.0)]
+        .into_iter()
+        .chain(points.iter().flatten().copied())
+        .collect();
+    with_bodies(s, cmd, setup, |bodies| {
+        read_or_kept(&OPENINGS, reading_key(bodies, &plane, &asked), || {
+            let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+            let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
+            let mut found = Vec::with_capacity(points.len());
+            for at in points {
+                let at = solidcore_record::Vec2 { x: at[0], y: at[1] };
+                found.push(finder.opening_at(at, bottom, p.model.min.z).map_err(|e| bad(cmd, e))?);
+            }
+            Ok(found)
+        })
     })
     .map_err(said)
 }
@@ -620,18 +692,7 @@ fn openings_of(
     points: &[[f64; 2]],
     bottom: Option<f64>,
 ) -> std::result::Result<(f64, Vec<solidcore_record::Region2>), String> {
-    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
-    let found = with_bodies(s, cmd, setup, |bodies| {
-        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
-        let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
-        let mut found = Vec::with_capacity(points.len());
-        for at in points {
-            let at = solidcore_record::Vec2 { x: at[0], y: at[1] };
-            found.push(finder.opening_at(at, bottom, p.model.min.z).map_err(|e| bad(cmd, e))?);
-        }
-        Ok(found)
-    })
-    .map_err(said)?;
+    let found = openings_at(s, cmd, setup, p, points, bottom)?;
     let Some(floor) = found.first().map(|opening| opening.floor) else { return Err("an inside contour needs an opening to go round".into()) };
     if let Some(other) = found.iter().find(|opening| (opening.floor - floor).abs() > 1e-6) {
         return Err(format!(
@@ -792,19 +853,8 @@ fn slots_of(
     points: &[[f64; 2]],
     bottom: Option<f64>,
 ) -> std::result::Result<Vec<solidcraft_cam::SlotShape>, String> {
-    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
-    with_bodies(s, cmd, setup, |bodies| {
-        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
-        let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
-        let mut found = Vec::with_capacity(points.len());
-        for at in points {
-            let at = solidcore_record::Vec2 { x: at[0], y: at[1] };
-            let opening = finder.opening_at(at, bottom, p.model.min.z).map_err(|e| bad(cmd, e))?;
-            found.push(solidcraft_cam::SlotShape { bottom: opening.floor, region: opening.region });
-        }
-        Ok(found)
-    })
-    .map_err(said)
+    let found = openings_at(s, cmd, setup, p, points, bottom)?;
+    Ok(found.into_iter().map(|opening| solidcraft_cam::SlotShape { bottom: opening.floor, region: opening.region }).collect())
 }
 
 /// The slots the setup `setup` has, as a form or a script reads them: its openings through the
