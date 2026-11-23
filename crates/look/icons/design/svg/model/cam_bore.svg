@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Bore</title>
+  <path d="M3 26.42L32 43.16L32 54.32L3 37.58Z" fill="#b8c3cf"/>
+  <path d="M61 26.42L32 43.16L32 54.32L61 37.58Z" fill="#8e9faf"/>
+  <path d="M32 9.68L61 26.42L32 43.16L3 26.42Z" fill="#e2e8ef"/>
+  <path d="M32 9.68L61 26.42L61 37.58L32 54.32L3 37.58L3 26.42Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M3 26.42L32 43.16L61 26.42" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 43.16L32 54.32" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M22.43 26.42A9.57 5.52 0 1 0 41.57 26.42A9.57 5.52 0 1 0 22.43 26.42Z" fill="#236ead"/>
+  <defs><clipPath id="cam-bore-opening"><path d="M22.43 26.42A9.57 5.52 0 1 0 41.57 26.42A9.57 5.52 0 1 0 22.43 26.42Z" fill="none"/></clipPath></defs>
+  <g clip-path="url(#cam-bore-opening)">
+  <path d="M22.43 33.12A9.57 5.52 0 1 0 41.57 33.12A9.57 5.52 0 1 0 22.43 33.12Z" fill="#328bd3"/>
+  </g>
+  <path d="M22.43 26.42A9.57 5.52 0 1 0 41.57 26.42A9.57 5.52 0 1 0 22.43 26.42Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M23.22 33.66A15.31 8.84 0 1 1 43.73 32.1" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M37.55 36.35L41.12 28.31L46.34 35.89Z" fill="#236ead"/>
+</svg>

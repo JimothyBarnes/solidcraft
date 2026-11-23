@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>New Setup</title>
+  <path d="M3 27.49L32 44.24L32 55.83L3 39.08Z" fill="#b8c3cf"/>
+  <path d="M61 27.49L32 44.24L32 55.83L61 39.08Z" fill="#8e9faf"/>
+  <path d="M32 10.75L61 27.49L32 44.24L3 27.49Z" fill="#e2e8ef"/>
+  <path d="M32 10.75L61 27.49L61 39.08L32 55.83L3 39.08L3 27.49Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M3 27.49L32 44.24L61 27.49" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 44.24L32 55.83" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 27.49L40.06 32.15" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M44.83 34.9L37.45 34.68L40.95 28.62Z" fill="#236ead"/>
+  <path d="M32 27.49L23.94 32.15" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M19.17 34.9L23.05 28.62L26.55 34.68Z" fill="#236ead"/>
+  <path d="M32 27.49L32 13.67" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 8.17L35.5 14.67L28.5 14.67Z" fill="#236ead"/>
+  <circle cx="32" cy="27.49" r="3" fill="#236ead"/>
+</svg>

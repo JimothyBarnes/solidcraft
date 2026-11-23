@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Face</title>
+  <path d="M3 26.42L32 43.16L32 54.32L3 37.58Z" fill="#b8c3cf"/>
+  <path d="M61 26.42L32 43.16L32 54.32L61 37.58Z" fill="#8e9faf"/>
+  <path d="M32 9.68L61 26.42L32 43.16L3 26.42Z" fill="#b9ddf8"/>
+  <path d="M32 9.68L61 26.42L61 37.58L32 54.32L3 37.58L3 26.42Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M3 26.42L32 43.16L61 26.42" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 43.16L32 54.32" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M31.52 16.09L49.88 26.7L41.18 31.72L22.82 21.12L14.12 26.14L32.48 36.74" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

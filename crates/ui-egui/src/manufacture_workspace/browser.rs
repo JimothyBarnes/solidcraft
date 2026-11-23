@@ -88,7 +88,7 @@ pub(crate) fn show(app: &mut SolveApp, rows: &mut Rows<'_>) {
         let key = format!("manufacture:browser:setup:{}", setup.id);
         let label = format!("{} (G{})", setup.name, 53 + u32::from(setup.work_offset));
         let is_active = active.as_deref() == Some(setup.id.as_str());
-        let item = Row { icon: "ws_manufacture", label: &label, name: true, radio: Some(is_active), ..Row::default() };
+        let item = Row { icon: "cam_setup", label: &label, name: true, radio: Some(is_active), ..Row::default() };
         let entries = || menu("cam.setup.delete", json!({"id": setup.id}));
         let (open, events) = branch(app, rows, &key, item, true, NodeMenu::Items(&entries));
         if events.iter().any(|event| matches!(event, Event::Activate(_))) {
@@ -104,7 +104,7 @@ pub(crate) fn show(app: &mut SolveApp, rows: &mut Rows<'_>) {
                 let label = format!("{} (T{})", op.name, op.tool);
                 let entries = || operation_menu(&op.id, op.suppressed, place, setup.operations.len(), &duplicate);
                 // An operation left out of the program is listed faintly.
-                let item = Row { depth: 1, icon: "edit", label: &label, name: true, dim: op.suppressed, ..Row::default() };
+                let item = Row { depth: 1, icon: operation_icon(&op.operation), label: &label, name: true, dim: op.suppressed, ..Row::default() };
                 let out = row(rows, &key, item, NodeMenu::Items(&entries));
                 asked(out.events, || Target::Operation(op.id.clone()), &mut asks);
                 // An operation whose toolpath can't be worked out says why, where it is listed.
@@ -122,7 +122,7 @@ pub(crate) fn show(app: &mut SolveApp, rows: &mut Rows<'_>) {
                 let key = format!("manufacture:browser:tool:{}", tool.number);
                 let label = format!("T{} {}", tool.number, tool.name);
                 let entries = || menu("cam.tool.delete", json!({"number": tool.number}));
-                let out = row(rows, &key, Row { depth: 1, icon: "library", label: &label, name: true, ..Row::default() }, NodeMenu::Items(&entries));
+                let out = row(rows, &key, Row { depth: 1, icon: "cam_tool", label: &label, name: true, ..Row::default() }, NodeMenu::Items(&entries));
                 asked(out.events, || Target::Tool(tool.number), &mut asks);
             }
         }
@@ -136,6 +136,22 @@ pub(crate) fn show(app: &mut SolveApp, rows: &mut Rows<'_>) {
                 let _ = app.run(&command, params);
             }
         }
+    }
+}
+
+/// The icon of an operation's row: its command's, by the kind of operation it is. A contour
+/// round the inside of openings has Bore's, the command that makes one.
+fn operation_icon(operation: &impl serde::Serialize) -> &'static str {
+    let kept = serde_json::to_value(operation).unwrap_or(Value::Null);
+    match (kept["kind"].as_str().unwrap_or_default(), kept["contour"]["side"].as_str()) {
+        ("face", _) => "cam_face",
+        ("contour", Some("inside")) => "cam_bore",
+        ("contour", _) => "cam_contour",
+        ("pocket", _) => "cam_pocket",
+        ("slot", _) => "cam_slot",
+        ("chamfer", _) => "cam_chamfer",
+        ("drill", _) => "cam_drill",
+        _ => "edit",
     }
 }
 

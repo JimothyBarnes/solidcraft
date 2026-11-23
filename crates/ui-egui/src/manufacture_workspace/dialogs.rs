@@ -549,7 +549,7 @@ impl ToolForm {
         let (kinds, coolants) = (labels(&KINDS), labels(&COOLANTS));
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_tool_create");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_tool"), "library", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_tool"), "cam_tool", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)
@@ -962,7 +962,7 @@ impl SetupForm {
         let ready = self.placed.result.is_ok();
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_setup_create");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_setup"), "ws_manufacture", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_setup"), "cam_setup", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)
@@ -1180,7 +1180,7 @@ impl FaceForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_face");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_face"), "edit", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_face"), "cam_face", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)
@@ -1540,7 +1540,7 @@ impl DrillForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_drill");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_drill"), "hole", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_drill"), "cam_drill", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)
@@ -1711,7 +1711,7 @@ impl PostForm {
         let units = labels(&UNITS);
         let ready = !self.setups.is_empty();
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_post"), "export", tr("cmd.cam_post"))
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_post"), "cam_post", tr("cmd.cam_post"))
             .placed(pivot, at)
             .fields()
             .actions(tr("manufacture.post_save"), tr("ui.cancel"), None)
@@ -1757,7 +1757,7 @@ impl Posted {
     fn show(self, ctx: &egui::Context) -> Option<Posted> {
         let written = solidcraft_ui_text::format("manufacture.posted_lines", &[("lines", &self.lines.to_string()), ("path", &self.path)]);
         let checked = solidcraft_ui_text::format("manufacture.posted_checked", &[("moves", &self.moves.to_string())]);
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_posted"), "export", tr("manufacture.posted_title"))
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_posted"), "cam_post", tr("manufacture.posted_title"))
             .actions("", tr("ui.close"), None)
             .show(ctx, true, |ui| {
                 ui_kit::text(ui, &written, ui_kit::Text::Report("manufacture_posted_lines", false));

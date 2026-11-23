@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Simulate</title>
+  <path d="M2 30.11L29 45.7L29 52.38L2 36.79Z" fill="#b8c3cf"/>
+  <path d="M56 30.11L29 45.7L29 52.38L56 36.79Z" fill="#8e9faf"/>
+  <path d="M29 14.53L56 30.11L29 45.7L2 30.11Z" fill="#b9ddf8"/>
+  <path d="M29 14.53L56 30.11L56 36.79L29 52.38L2 36.79L2 30.11Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M2 30.11L29 45.7L56 30.11" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M29 45.7L29 52.38" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M2 21.21L16.46 29.56L16.46 38.46L2 30.11Z" fill="#b8c3cf"/>
+  <path d="M43.46 13.97L16.46 29.56L16.46 38.46L43.46 22.88Z" fill="#328bd3"/>
+  <path d="M29 5.62L43.46 13.97L16.46 29.56L2 21.21Z" fill="#e2e8ef"/>
+  <path d="M2 21.21L16.46 29.56L16.46 38.46L2 30.11Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M43.46 13.97L16.46 29.56L16.46 38.46L43.46 22.88Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M29 5.62L43.46 13.97L16.46 29.56L2 21.21Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="46.5" cy="46.5" r="11" fill="#236ead" stroke="#ffffff" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M42.9 40.9L52.5 46.5L42.9 52.1Z" fill="#ffffff"/>
+</svg>

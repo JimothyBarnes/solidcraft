@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Slot</title>
+  <path d="M3 26.42L32 43.16L32 54.32L3 37.58Z" fill="#b8c3cf"/>
+  <path d="M61 26.42L32 43.16L32 54.32L61 37.58Z" fill="#8e9faf"/>
+  <path d="M32 9.68L61 26.42L32 43.16L3 26.42Z" fill="#e2e8ef"/>
+  <path d="M32 9.68L61 26.42L61 37.58L32 54.32L3 37.58L3 26.42Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M3 26.42L32 43.16L61 26.42" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 43.16L32 54.32" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M29.2 19.67L43.7 28.04A6.29 3.63 0 0 1 34.8 33.17L20.3 24.8A6.29 3.63 0 0 1 29.2 19.67Z" fill="#236ead"/>
+  <defs><clipPath id="cam-slot-opening"><path d="M29.2 19.67L43.7 28.04A6.29 3.63 0 0 1 34.8 33.17L20.3 24.8A6.29 3.63 0 0 1 29.2 19.67Z" fill="none"/></clipPath></defs>
+  <g clip-path="url(#cam-slot-opening)">
+  <path d="M29.2 26.36L43.7 34.73A6.29 3.63 0 0 1 34.8 39.87L20.3 31.5A6.29 3.63 0 0 1 29.2 26.36Z" fill="#328bd3"/>
+  </g>
+  <path d="M29.2 19.67L43.7 28.04A6.29 3.63 0 0 1 34.8 33.17L20.3 24.8A6.29 3.63 0 0 1 29.2 19.67Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

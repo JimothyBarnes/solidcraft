@@ -303,7 +303,7 @@ impl PocketForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_pocket");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_pocket"), "edit", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_pocket"), "cam_pocket", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)

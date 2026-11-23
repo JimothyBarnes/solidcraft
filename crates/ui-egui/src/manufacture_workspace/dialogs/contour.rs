@@ -416,7 +416,7 @@ impl ContourForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_contour");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_contour"), "edit", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_contour"), "cam_contour", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)

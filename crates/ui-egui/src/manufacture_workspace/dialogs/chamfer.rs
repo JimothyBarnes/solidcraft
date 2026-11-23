@@ -198,7 +198,7 @@ impl ChamferForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_chamfer");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_chamfer"), "edit", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_chamfer"), "cam_chamfer", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)

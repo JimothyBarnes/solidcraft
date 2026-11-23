@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Drill</title>
+  <path d="M4.79 35.62L32 51.33L32 61L4.79 45.29Z" fill="#b8c3cf"/>
+  <path d="M59.21 35.62L32 51.33L32 61L59.21 45.29Z" fill="#8e9faf"/>
+  <path d="M32 19.92L59.21 35.62L32 51.33L4.79 35.62Z" fill="#e2e8ef"/>
+  <path d="M32 19.92L59.21 35.62L59.21 45.29L32 61L4.79 45.29L4.79 35.62Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M4.79 35.62L32 51.33L59.21 35.62" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 51.33L32 61" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M25.19 35.62A6.81 3.93 0 1 0 38.81 35.62A6.81 3.93 0 1 0 25.19 35.62Z" fill="#236ead"/>
+  <defs><clipPath id="cam-drill-opening"><path d="M25.19 35.62A6.81 3.93 0 1 0 38.81 35.62A6.81 3.93 0 1 0 25.19 35.62Z" fill="none"/></clipPath></defs>
+  <g clip-path="url(#cam-drill-opening)">
+  <path d="M25.19 41.67A6.81 3.93 0 1 0 38.81 41.67A6.81 3.93 0 1 0 25.19 41.67Z" fill="#328bd3"/>
+  </g>
+  <path d="M25.19 35.62A6.81 3.93 0 1 0 38.81 35.62A6.81 3.93 0 1 0 25.19 35.62Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M27.12 16.9L27.12 31.4A4.88 2.82 0 0 0 36.88 31.4L36.88 16.9Z" fill="#328bd3"/>
+  <path d="M33.71 16.9L33.71 34.04A4.88 2.82 0 0 0 36.88 31.4L36.88 16.9Z" fill="#236ead"/>
+  <path d="M27.12 16.9L27.12 31.4A4.88 2.82 0 0 0 36.88 31.4L36.88 16.9Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M27.12 31.4A4.88 2.82 0 0 0 36.88 31.4L32 36.83Z" fill="#236ead"/>
+  <path d="M27.12 31.4A4.88 2.82 0 0 0 36.88 31.4L32 36.83Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M27.12 4.81L27.12 16.9A4.88 2.82 0 0 0 36.88 16.9L36.88 4.81Z" fill="#b8c3cf"/>
+  <path d="M33.71 4.81L33.71 19.54A4.88 2.82 0 0 0 36.88 16.9L36.88 4.81Z" fill="#8e9faf"/>
+  <path d="M27.12 4.81L27.12 16.9A4.88 2.82 0 0 0 36.88 16.9L36.88 4.81Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M27.12 4.81A4.88 2.82 0 1 0 36.88 4.81A4.88 2.82 0 1 0 27.12 4.81Z" fill="#e2e8ef" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

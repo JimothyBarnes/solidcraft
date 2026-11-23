@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Tool</title>
+  <path d="M24 5L40 5L40 24L24 24Z" fill="#b8c3cf" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M35.8 6.3L38.7 6.3L38.7 22.7L35.8 22.7Z" fill="#8e9faf"/>
+  <path d="M24 24L40 24L40 53Q40 56 37 56L27 56Q24 56 24 53Z" fill="#328bd3" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <defs><clipPath id="cam-tool-flutes"><path d="M24 24L40 24L40 53Q40 56 37 56L27 56Q24 56 24 53Z" fill="none"/></clipPath></defs>
+  <g clip-path="url(#cam-tool-flutes)">
+  <path d="M24 27L40 35" fill="none" stroke="#b9ddf8" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M24 38L40 46" fill="none" stroke="#b9ddf8" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M24 49L40 57" fill="none" stroke="#b9ddf8" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+  <path d="M24 24L40 24L40 53Q40 56 37 56L27 56Q24 56 24 53Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

@@ -202,7 +202,7 @@ impl BoreForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&None, "cmd.cam_op_bore");
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_bore"), "hole", &title)
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_bore"), "cam_bore", &title)
             .placed(pivot, at)
             .fields()
             .actions(ok, tr("ui.cancel"), None)

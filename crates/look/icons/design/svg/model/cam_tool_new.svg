@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Add Tool</title>
+  <path d="M17 5L31 5L31 24L17 24Z" fill="#b8c3cf" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M26.8 6.3L29.7 6.3L29.7 22.7L26.8 22.7Z" fill="#8e9faf"/>
+  <path d="M17 24L31 24L31 53Q31 56 28 56L20 56Q17 56 17 53Z" fill="#328bd3" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <defs><clipPath id="cam-tool-new-flutes"><path d="M17 24L31 24L31 53Q31 56 28 56L20 56Q17 56 17 53Z" fill="none"/></clipPath></defs>
+  <g clip-path="url(#cam-tool-new-flutes)">
+  <path d="M17 27L31 35" fill="none" stroke="#b9ddf8" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M17 38L31 46" fill="none" stroke="#b9ddf8" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M17 49L31 57" fill="none" stroke="#b9ddf8" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+  <path d="M17 24L31 24L31 53Q31 56 28 56L20 56Q17 56 17 53Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="45" cy="45" r="11" fill="#236ead" stroke="#ffffff" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M45 40L45 50" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M40 45L50 45" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

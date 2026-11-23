@@ -131,7 +131,7 @@ impl SimForm {
             self.drawn_setup = Some(self.setup);
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
-        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_simulate"), "inspect", tr("cmd.cam_simulate"))
+        let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_simulate"), "cam_simulate", tr("cmd.cam_simulate"))
             .placed(pivot, at)
             .fields()
             .actions("", tr("ui.close"), None)

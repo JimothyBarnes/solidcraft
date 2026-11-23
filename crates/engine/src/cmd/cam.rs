@@ -30,7 +30,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.data", "Manufacture Data", crate::checked!("cam.data", data)).icon("inspect").noundo().read_only().doc_only()
         .contract(&TypedContract::<CamDataParams>::new()).output(output_schema_for::<CamData>)
         .params("→ data: the design's Manufacture data {format, tools, setups} (empty when it has none), setups, tools, operations: counts"),
-    CommandSpec::new("cam.tool.create", "Add Tool", crate::checked!("cam.tool.create", tool_create)).icon("edit").doc_only()
+    CommandSpec::new("cam.tool.create", "Add Tool", crate::checked!("cam.tool.create", tool_create)).icon("cam_tool_new").doc_only()
         .contract(&TypedContract::<CamToolCreateParams>::new()).output(output_schema_for::<CamToolWritten>)
         .params("tool: a tool as in a tool library file, its number free in the design → number, tools: how many the design has"),
     CommandSpec::new("cam.tool.edit", "Edit Tool", crate::checked!("cam.tool.edit", tool_edit)).icon("edit").doc_only()
@@ -42,7 +42,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.tool.list", "Tool Library", crate::checked!("cam.tool.list", tool_list)).icon("library").noundo().read_only().doc_only()
         .contract(&TypedContract::<crate::schema::cam::CamToolListParams>::new()).output(output_schema_for::<crate::schema::cam::CamToolList>)
         .params("search?: words to look for in a tool's number (T3), name, kind and diameter, every one of them, in any case (default: every tool) → tools: [{number, name, kind, diameter, flutes, flute_length, overall_length, stick_out, operations: how many of the design's operations use it}] by number, lengths in mm; of: how many tools the design has"),
-    CommandSpec::new("cam.setup.create", "New Setup", crate::checked!("cam.setup.create", setup_create)).icon("edit").doc_only()
+    CommandSpec::new("cam.setup.create", "New Setup", crate::checked!("cam.setup.create", setup_create)).icon("cam_setup").doc_only()
         .contract(&TypedContract::<CamSetupCreateParams>::new()).output(output_schema_for::<CamSetupWritten>)
         .params("name?, machine?, wcs?, work_offset?: 1-6 (G54-G59), stock?, model_bodies?, fixture_bodies?, safe_heights? → id; defaults: stock 1 mm over on the sides and top, WCS at the stock's top centre, G54, clearance 25 mm, retract 5 mm"),
     CommandSpec::new("cam.setup.edit", "Edit Setup", crate::checked!("cam.setup.edit", setup_edit)).icon("edit").doc_only()
@@ -72,25 +72,25 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.manual", "Hand-made Toolpath", crate::checked!("cam.op.manual", op_manual)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpManualParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
-    CommandSpec::new("cam.op.drill", "Drill", crate::checked!("cam.op.drill", op_drill)).icon("edit").doc_only()
+    CommandSpec::new("cam.op.drill", "Drill", crate::checked!("cam.op.drill", op_drill)).icon("cam_drill").doc_only()
         .contract(&TypedContract::<CamOpDrillParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a drill, spot drill, reamer, tap or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle ({type: drill, dwell} | {type: peck | chip_break, peck} | {type: ream, dwell}: fed in and fed back out, for a reamer; a tap's is {type: tap, pitch}, its own pitch, and it takes a speed and no feed), order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
-    CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("edit").doc_only()
+    CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("cam_face").doc_only()
         .contract(&TypedContract::<CamOpFaceParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
-    CommandSpec::new("cam.op.contour", "Contour", crate::checked!("cam.op.contour", op_contour)).icon("edit").doc_only()
+    CommandSpec::new("cam.op.contour", "Contour", crate::checked!("cam.op.contour", op_contour)).icon("cam_contour").doc_only()
         .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, lead?: mm (the arcs on to the wall and off it; 0 for none), tabs?: {count, width?, height?}, passes?: how many passes sideways at each level, the furthest from the wall first (outside; default 1), stepover?: mm between them (default 0.4 of the tool's diameter), side?: outside | inside, openings?: [[x, y], …] (inside: a point in each opening to go round), ramp_angle?: radians (inside: default 3 degrees), rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock; or, inside, round the inside of each opening's wall (a pocket's, a window's, a round hole's: read from the model where its point is, down to the floor under the point or through the part), the tool going down a ramp along the wall"),
-    CommandSpec::new("cam.op.bore", "Bore", crate::checked!("cam.op.bore", op_bore)).icon("edit").doc_only()
+    CommandSpec::new("cam.op.bore", "Bore", crate::checked!("cam.op.bore", op_bore)).icon("cam_bore").doc_only()
         .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill narrower than the holes, contour: {openings: [[x, y], …] (a point in each hole, in the WCS), bottom?: Z (default the hole's floor, or through the part), top?, stepdown?, leave?, direction?, lead?, ramp_angle?, rpm?, feed?} → id of the new operation, named Bore: an inside contour (as cam.op.contour with side inside) for round holes wider than the tool, cut down a helix along their wall and once round at each level"),
-    CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("edit").doc_only()
+    CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("cam_pocket").doc_only()
         .contract(&TypedContract::<CamOpPocketParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring"),
-    CommandSpec::new("cam.op.slot", "Slot", crate::checked!("cam.op.slot", op_slot)).icon("edit").doc_only()
+    CommandSpec::new("cam.op.slot", "Slot", crate::checked!("cam.op.slot", op_slot)).icon("cam_slot").doc_only()
         .contract(&TypedContract::<crate::schema::cam::CamOpSlotParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill no wider than the slots, slot: {slots: [[x, y]] a point in each slot, top?, bottom?: Z (default each slot's floor, or the part's bottom where it goes through), stepdown?, ramp_angle?, rpm?, feed?} → id of the new operation: each slot (read from the model at its point when the toolpath is worked out) milled along its middle line, the tool going down along the line to and fro no steeper than the ramp angle and once along it at each level; a tool narrower than a slot leaves the same on each wall, which the toolpath's notes say"),
-    CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("edit").doc_only()
+    CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("cam_chamfer").doc_only()
         .contract(&TypedContract::<CamOpChamferParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), edges?: outside | all, direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge; with edges all, round the inside of every opening in the part's top and round what stands in it as well, but for an opening too narrow for the tool or not open as far down as its point, which is left sharp and said"),
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
@@ -108,13 +108,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.duplicate", "Duplicate Operation", crate::checked!("cam.op.duplicate", op_duplicate)).icon("copy").doc_only()
         .contract(&TypedContract::<CamOpDuplicateParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("id, name? → a copy of the operation right after it, with an id of its own (its name the operation's with (2) when none is given)"),
-    CommandSpec::new("cam.simulate", "Simulate", crate::checked!("cam.simulate", simulate)).icon("inspect").noundo().read_only()
+    CommandSpec::new("cam.simulate", "Simulate", crate::checked!("cam.simulate", simulate)).icon("cam_simulate").noundo().read_only()
         .contract(&TypedContract::<CamSimulateParams>::new()).output(output_schema_for::<CamSimulated>)
         .params("setup: id, cell?: mm → the setup's operations cut from its stock on a grid of heights: stock_volume, removed, over_part, beside_part (mm3), operations: [{id, name, removed, gouges, rapid_hits, body_hits, skipped?}], gouges and rapid_hits: [{operation, move, at: [x, y, z], depth}] with their counts, body_hits: [{operation, move, part: shank | holder, at, depth}] where a tool's shank or holder is in material, below_stock; the part's heights are read from the bodies' exact faces; a check as fine as its cells (cell, cells, tolerance), never a proof that a program is safe to run"),
-    CommandSpec::new("cam.setup.sheet", "Setup Sheet", crate::checked!("cam.setup.sheet", setup_sheet)).icon("inspect").noundo().read_only()
+    CommandSpec::new("cam.setup.sheet", "Setup Sheet", crate::checked!("cam.setup.sheet", setup_sheet)).icon("cam_setup_sheet").noundo().read_only()
         .contract(&TypedContract::<crate::schema::cam::CamSetupSheetParams>::new()).output(output_schema_for::<crate::schema::cam::CamSetupSheet>)
         .params("setup: id, units?: mm | inch (default the design's), date?: text to write on it, path?: also write it to this .html file, overwrite?: replace an existing file (default false) → html: one page for the shop with the stock, the work origin, the tools (how far each sticks out, the lowest its tip goes), the operations in order with speeds, feeds and times, the setup from above, and what to check (the operations' and the simulation's notes, a tool that goes deeper than it sticks out)"),
-    CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("inspect").noundo().read_only()
+    CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("cam_post").noundo().read_only()
         .contract(&TypedContract::<CamPostParams>::new()).output(output_schema_for::<CamPosted>)
         .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
 ];

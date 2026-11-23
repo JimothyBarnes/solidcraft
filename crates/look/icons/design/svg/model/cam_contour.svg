@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Contour</title>
+  <path d="M32 21.2L61 37.94L32 54.68L3 37.94Z" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M12.35 26.06L32 37.4L32 49.28L12.35 37.94Z" fill="#b8c3cf"/>
+  <path d="M51.65 26.06L32 37.4L32 49.28L51.65 37.94Z" fill="#8e9faf"/>
+  <path d="M32 14.72L51.65 26.06L32 37.4L12.35 26.06Z" fill="#e2e8ef"/>
+  <path d="M32 14.72L51.65 26.06L51.65 37.94L32 49.28L12.35 37.94L12.35 26.06Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M12.35 26.06L32 37.4L51.65 26.06" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 37.4L32 49.28" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>
