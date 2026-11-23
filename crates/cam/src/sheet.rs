@@ -106,13 +106,12 @@ fn escaped(text: &str) -> String {
     out
 }
 
-/// A kind in words after a name, unless the name says it already ("8 mm Drill" is a drill).
+/// A kind in words after a name, less the words the name has already: "8 mm Drill" is a drill
+/// and says no more, and a "Contour 2" that goes round the inside says only "inside".
 fn kind_after(name: &str, kind: &str) -> String {
-    if kind.is_empty() || name.to_lowercase().contains(&kind.to_lowercase()) {
-        String::new()
-    } else {
-        format!(" <span class=\"note\">{}</span>", escaped(kind))
-    }
+    let name = name.to_lowercase();
+    let unsaid: Vec<&str> = kind.split_whitespace().filter(|word| !name.contains(&word.to_lowercase())).collect();
+    if unsaid.is_empty() { String::new() } else { format!(" <span class=\"note\">{}</span>", escaped(&unsaid.join(" "))) }
 }
 
 /// Minutes as `min:s`, to the second.

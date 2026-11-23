@@ -281,3 +281,23 @@ fn hostile_sheets_are_refused_never_written() {
     s.notes = vec![String::new(); MAX_SHEET_ROWS + 1];
     assert!(s.html().unwrap_err().to_string().contains("at most 10000"));
 }
+
+#[test]
+fn a_kind_is_said_in_the_words_its_name_does_not_have() {
+    let mut named = sheet();
+    named.operations = vec![
+        operation("Contour 2", 4, "inside contour", -21.0, 1.0),
+        operation("Bore 3", 4, "inside contour", -9.0, 1.0),
+        operation("Tap M6", 4, "tap", -13.0, 1.0),
+        operation("Holes", 4, "drill", -13.0, 1.0),
+    ];
+    let html = named.html().unwrap();
+    for row in [
+        "<td>Contour 2 <span class=\"note\">inside</span></td>",
+        "<td>Bore 3 <span class=\"note\">inside contour</span></td>",
+        "<td>Tap M6</td>",
+        "<td>Holes <span class=\"note\">drill</span></td>",
+    ] {
+        assert!(html.contains(row), "no {row:?} in:\n{html}");
+    }
+}
