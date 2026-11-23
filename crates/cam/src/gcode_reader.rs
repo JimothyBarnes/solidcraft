@@ -21,7 +21,7 @@
 use solidcore_record::Vec3;
 
 use crate::cycle::{DrillCycle, G98Rule};
-use crate::toolpath::{ARC_RADIUS_TOLERANCE, ArcDirection, Coolant, Move, Plane, SpindleDirection, Toolpath};
+use crate::toolpath::{ARC_RADIUS_TOLERANCE, ArcDirection, Coolant, Move, Plane, SpindleDirection, Toolpath, arc_radius_tolerance};
 use crate::units::{LengthUnit, MAX_COORDINATE};
 use crate::{Error, MAX_MOVES, Result};
 
@@ -784,8 +784,10 @@ impl Machine {
         let center = plane.join(su + ou.map_or(0.0, len), sv + ov.map_or(0.0, len), sw);
         let (cu, cv, _) = plane.split(center);
         let (r0, r1) = ((su - cu).hypot(sv - cv), (eu - cu).hypot(ev - cv));
-        if !((r0 - r1).abs() <= ARC_RADIUS_TOLERANCE) {
-            return Err(format!("arc start is {r0} mm from its centre and its end {r1} mm (at most {ARC_RADIUS_TOLERANCE} mm apart)"));
+        // The limit of the units the program is in: 0.002 mm, or 0.0002 inch.
+        let limit = arc_radius_tolerance(self.units);
+        if !((r0 - r1).abs() <= limit) {
+            return Err(format!("arc start is {r0} mm from its centre and its end {r1} mm (at most {limit} mm apart)"));
         }
         Ok(center)
     }

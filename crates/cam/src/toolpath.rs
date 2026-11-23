@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use solidcore_record::{Vec2, Vec3};
 
 use crate::cycle::{self, CycleMotion, DrillCycle};
-use crate::units::MAX_COORDINATE;
+use crate::units::{LengthUnit, MAX_COORDINATE, MM_PER_INCH};
 use crate::{Error, Result};
 
 /// The most moves one toolpath may hold.
@@ -21,10 +21,24 @@ pub const MAX_SPINDLE_RPM: f64 = 200_000.0;
 pub const MAX_DWELL_SECONDS: f64 = 3_600.0;
 /// The highest tool number accepted.
 pub const MAX_TOOL_NUMBER: u32 = 99_999;
-/// How far the start and end of an arc may differ in distance from its centre, in mm. This is
-/// RS274/NGC's limit for centre-format arcs (NIST IR 6556 §3.5.3.2), so every arc we accept a
-/// controller following it accepts too.
+/// How far the start and end of an arc may differ in distance from its centre in a millimetre
+/// program, in mm. This is RS274/NGC's limit for centre-format arcs (NIST IR 6556 §3.5.3.2), so
+/// every arc a millimetre program of ours has, a controller following it accepts.
 pub const ARC_RADIUS_TOLERANCE: f64 = 0.002;
+/// The same limit in an inch program, in mm: 0.0002 inch (the same section). An arc of a
+/// toolpath is held to this, the wider of the two, so that what is read back from an inch
+/// program is a toolpath; a program is held to the limit of the units it is written in
+/// ([`arc_radius_tolerance`]), by the reader and by the posts.
+pub const ARC_RADIUS_TOLERANCE_INCH: f64 = 0.0002 * MM_PER_INCH;
+
+/// How far the start and end of an arc may differ in distance from its centre in a program in
+/// `units`, in mm.
+pub fn arc_radius_tolerance(units: LengthUnit) -> f64 {
+    match units {
+        LengthUnit::Millimetre => ARC_RADIUS_TOLERANCE,
+        LengthUnit::Inch => ARC_RADIUS_TOLERANCE_INCH,
+    }
+}
 /// The smallest arc radius accepted, in mm.
 pub(crate) const MIN_ARC_RADIUS: f64 = 1e-3;
 /// Start and end closer than this in the arc's plane, in mm, make a full circle.
@@ -197,6 +211,12 @@ pub(crate) struct ArcGeom {
 
 impl ArcGeom {
     pub(crate) fn new(from: Vec3, to: Vec3, center: Vec3, plane: Plane, direction: ArcDirection) -> std::result::Result<Self, String> {
+        Self::within(from, to, center, plane, direction, ARC_RADIUS_TOLERANCE_INCH)
+    }
+
+    /// As [`ArcGeom::new`], for an arc of a program, which is held to the limit of its units: its
+    /// start and end at most `apart` mm apart in distance from its centre.
+    pub(crate) fn within(from: Vec3, to: Vec3, center: Vec3, plane: Plane, direction: ArcDirection, apart: f64) -> std::result::Result<Self, String> {
         let (su, sv, w0) = plane.split(from);
         let (eu, ev, w1) = plane.split(to);
         let (cu, cv, _) = plane.split(center);
@@ -205,8 +225,8 @@ impl ArcGeom {
         if !(r0 >= MIN_ARC_RADIUS) {
             return Err(format!("arc radius {r0} mm is below {MIN_ARC_RADIUS} mm"));
         }
-        if !((r0 - r1).abs() <= ARC_RADIUS_TOLERANCE) {
-            return Err(format!("arc start is {r0} mm from the centre but its end is {r1} mm (at most {ARC_RADIUS_TOLERANCE} mm apart)"));
+        if !((r0 - r1).abs() <= apart) {
+            return Err(format!("arc start is {r0} mm from the centre but its end is {r1} mm (at most {apart} mm apart)"));
         }
         let start_angle = (sv - cv).atan2(su - cu);
         let end_angle = (ev - cv).atan2(eu - cu);

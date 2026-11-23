@@ -173,6 +173,8 @@ fn hostile_programs_are_refused_with_their_line_and_reason() {
         ("G0 A10", "rotary"),
         ("F1 G2 X1 Y1", "needs I and J"),
         ("F1 G2 X1.1 Y0 I0.5 J0", "at most 0.002"),
+        ("G21 F1 G2 X1.0038 Y0 I0.5 J0", "at most 0.002"),
+        ("G20 F1 G2 X1.0003 Y0 I0.5 J0", "at most 0.00508"),
         ("F1 G2 X1 Y0 I0.5 R1", "not both"),
         ("F1 G2 X0 Y0 R1", "end away"),
         ("F1 G2 X10 Y0 R1", "too small"),
@@ -360,4 +362,23 @@ fn g84_reads_as_a_tapped_hole_whose_pitch_is_its_feed_over_the_speed() {
     let inch = moves("G20 S450 M3\nG0 X0 Y0 Z1\nG99 G84 X0.75 Y0.75 Z-0.65 R0.1 F32.1429");
     let Move::Drill { cycle: DrillCycle::Tap { pitch }, feed, .. } = inch[2] else { panic!("{:?}", inch[2]) };
     assert!((pitch - MM_PER_INCH / 14.0).abs() < 1e-5 && (feed - 32.1429 * MM_PER_INCH).abs() < 1e-9, "{pitch} {feed}");
+}
+
+#[test]
+fn an_arc_is_held_to_the_limit_of_the_units_its_program_is_in() {
+    // NIST IR 6556 section 3.5.3.2: the start and the end of a centre-format arc may differ in
+    // distance from its centre by 0.0002 inch in an inch program and by 0.002 mm in a millimetre
+    // one. A half turn about (0.5, 0) that ends 0.00015 off its circle: read in inches that is
+    // within the limit, and an arc; the same figures in millimetres are 0.00015 mm off, an arc
+    // too; 0.0038 mm off (what 0.00015 inch is) is too far for a millimetre program.
+    let half =
+        |program: &str| read(program, &ReadSettings::default()).map(|r| r.toolpath.moves.iter().filter(|m| matches!(m, Move::Arc { .. })).count());
+    assert_eq!(half("G20 F1\nG2 X1.00015 Y0 I0.5 J0").unwrap(), 1);
+    assert_eq!(half("G21 F1\nG2 X1.00015 Y0 I0.5 J0").unwrap(), 1);
+    assert!(half("G21 F1\nG2 X1.0038 Y0 I0.5 J0").is_err());
+    assert!(half("G20 F1\nG2 X1.00021 Y0 I0.5 J0").is_err());
+    // Read from inches, the arc is in millimetres like every move: 25.4 times the figures.
+    let r = read("G20 F1\nG2 X1.00015 Y0 I0.5 J0", &ReadSettings::default()).unwrap();
+    let Some(Move::Arc { to, center, .. }) = r.toolpath.moves.first() else { panic!("{:?}", r.toolpath.moves) };
+    assert!((to.x - 25.40381).abs() < 1e-9 && (center.x - 12.7).abs() < 1e-9, "{to:?} {center:?}");
 }

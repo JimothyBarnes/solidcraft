@@ -587,3 +587,48 @@ fn from_machine_home_the_tool_goes_across_before_it_comes_down() {
     let posted = Post::builtin("haas_mill").unwrap().write(&plain, &ctx()).unwrap();
     assert!(posted.text.contains("\nG0 X10. Y0. Z5.\n"), "{}", posted.text);
 }
+
+#[test]
+fn an_inch_program_keeps_its_small_arcs_as_arcs() {
+    // Four hundred quarter turns of 0.5 to 2 mm radius about centres off any grid. Rounded to
+    // four decimals of an inch (0.00254 mm a step), the start's and the end's distances from the
+    // centre come out more than 0.002 mm apart for 161 of them, which were written as lines
+    // while every program was held to the millimetre limit. None comes out more than 0.0002
+    // inch (0.00508 mm, two steps) apart: an inch program is held to the inch limit (NIST IR
+    // 6556 section 3.5.3.2), so every one is written as the arc it is. A millimetre program, on
+    // its finer grid, keeps them all too.
+    let mut moves = vec![
+        Move::ToolChange { tool: 1 },
+        Move::Spindle { rpm: 1200.0, direction: SpindleDirection::Clockwise },
+        Move::Rapid { to: p(0.0, 0.0, 5.0) },
+        Move::Linear { to: p(0.0, 0.0, -1.0), feed: 200.0 },
+    ];
+    for k in 0..400 {
+        let (radius, i) = ([0.5, 1.0, 1.5, 2.0][k % 4], k as f64);
+        let (cx, cy) = (0.37 * i + 0.0123, 53.0 * (0.61 * i).sin() + 0.0456);
+        moves.push(Move::Linear { to: p(cx + radius, cy, -1.0), feed: 400.0 });
+        moves.push(Move::Arc {
+            to: p(cx, cy + radius, -1.0),
+            center: p(cx, cy, -1.0),
+            plane: Plane::Xy,
+            direction: ArcDirection::CounterClockwise,
+            feed: 400.0,
+        });
+    }
+    moves.extend([Move::Rapid { to: p(0.0, 0.0, 5.0) }, Move::SpindleStop]);
+    let tp = Toolpath { start: p(0.0, 0.0, 50.0), moves };
+    let as_lines = |units: LengthUnit| {
+        let posted = Post::builtin("haas_mill").unwrap().write(&tp, &ProgramContext { units, ..ctx() }).unwrap();
+        // What was written as an arc reads back within the limit of the program's units.
+        let mut at = posted.read_back.toolpath.start;
+        for m in &posted.read_back.toolpath.moves {
+            if let Move::Arc { to, center, .. } = m {
+                let apart = ((at.x - center.x).hypot(at.y - center.y) - (to.x - center.x).hypot(to.y - center.y)).abs();
+                assert!(apart <= crate::toolpath::arc_radius_tolerance(units) + 1e-9, "{apart} mm apart in {units:?}");
+            }
+            at = m.end(at);
+        }
+        posted.notes.iter().filter(|note| note.contains("arc written as")).count()
+    };
+    assert_eq!((as_lines(LengthUnit::Millimetre), as_lines(LengthUnit::Inch)), (0, 0), "arcs written as lines in millimetres and in inches");
+}

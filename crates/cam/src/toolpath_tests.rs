@@ -80,10 +80,12 @@ fn arcs_in_the_side_planes_follow_g18_and_g19_handedness() {
 
 #[test]
 fn an_arc_whose_ends_are_not_equally_far_from_its_centre_is_refused() {
-    // NIST's limit is 0.002 mm: 0.0019 passes, 0.0021 does not.
-    let ok = arc(p(10.0, 0.0, 0.0), p(0.0, 10.0019, 0.0), Vec3::default(), Plane::Xy, ArcDirection::CounterClockwise);
+    // NIST's limits are 0.002 mm in a millimetre program and 0.0002 inch, 0.00508 mm, in an inch
+    // one. A toolpath is held to the wider, so that an inch program reads back as one (a post
+    // writing millimetres holds its own arcs to the narrower): 0.0050 passes, 0.0052 does not.
+    let ok = arc(p(10.0, 0.0, 0.0), p(0.0, 10.0050, 0.0), Vec3::default(), Plane::Xy, ArcDirection::CounterClockwise);
     assert!(ok.validate().is_ok());
-    let bad = arc(p(10.0, 0.0, 0.0), p(0.0, 10.0021, 0.0), Vec3::default(), Plane::Xy, ArcDirection::CounterClockwise);
+    let bad = arc(p(10.0, 0.0, 0.0), p(0.0, 10.0052, 0.0), Vec3::default(), Plane::Xy, ArcDirection::CounterClockwise);
     assert!(matches!(bad.validate(), Err(Error::BadMove { index: 0, .. })));
     let degenerate = arc(Vec3::default(), Vec3::default(), Vec3::default(), Plane::Xy, ArcDirection::Clockwise);
     assert!(degenerate.validate().is_err());

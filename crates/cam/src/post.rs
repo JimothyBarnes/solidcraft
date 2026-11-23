@@ -17,7 +17,7 @@ use solidcore_record::Vec3;
 
 use crate::cycle::{self, CycleMotion, DrillCycle, G98Rule};
 use crate::gcode_reader::{ReadBack, ReadSettings, read};
-use crate::toolpath::{ArcDirection, ArcGeom, Coolant, Move, Plane, SpindleDirection, Toolpath};
+use crate::toolpath::{ArcDirection, ArcGeom, Coolant, Move, Plane, SpindleDirection, Toolpath, arc_radius_tolerance};
 use crate::units::LengthUnit;
 use crate::{Error, Result};
 
@@ -859,7 +859,8 @@ impl<'a> Writer<'a> {
         let (ou_text, ou_back) = self.length(cu - su);
         let (ov_text, ov_back) = self.length(cv - sv);
         let center_back = plane.join(su + ou_back, sv + ov_back, 0.0);
-        let read = ArcGeom::new(start_back, end_back, center_back, plane, direction).ok()?;
+        // The control reads the program in its own units and holds an arc to their limit.
+        let read = ArcGeom::within(start_back, end_back, center_back, plane, direction, arc_radius_tolerance(self.ctx.units)).ok()?;
         if !((read.sweep - sweep).abs() <= 1e-3 * TAU) {
             return None;
         }
@@ -930,7 +931,8 @@ fn compare(written: &Toolpath, read: &Toolpath, tol: f64, w: &Writer<'_>) -> Res
             ) => {
                 let (cu, cv, _) = plane.split(c);
                 let (du, dv, _) = plane.split(d);
-                let lengths = ArcGeom::new(at_w, p, c, plane, direction).ok().zip(ArcGeom::new(at_r, q, d, plane2, direction2).ok());
+                let read = ArcGeom::within(at_r, q, d, plane2, direction2, arc_radius_tolerance(w.ctx.units));
+                let lengths = ArcGeom::new(at_w, p, c, plane, direction).ok().zip(read.ok());
                 plane == plane2
                     && direction == direction2
                     && near(p, q, tol)
