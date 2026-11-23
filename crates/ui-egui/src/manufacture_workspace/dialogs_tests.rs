@@ -1069,7 +1069,7 @@ fn contour_cuts_round_the_part_and_keeps_only_what_is_typed() {
     // and its tool.
     assert_eq!(
         data(&mut h)["setups"][0]["operations"][0]["operation"],
-        json!({"kind": "contour", "contour": {"top": null, "bottom": null, "stepdown": null, "leave": null, "direction": "climb", "clear": null, "rpm": null, "feed": null, "lead": null, "tabs": null, "side": "outside", "openings": [], "ramp_angle": null}})
+        json!({"kind": "contour", "contour": {"top": null, "bottom": null, "stepdown": null, "leave": null, "direction": "climb", "clear": null, "rpm": null, "feed": null, "lead": null, "tabs": null, "passes": null, "stepover": null, "side": "outside", "openings": [], "ramp_angle": null}})
     );
     assert_eq!(scene::counts(&h.app), drawn, "the operation's own toolpath, where the preview was");
     let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
@@ -1169,7 +1169,7 @@ fn contour_says_why_it_would_cut_into_the_part_and_its_form_changes_only_what_it
     assert_eq!((kept["id"].as_str(), kept["name"].as_str(), kept["tool"].as_u64()), (Some("op-2"), Some("Contour 2"), Some(1)));
     assert_eq!(
         kept["operation"]["contour"],
-        json!({"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "leave": 0.2, "direction": "climb", "clear": 4.0, "rpm": null, "feed": null, "lead": null, "tabs": null, "side": "outside", "openings": [], "ramp_angle": null})
+        json!({"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "leave": 0.2, "direction": "climb", "clear": 4.0, "rpm": null, "feed": null, "lead": null, "tabs": null, "passes": null, "stepover": null, "side": "outside", "openings": [], "ramp_angle": null})
     );
     // A double click on the row opens the same form.
     h.step(&json!({"click": {"browser": "Contour 1 (T1)"}, "double": true})).unwrap();
@@ -1873,4 +1873,66 @@ fn simulate_shows_the_stock_part_of_the_way_with_the_tool_and_plays_it_through()
     let form = simulate_form(&mut h);
     assert!(form.along.is_none() && !form.playing && form.tool().is_none());
     assert_eq!(form.simulated().expect("a simulation").stock.removed, whole);
+}
+
+#[test]
+fn contour_takes_passes_sideways_and_keeps_its_tabs_for_one() {
+    use std::f64::consts::PI;
+    let mut h = harness();
+    // The block (60 x 40 x 20) with a 10 mm end mill (T1).
+    block(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.contour");
+    h.frames(3);
+    // One pass as it opens, with its tabs offered and no stepover to ask for.
+    let round = |h: &mut Harness| contour_form(h).worked.get().and_then(|(_, preview)| preview.numbers["round"].as_f64()).unwrap();
+    let form = contour_form(&mut h);
+    assert_eq!((form.passes, form.stepover, form.typed_stepover), (1, 4.0, false));
+    assert!((round(&mut h) - (200.0 + 10.0 * PI)).abs() < 1e-6);
+    assert!(h.widget(tr("manufacture.contour_passes")).is_some() && h.widget(tr("manufacture.contour_tabs")).is_some());
+    assert!(h.widget(tr("manufacture.face_stepover")).is_none() && h.widget(tr("manufacture.contour_passes_note")).is_none());
+    // All the way down nothing holds the part, and the form says so; down to a shoulder's floor
+    // the part stands where it was, and the form does not.
+    assert!(h.widget(tr("manufacture.contour_loose")).is_some());
+    let form = contour_form(&mut h);
+    (form.bottom, form.typed_bottom) = (-9.0, true);
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.contour_loose")).is_none());
+    contour_form(&mut h).typed_bottom = false;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.contour_loose")).is_some());
+    // Three passes: 5, 9 and 13 out from the block, four tenths of the tool apart. The stepover
+    // is asked for, the tabs are not, and what the form would send has no tabs in it.
+    let form = contour_form(&mut h);
+    (form.passes, form.tabs) = (3, 4);
+    h.frames(3);
+    assert!((round(&mut h) - (600.0 + 54.0 * PI)).abs() < 1e-6, "{}", round(&mut h));
+    assert!(h.widget(tr("manufacture.face_stepover")).is_some() && h.widget(tr("manufacture.contour_passes_note")).is_some());
+    assert!(h.widget(tr("manufacture.contour_tabs")).is_none());
+    assert_eq!(contour_form(&mut h).params()["contour"], json!({"direction": "climb", "passes": 3}));
+    // A stepover typed is kept; the default is left to the command.
+    let form = contour_form(&mut h);
+    (form.stepover, form.typed_stepover) = (2.5, true);
+    h.frames(3);
+    assert!((round(&mut h) - (600.0 + 2.0 * PI * (5.0 + 7.5 + 10.0))).abs() < 1e-6, "{}", round(&mut h));
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"].clone();
+    assert_eq!((kept["passes"].clone(), kept["stepover"].clone(), kept["tabs"].clone()), (json!(3), json!(2.5), json!(null)));
+    // Changed from its row it has its passes and, made with them, no tabs; back to one pass
+    // the tabs can be had again.
+    row_menu(&mut h, "Contour 1 (T1)", "manufacture.edit");
+    let form = contour_form(&mut h);
+    assert_eq!((form.passes, form.stepover, form.typed_stepover, form.tabs), (3, 2.5, true, 0));
+    (form.passes, form.tabs) = (1, 4);
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.contour_tabs")).is_some());
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"].clone();
+    assert_eq!(
+        (kept["passes"].clone(), kept["stepover"].clone(), kept["tabs"].clone()),
+        (json!(null), json!(null), json!({"count": 4, "width": null, "height": null}))
+    );
 }

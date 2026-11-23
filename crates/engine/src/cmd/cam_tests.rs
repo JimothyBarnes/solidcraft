@@ -2161,3 +2161,41 @@ fn a_simulation_is_cut_any_part_of_the_way_and_says_where_the_tool_is() {
     let why = refused(&mut s, "cam.simulate", json!({"setup": "setup-1", "along": "half"}));
     assert!(why.contains("invalid type: string \"half\", expected f64"), "{why}");
 }
+
+#[test]
+fn a_contour_in_passes_cuts_a_shoulder_down_to_its_floor() {
+    use std::f64::consts::PI;
+    // The plate cut down to 12 thick but for a boss 60 x 40 left standing in its middle, 8
+    // high: in the WCS the boss is X -30 to 30, Y -20 to 20, its top at Z -1, and the step
+    // round it has its floor at Z -9, 20 wide (21 with the stock's millimetre, 29.7 at the
+    // corners). Tool 2 is the 10 mm end mill.
+    let mut s = plate();
+    boxed(&mut s, [0.0, 0.0, 12.0], [100.0, 80.0, 8.0], "cut");
+    boxed(&mut s, [20.0, 20.0, 12.0], [60.0, 40.0, 8.0], "join");
+    // Round the boss down to the step's floor: the outline read there is the boss's own. One
+    // pass reaches 10 from it; six, four tenths of the tool apart, reach 30: past the corners.
+    assert_eq!(run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2, "contour": {"bottom": -9, "passes": 6}}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert_eq!(
+        (n["passes"].as_u64(), n["stepover"].as_f64(), n["offset"].as_f64(), n["levels"].clone()),
+        (Some(6), Some(4.0), Some(5.0), json!([-4.5, -9.0])),
+        "{n}"
+    );
+    // The six rounds are 5, 9, 13, 17, 21 and 25 out from the boss: 200 and a turn of each.
+    assert!(about(&n["round"], 1200.0 + 180.0 * PI) && n["entries"].as_array().is_some_and(|entries| entries.len() == 6), "{n}");
+    // The simulation: nothing of the part is cut into, and all that stands above it afterwards
+    // is the boss's own millimetre of stock, 60 x 40.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.25}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    assert!(about(&sim["over_part"], 2400.0), "{}", sim["over_part"]);
+    // With one pass most of the step still stands.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"bottom": -9}}));
+    let one = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.25}));
+    assert!(one["over_part"].as_f64().is_some_and(|over| over > 2400.0 + 20_000.0), "{}", one["over_part"]);
+    // Tabs go with one pass, and a stepover with more than one.
+    let edit = |s: &mut Session, contour: Value| refused(s, "cam.op.edit", json!({"id": "op-1", "contour": contour}));
+    assert!(edit(&mut s, json!({"passes": 2, "tabs": {"count": 4}})).contains("tabs go with one pass"));
+    assert!(edit(&mut s, json!({"stepover": 3})).contains("give the number of passes"));
+    assert!(edit(&mut s, json!({"passes": 2, "stepover": 12})).contains("the stepover must be 0.001 mm to the tool's diameter (10 mm)"));
+}

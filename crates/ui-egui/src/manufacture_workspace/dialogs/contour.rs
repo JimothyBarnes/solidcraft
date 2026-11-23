@@ -25,6 +25,10 @@ const WIDEST_TOOL: f64 = 0.9;
 /// The stepdown a contour takes when none is typed, as a share of the tool's diameter (the
 /// engine's own default, shown in the field).
 const STEPDOWN_SHARE: f64 = 0.5;
+/// How far apart sideways a contour's passes are when no stepover is typed, as a share of the
+/// tool's diameter (the engine's own default, shown in the field), and the most passes there are.
+const STEPOVER_SHARE: f64 = 0.4;
+const MOST_PASSES: u32 = 100;
 /// The radius of the arcs on to the wall and off it when none is typed, as a share of the
 /// tool's diameter, and a tab's width and height, mm (the engine's own defaults, shown in the
 /// fields).
@@ -59,6 +63,11 @@ pub(crate) struct ContourForm {
     pub typed_stepdown: bool,
     /// Stock left on the wall, mm.
     pub leave: f64,
+    /// Outside: how many passes sideways at each level, the last one on the wall: one until
+    /// typed. Their distance apart, mm: four tenths of the tool's diameter until it is typed.
+    pub passes: u32,
+    pub stepover: f64,
+    pub typed_stepover: bool,
     /// The radius of the arcs on to the wall and off it, mm: a tenth of the tool's diameter
     /// until it is typed. 0 is straight in and out.
     pub lead: f64,
@@ -94,6 +103,7 @@ impl ContourForm {
         let tools = manufacture_tools(&app.session.doc, "contour");
         let stepdown = tools.first().map_or(0.0, |t| STEPDOWN_SHARE * t.diameter);
         let lead = tools.first().map_or(0.0, |t| LEAD_SHARE * t.diameter);
+        let stepover = tools.first().map_or(0.0, |t| STEPOVER_SHARE * t.diameter);
         ContourForm {
             setups,
             tools,
@@ -110,6 +120,9 @@ impl ContourForm {
             stepdown,
             typed_stepdown: false,
             leave: 0.0,
+            passes: 1,
+            stepover,
+            typed_stepover: false,
             lead,
             typed_lead: false,
             tabs: 0,
@@ -148,6 +161,8 @@ impl ContourForm {
         (form.bottom, form.typed_bottom) = number("bottom").map_or((0.0, false), |v| (v, true));
         (form.stepdown, form.typed_stepdown) = number("stepdown").map_or((form.stepdown, false), |v| (v, true));
         form.leave = number("leave").unwrap_or(0.0);
+        form.passes = base["passes"].as_u64().map_or(1, |passes| u32::try_from(passes).unwrap_or(MOST_PASSES)).clamp(1, MOST_PASSES);
+        (form.stepover, form.typed_stepover) = number("stepover").map_or((form.stepover, false), |v| (v, true));
         (form.lead, form.typed_lead) = number("lead").map_or((form.lead, false), |v| (v, true));
         let tabs = &base["tabs"];
         form.tabs = tabs["count"].as_u64().map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX));
@@ -255,7 +270,15 @@ impl ContourForm {
         set_or_clear(&mut contour, "stepdown", self.typed_stepdown.then_some(self.stepdown));
         set_or_clear(&mut contour, "leave", (self.leave > 0.0).then_some(self.leave));
         set_or_clear(&mut contour, "lead", self.typed_lead.then_some(self.lead));
-        if self.tabs > 0 && !self.inside() {
+        // Passes sideways are the outside's, and a stepover is what lies between two or more.
+        let passes = if self.inside() { 1 } else { self.passes };
+        if passes > 1 {
+            contour["passes"] = json!(passes);
+        } else if let Some(kept) = contour.as_object_mut() {
+            kept.remove("passes");
+        }
+        set_or_clear(&mut contour, "stepover", (passes > 1 && self.typed_stepover).then_some(self.stepover));
+        if self.tabs > 0 && !self.inside() && passes == 1 {
             let mut tabs = json!({"count": self.tabs});
             set_or_clear(&mut tabs, "width", self.typed_tab_width.then_some(self.tab_width));
             set_or_clear(&mut tabs, "height", self.typed_tab_height.then_some(self.tab_height));
@@ -314,6 +337,10 @@ impl ContourForm {
         if !self.typed_lead {
             self.lead = self.tools.get(self.tool).map_or(self.lead, |t| LEAD_SHARE * t.diameter);
         }
+        if !self.typed_stepover {
+            self.stepover = self.tools.get(self.tool).map_or(self.stepover, |t| STEPOVER_SHARE * t.diameter);
+        }
+        self.passes = self.passes.clamp(1, MOST_PASSES);
         (self.leave, self.lead) = (self.leave.max(0.0), self.lead.max(0.0));
         let params = self.params();
         if !self.worked.refresh(app, &params, || manufacture_preview(&app.session, "cam.op.contour", &params)) {
@@ -452,11 +479,23 @@ impl ContourForm {
                 if ui_kit::row(ui, tr("manufacture.contour_lead"), |ui| ui_kit::length_field(ui, &mut self.lead, units, decimals)).changed() {
                     self.typed_lead = true;
                 }
-                // Tabs hold a part cut round its outside: there are none inside.
+                // Passes sideways, from the outside in to the wall: the outside's.
                 if !inside {
+                    ui_kit::row(ui, tr("manufacture.contour_passes"), |ui| ui_kit::whole_number_field(ui, &mut self.passes, 1..=MOST_PASSES, ""));
+                    if self.passes > 1
+                        && ui_kit::row(ui, tr("manufacture.face_stepover"), |ui| ui_kit::length_field(ui, &mut self.stepover, units, decimals))
+                            .changed()
+                    {
+                        self.typed_stepover = true;
+                    }
+                }
+                // Tabs hold a part cut round its outside in one pass: there are none inside, and
+                // none with passes, which cut away the stock a tab would hold on to.
+                let tabbed = !inside && self.passes <= 1;
+                if tabbed {
                     ui_kit::row(ui, tr("manufacture.contour_tabs"), |ui| ui_kit::whole_number_field(ui, &mut self.tabs, 0..=1000, ""));
                 }
-                if self.tabs > 0 && !inside {
+                if self.tabs > 0 && tabbed {
                     if ui_kit::row(ui, tr("manufacture.contour_tab_width"), |ui| ui_kit::length_field(ui, &mut self.tab_width, units, decimals))
                         .changed()
                     {
@@ -484,9 +523,17 @@ impl ContourForm {
                     ui_kit::text(ui, tr("manufacture.contour_inside_note"), ui_kit::Text::Note("manufacture_contour_note"));
                 } else {
                     ui_kit::text(ui, tr("manufacture.contour_note"), ui_kit::Text::Note("manufacture_contour_note"));
-                    // What holds the part: its tabs, or a word that nothing does.
-                    let held = if self.tabs > 0 { "manufacture.contour_tabs_note" } else { "manufacture.contour_loose" };
-                    ui_kit::text(ui, tr(held), ui_kit::Text::Note("manufacture_contour_loose"));
+                    if self.passes > 1 {
+                        ui_kit::text(ui, tr("manufacture.contour_passes_note"), ui_kit::Text::Note("manufacture_contour_passes_note"));
+                    }
+                    // What holds a part that is cut all the way down: its tabs, or a word that
+                    // nothing does. Down to a shoulder's floor the part stands where it was.
+                    let all_the_way = self.placed.result.as_ref().is_ok_and(|placement| self.bottom <= placement.model.min.z + 1e-6);
+                    if self.tabs > 0 && self.passes <= 1 {
+                        ui_kit::text(ui, tr("manufacture.contour_tabs_note"), ui_kit::Text::Note("manufacture_contour_loose"));
+                    } else if all_the_way {
+                        ui_kit::text(ui, tr("manufacture.contour_loose"), ui_kit::Text::Note("manufacture_contour_loose"));
+                    }
                 }
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_contour_preview_note"));

@@ -35,6 +35,11 @@ pub const DEFAULT_CONTOUR_CLEAR: f64 = 2.0;
 /// The most one level takes off when the operation gives no stepdown, as a share of the tool's
 /// diameter: the cut is as wide as the tool.
 pub const DEFAULT_CONTOUR_STEPDOWN: f64 = 0.5;
+/// The most passes sideways a contour takes at one level.
+pub const MAX_CONTOUR_PASSES: usize = 100;
+/// How much nearer the wall each pass is than the one before it when the operation gives no
+/// stepover, as a share of the tool's diameter.
+pub const DEFAULT_CONTOUR_STEPOVER: f64 = 0.4;
 /// The most stock a contour may leave on the wall, and the most it may clear the stock by, mm.
 pub(crate) const MAX_LEAVE: f64 = 1_000.0;
 /// The smallest stepdown, mm.
@@ -128,6 +133,14 @@ pub struct ContourOp {
     /// Bridges of stock left at the bottom to hold the part; `None` for none.
     #[serde(default)]
     pub tabs: Option<Tabs>,
+    /// Outside: how many passes sideways the tool takes at each level, the one furthest from
+    /// the wall first and the last one on it; `None` for one.
+    #[serde(default)]
+    pub passes: Option<usize>,
+    /// How much nearer the wall each pass is than the one before it, mm; `None` for four tenths
+    /// of the tool's diameter.
+    #[serde(default)]
+    pub stepover: Option<f64>,
     /// Round the outside of the part, or round the inside of the openings it is given.
     #[serde(default)]
     pub side: ContourSide,
@@ -168,9 +181,14 @@ pub struct Contoured {
     pub levels: Vec<f64>,
     /// The stepdown used, mm: the most one level may take off.
     pub stepdown: f64,
-    /// How far the tool's centre is from the outline, mm: its radius and the stock left.
+    /// How far the tool's centre is from the outline on its last pass, mm: its radius and the
+    /// stock left.
     pub offset: f64,
-    /// The length of the tool's centre path round the part at one level, mm.
+    /// How many passes sideways it takes at each level, and how far apart they are, mm (0 for
+    /// one pass).
+    pub passes: usize,
+    pub stepover: f64,
+    /// The length of the tool's centre path round the part at one level, all its passes, mm.
     pub round: f64,
     /// Where the tool goes down for each loop it cuts round, X and Y.
     pub entries: Vec<[f64; 2]>,
@@ -252,6 +270,24 @@ impl ContourOp {
         if !self.ramp_angle.is_none_or(|v| (RAMP_ANGLES.0..=RAMP_ANGLES.1).contains(&v)) {
             return bad("the ramp angle must be 0.5 to 30 degrees".into());
         }
+        if !self.passes.is_none_or(|n| (1..=MAX_CONTOUR_PASSES).contains(&n)) {
+            return bad(format!("the number of passes must be 1 to {MAX_CONTOUR_PASSES}"));
+        }
+        // Passes further apart than the tool is wide would leave a wall standing between them.
+        let widest = tool.geometry.diameter;
+        if !self.stepover.is_none_or(|v| v >= MIN_STEP && v <= widest) {
+            return bad(format!("the stepover must be {MIN_STEP} mm to the tool's diameter ({widest} mm)"));
+        }
+        if self.stepover.is_some() && self.passes.is_none_or(|n| n < 2) {
+            return bad("a stepover is what lies between passes: give the number of passes, two or more, with it".into());
+        }
+        // A tab is a bridge from the part to the stock beside it, across one pass's width: with
+        // more passes that stock is further off, or gone.
+        if self.tabs.is_some() && self.passes.is_some_and(|n| n > 1) {
+            return bad(
+                "tabs go with one pass: cut the stock away in passes down to above the bottom, and the part out in one pass with its tabs".into()
+            );
+        }
         match self.side {
             ContourSide::Inside => {
                 if self.tabs.is_some() {
@@ -262,6 +298,11 @@ impl ContourOp {
                 }
                 if self.openings.iter().flatten().any(|v| !finite(*v)) {
                     return bad(format!("an opening's point must be finite and within {MAX_COORDINATE} mm"));
+                }
+                if self.passes.is_some_and(|n| n > 1) {
+                    return bad(
+                        "passes sideways are for the outside: an opening is cleared by Pocket, and an inside contour finishes its wall".into()
+                    );
                 }
             }
             ContourSide::Outside => {
@@ -300,15 +341,29 @@ impl ContourOp {
         let radius = 0.5 * g.diameter;
         let offset = radius + self.leave.unwrap_or(0.0);
         let regions: Vec<Region2> = outline.iter().map(|l| Region2 { outer: l.clone(), holes: Vec::new() }).collect();
-        let moved = moved_at_least(&regions, -offset).map_err(|e| Error::BadValue(format!("the part's outline: {e}")))?;
-        if moved.is_empty() {
-            return bad("the outline left nothing to cut round".into());
-        }
         // Where the tool goes down: beside the stock, its edge `clear` from it.
         let beyond = radius + self.clear.unwrap_or(DEFAULT_CONTOUR_CLEAR);
         let beside = (Vec2 { x: stock.min.x - beyond, y: stock.min.y - beyond }, Vec2 { x: stock.max.x + beyond, y: stock.max.y + beyond });
         let lead = self.lead.unwrap_or(DEFAULT_LEAD_RADIUS * g.diameter);
-        let rounds: Vec<Round> = moved.iter().map(|region| round(&region.outer, &moved, self.direction, beside, lead)).collect::<Result<_>>()?;
+        // The passes, the one furthest from the wall first and the last one on it: each the
+        // outline moved out by a stepover more than the next.
+        let passes = self.passes.unwrap_or(1);
+        let stepover = if passes > 1 { self.stepover.unwrap_or(DEFAULT_CONTOUR_STEPOVER * g.diameter) } else { 0.0 };
+        let mut rounds: Vec<Round> = Vec::new();
+        let mut enclosed = 0;
+        for pass in (0..passes).rev() {
+            let out = offset + pass as f64 * stepover;
+            let moved = moved_at_least(&regions, -out).map_err(|e| Error::BadValue(format!("the part's outline: {e}")))?;
+            if moved.is_empty() {
+                return bad("the outline left nothing to cut round".into());
+            }
+            for region in &moved {
+                rounds.push(round(&region.outer, &moved, self.direction, beside, lead)?);
+            }
+            if pass == 0 {
+                enclosed = moved.iter().map(|region| region.holes.len()).sum();
+            }
+        }
         // Tabs: where along each round the tool is lifted, and how high.
         let tab_top = match self.tabs {
             Some(tabs) => {
@@ -336,44 +391,60 @@ impl ContourOp {
         }
         moves.push(Move::Rapid { to: at(first, clearance) });
         let mut last = first;
-        for (r, lifts) in rounds.iter().zip(&lifts) {
-            moves.push(Move::Rapid { to: at(r.entry, retract) });
-            last = r.entry;
-            for &z in &levels {
-                // Back above where it goes down, when the level before left it elsewhere.
-                let mut here = r.entry;
-                if apart(last, here) > JOINT_TOLERANCE {
-                    moves.push(Move::Rapid { to: at(here, retract) });
-                }
-                // Down beside the stock in the air, and in to the wall: straight to it, or
-                // straight to the quarter turn that meets it at a tangent.
-                moves.push(Move::Linear { to: at(here, z), feed: f.plunge_feed });
-                let onto = r.leads.map_or(r.start, |(on, _)| on.start());
-                if apart(here, onto) > JOINT_TOLERANCE {
-                    moves.push(Move::Linear { to: at(onto, z), feed: f.feed });
-                    here = onto;
-                }
-                if let Some((on, _)) = &r.leads {
-                    cut(&mut moves, on, here, r.start, (z, z), f.feed);
-                }
-                // Round it, lifting over the tabs on the levels below their tops.
-                let over = tab_top.filter(|&top| z < top - SAME_HEIGHT).map(|top| (top, lifts.as_slice()));
-                go_round(&mut moves, r, z, over, f.feed, f.plunge_feed);
-                // Off the wall by the other quarter turn and up, or straight back out and up.
-                match &r.leads {
-                    Some((_, off)) => {
-                        cut(&mut moves, off, r.start, off.end(), (z, z), f.feed);
-                        here = off.end();
-                    }
-                    None => {
-                        if apart(r.entry, r.start) > JOINT_TOLERANCE {
-                            moves.push(Move::Linear { to: at(r.entry, z), feed: f.feed });
-                        }
-                        here = r.entry;
-                    }
-                }
+        // One round at one level, from wherever the tool is above the stock.
+        let level = |moves: &mut Vec<Move>, last: &mut Vec2, r: &Round, lifts: &Vec<(f64, f64)>, z: f64| {
+            // Back above where it goes down, when the round before left it elsewhere.
+            let mut here = r.entry;
+            if apart(*last, here) > JOINT_TOLERANCE {
                 moves.push(Move::Rapid { to: at(here, retract) });
-                last = here;
+            }
+            // Down beside the stock in the air, and in to the wall: straight to it, or
+            // straight to the quarter turn that meets it at a tangent.
+            moves.push(Move::Linear { to: at(here, z), feed: f.plunge_feed });
+            let onto = r.leads.map_or(r.start, |(on, _)| on.start());
+            if apart(here, onto) > JOINT_TOLERANCE {
+                moves.push(Move::Linear { to: at(onto, z), feed: f.feed });
+                here = onto;
+            }
+            if let Some((on, _)) = &r.leads {
+                cut(moves, on, here, r.start, (z, z), f.feed);
+            }
+            // Round it, lifting over the tabs on the levels below their tops.
+            let over = tab_top.filter(|&top| z < top - SAME_HEIGHT).map(|top| (top, lifts.as_slice()));
+            go_round(moves, r, z, over, f.feed, f.plunge_feed);
+            // Off the wall by the other quarter turn and up, or straight back out and up.
+            match &r.leads {
+                Some((_, off)) => {
+                    cut(moves, off, r.start, off.end(), (z, z), f.feed);
+                    here = off.end();
+                }
+                None => {
+                    if apart(r.entry, r.start) > JOINT_TOLERANCE {
+                        moves.push(Move::Linear { to: at(r.entry, z), feed: f.feed });
+                    }
+                    here = r.entry;
+                }
+            }
+            moves.push(Move::Rapid { to: at(here, retract) });
+            *last = here;
+        };
+        if passes == 1 {
+            // Each part in turn, all its levels.
+            for (r, lifts) in rounds.iter().zip(&lifts) {
+                moves.push(Move::Rapid { to: at(r.entry, retract) });
+                last = r.entry;
+                for &z in &levels {
+                    level(&mut moves, &mut last, r, lifts, z);
+                }
+            }
+        } else {
+            // Level by level, and at each the pass furthest from the wall first: no pass ever
+            // cuts wider than the first, and the wall is met by the last, with a stepover to cut.
+            moves.push(Move::Rapid { to: at(first, retract) });
+            for &z in &levels {
+                for (r, lifts) in rounds.iter().zip(&lifts) {
+                    level(&mut moves, &mut last, r, lifts, z);
+                }
             }
         }
         moves.push(Move::Rapid { to: at(last, clearance) });
@@ -385,7 +456,6 @@ impl ContourOp {
         toolpath.validate()?;
 
         let mut notes = f.notes;
-        let enclosed: usize = moved.iter().map(|region| region.holes.len()).sum();
         if enclosed > 0 {
             notes.push(format!(
                 "{enclosed} enclosed place(s) between parts of the outline are not cut: the tool can't get into them from beside the stock"
@@ -412,6 +482,8 @@ impl ContourOp {
             levels,
             stepdown,
             offset,
+            passes,
+            stepover,
             round: rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum::<f64>()).sum(),
             entries: rounds.iter().map(|r| [r.entry.x, r.entry.y]).collect(),
             leads: rounds.iter().map(Round::lead).collect(),
@@ -605,6 +677,8 @@ impl ContourOp {
             levels: d.levels.clone(),
             stepdown: d.stepdown,
             offset,
+            passes: 1,
+            stepover: 0.0,
             round: rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum::<f64>()).sum(),
             entries: rounds.iter().map(|r| [r.start.x, r.start.y]).collect(),
             leads: rounds.iter().map(Round::lead).collect(),

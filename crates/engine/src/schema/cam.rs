@@ -442,7 +442,10 @@ pub struct CamOpContourParams {
     /// (default 2), lead?: mm, the radius of the arcs on to the wall and off it (default a tenth
     /// of the tool's diameter; 0 for straight in and out), tabs?: {count, width?: mm (default 6),
     /// height?: mm above the bottom (default 2)} bridges of stock left round each part (default
-    /// none), side?: outside | inside (default outside), openings?: [[x, y], …] (inside: a point
+    /// none), passes?: how many passes sideways the tool takes at each level, the one furthest
+    /// from the wall first and the last on it (outside only, and without tabs; default 1),
+    /// stepover?: mm between them (default four tenths of the tool's diameter),
+    /// side?: outside | inside (default outside), openings?: [[x, y], …] (inside: a point
     /// in each opening to go round, in the WCS), ramp_angle?: radians (inside: the way down
     /// along the wall, default 3 degrees), rpm?, feed?}`; every field has a default.
     #[serde(default)]

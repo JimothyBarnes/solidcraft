@@ -1183,3 +1183,177 @@ fn a_post_near_the_wall_is_gone_round_at_the_tools_radius() {
     let report = sim.cut(0, &d.toolpath, &mill20()).unwrap();
     assert_eq!((report.gouges, report.rapid_hits), (0, 0), "{:?}", sim.gouges.first());
 }
+
+/// One level of one pass round the block, straight in and out: the tool's centre `out` from the
+/// block's walls, down at Y `entry` and in to the middle of the front side from there.
+fn pass_level(out: f64, entry: f64, z: f64, cut: f64, plunge: f64) -> Vec<Move> {
+    let arc = |x: f64, y: f64, cx: f64, cy: f64| Move::Arc {
+        to: p(x, y, z),
+        center: p(cx, cy, z),
+        plane: Plane::Xy,
+        direction: ArcDirection::Clockwise,
+        feed: cut,
+    };
+    let line = |x: f64, y: f64| Move::Linear { to: p(x, y, z), feed: cut };
+    let (x, y) = (30.0 + out, 20.0 + out);
+    let mut moves = vec![Move::Linear { to: p(0.0, entry, z), feed: plunge }];
+    if entry != -y {
+        moves.push(line(0.0, -y));
+    }
+    moves.extend([
+        line(-30.0, -y),
+        arc(-x, -20.0, -30.0, -20.0),
+        line(-x, 20.0),
+        arc(-30.0, y, -30.0, 20.0),
+        line(30.0, y),
+        arc(x, 20.0, 30.0, 20.0),
+        line(x, -20.0),
+        arc(30.0, -y, 30.0, -20.0),
+        line(0.0, -y),
+    ]);
+    if entry != -y {
+        moves.push(line(0.0, entry));
+    }
+    moves.push(Move::Rapid { to: p(0.0, entry, 5.0) });
+    moves
+}
+
+#[test]
+fn a_contour_takes_its_passes_sideways_from_the_outside_in_at_every_level() {
+    // Three passes with the 20 mm tool, four tenths of it apart (8): its centre 26, 18 and 10
+    // outside the block, the furthest first, at each of the three levels in turn. The two
+    // outer rounds begin outside where the tool may go down (33 from the middle, front), so it
+    // goes down where they begin; the last comes in from Y -33, as one pass alone does.
+    let op = ContourOp { passes: Some(3), ..straight() };
+    let d = contoured(&op).unwrap();
+    assert_eq!((d.passes, d.stepover, d.offset, d.levels.clone()), (3, 8.0, 10.0, vec![-7.0, -14.0, -21.0]));
+    assert_eq!(d.entries, vec![[0.0, -46.0], [0.0, -38.0], [0.0, -33.0]]);
+    assert!(close(d.round, 600.0 + 108.0 * PI), "{}", d.round);
+    let mut want = vec![
+        Move::ToolChange { tool: 4 },
+        Move::Spindle { rpm: d.rpm, direction: SpindleDirection::Clockwise },
+        Move::Coolant { mode: Coolant::Flood },
+        Move::Rapid { to: p(0.0, -46.0, 25.0) },
+        Move::Rapid { to: p(0.0, -46.0, 5.0) },
+    ];
+    for (k, z) in [-7.0, -14.0, -21.0].into_iter().enumerate() {
+        for (out, entry) in [(26.0, -46.0), (18.0, -38.0), (10.0, -33.0)] {
+            // Across above the stock to where this pass goes down (the first of all is there).
+            if k > 0 || out < 26.0 {
+                want.push(Move::Rapid { to: p(0.0, entry, 5.0) });
+            }
+            want.extend(pass_level(out, entry, z, d.feed, d.plunge_feed));
+        }
+    }
+    want.extend([Move::Rapid { to: p(0.0, -33.0, 25.0) }, Move::Coolant { mode: Coolant::Off }, Move::SpindleStop]);
+    assert!(same_moves(&d.toolpath.moves, &want), "{:#?}", d.toolpath.moves);
+    // One pass is the contour as it was, to the last move; a stepover given is the one used.
+    let one = contoured(&ContourOp { passes: Some(1), ..straight() }).unwrap();
+    assert!(same_moves(&one.toolpath.moves, &contoured(&straight()).unwrap().toolpath.moves) && (one.passes, one.stepover) == (1, 0.0));
+    let near = contoured(&ContourOp { passes: Some(2), stepover: Some(3.0), ..straight() }).unwrap();
+    assert_eq!((near.passes, near.stepover, near.entries.clone()), (2, 3.0, vec![[0.0, -33.0], [0.0, -33.0]]));
+    assert!(close(near.round, 400.0 + 46.0 * PI), "{}", near.round);
+    // With stock to leave the last pass is that far off the wall, and the others beyond it.
+    let left = contoured(&ContourOp { passes: Some(2), leave: Some(0.5), ..straight() }).unwrap();
+    assert!(close(left.offset, 10.5) && close(left.round, 400.0 + (37.0 + 21.0) * PI), "{} {}", left.offset, left.round);
+}
+
+#[test]
+fn passes_cut_away_all_the_stock_beside_a_part_and_a_shoulder_down_to_its_floor() {
+    // The block in stock 24 bigger all round (108 x 88, its top at 0 and its bottom at -21).
+    // Three passes with the 20 mm tool reach 36 from the block's walls, past the stock's
+    // corners (33.9 from the block's): nothing is left beside the block, and what is removed
+    // is the stock less the block's footprint, 21 deep: (108 x 88 - 60 x 40) x 21.
+    let wide = placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(60.0, 40.0, 20.0) }, 24.0);
+    let cut_with = |op: &ContourOp, tool: &Tool, placement: &Placement, outline: &[(f64, f64)], part: &dyn Fn(f64, f64) -> f64| {
+        let d = op.toolpath(None, tool, placement, Some("aluminium"), &[polygon(outline)]).unwrap();
+        let sim = crate::sim::Simulation::new(placement.stock, 0.25, 0.01).unwrap();
+        let f = sim.stock.clone();
+        let heights = (0..f.nx * f.ny)
+            .map(|k| {
+                let c = f.centre(k % f.nx, k / f.nx);
+                part(c.x, c.y)
+            })
+            .collect();
+        let mut sim = sim.with_part(heights).unwrap();
+        let report = sim.cut(0, &d.toolpath, tool).unwrap();
+        (sim, report)
+    };
+    let block_part = |x: f64, y: f64| if x.abs() < 30.0 && y.abs() < 20.0 { -1.0 } else { -22.0 };
+    let (sim, report) = cut_with(&ContourOp { passes: Some(3), ..ContourOp::default() }, &mill20(), &wide, &BLOCK, &block_part);
+    assert_eq!((report.gouges, report.rapid_hits), (0, 0));
+    let (over, beside) = sim.leftover();
+    assert!(beside == 0.0 && close(over, 2400.0), "{over} over the block, {beside} beside it");
+    assert!((report.removed - (108.0 * 88.0 - 2400.0) * 21.0).abs() < 1e-6, "{}", report.removed);
+    // One pass cuts a slot as wide as the tool and leaves a frame of the stock standing round
+    // it, 4 wide and wider at its corners, but for where the tool came in across it.
+    let (sim, _) = cut_with(&ContourOp::default(), &mill20(), &wide, &BLOCK, &block_part);
+    let frame = (108.0 * 88.0 - (100.0 * 80.0 - (4.0 - PI) * 400.0)) * 21.0;
+    let beside = sim.leftover().1;
+    assert!(beside < frame && beside > frame - 20.0 * 4.5 * 21.0, "{beside} of a frame of {frame}");
+
+    // A shoulder: on the block's footprint a boss 40 x 20 stands 8 above a step all round it
+    // (the step's floor at Z -9, 10 wide, with the stock's millimetre beyond it). Round the
+    // boss down to the floor with the 6 mm tool: one pass reaches 6 from the boss and leaves
+    // most of the step standing.
+    let stepped = |x: f64, y: f64| {
+        if x.abs() < 20.0 && y.abs() < 10.0 {
+            -1.0
+        } else if x.abs() < 30.0 && y.abs() < 20.0 {
+            -9.0
+        } else {
+            -22.0
+        }
+    };
+    let boss = [(-20.0, -10.0), (20.0, -10.0), (20.0, 10.0), (-20.0, 10.0)];
+    let (sim, report) = cut_with(&ContourOp { bottom: Some(-9.0), ..ContourOp::default() }, &mill6(), &block(), &boss, &stepped);
+    assert_eq!(report.gouges, 0);
+    assert!(sim.leftover().0 > 800.0 + 5_000.0, "{}", sim.leftover().0);
+    // Four passes, 2.4 apart (four tenths of the tool), reach 13.2: past the step's sides (11
+    // with the stock) and all but the tips of its corners (14.1 from the boss's). Nothing is
+    // cut into; the step is at its floor; what stands above the part is the boss's own stock,
+    // 40 x 20 and 1 thick, and those four tips, under a square millimetre each and 9 high.
+    let op = ContourOp { bottom: Some(-9.0), passes: Some(4), ..ContourOp::default() };
+    let (sim, report) = cut_with(&op, &mill6(), &block(), &boss, &stepped);
+    assert_eq!((report.gouges, report.rapid_hits), (0, 0));
+    let over = sim.leftover().0;
+    assert!(over > 800.0 && over < 800.0 + 4.0 * 1.0 * 9.0, "{over}");
+    let f = sim.stock.clone();
+    let height = |x: f64, y: f64| f.at(((x - f.x) / f.dx - 0.5).round() as usize, ((y - f.y) / f.dy - 0.5).round() as usize).unwrap();
+    assert_eq!((height(25.125, 0.125), height(-29.875, 0.125), height(0.125, 14.875), height(0.125, 0.125)), (-9.0, -9.0, -9.0, 0.0));
+    assert_eq!(height(29.875, 19.875), 0.0, "the tip of a corner");
+    // Six passes reach 18: the corners too.
+    let op = ContourOp { bottom: Some(-9.0), passes: Some(6), ..ContourOp::default() };
+    let (sim, report) = cut_with(&op, &mill6(), &block(), &boss, &stepped);
+    assert!(report.gouges == 0 && close(sim.leftover().0, 800.0), "{}", sim.leftover().0);
+}
+
+#[test]
+fn passes_that_cannot_be_are_refused_with_the_reason() {
+    let refused = |op: ContourOp| contoured(&op).unwrap_err().to_string();
+    assert!(refused(ContourOp { passes: Some(0), ..ContourOp::default() }).contains("the number of passes must be 1 to 100"));
+    assert!(refused(ContourOp { passes: Some(101), ..ContourOp::default() }).contains("the number of passes must be 1 to 100"));
+    // Passes further apart than the tool is wide would leave a wall between them.
+    let apart = refused(ContourOp { passes: Some(2), stepover: Some(20.5), ..ContourOp::default() });
+    assert!(apart.contains("the stepover must be 0.001 mm to the tool's diameter (20 mm)"), "{apart}");
+    assert!(contoured(&ContourOp { passes: Some(2), stepover: Some(20.0), ..ContourOp::default() }).is_ok());
+    assert!(refused(ContourOp { stepover: Some(4.0), ..ContourOp::default() }).contains("give the number of passes, two or more, with it"));
+    assert!(refused(ContourOp { passes: Some(1), stepover: Some(4.0), ..ContourOp::default() }).contains("give the number of passes"));
+    // Tabs go with one pass; inside, passes are Pocket's work.
+    let tabs = Some(Tabs { count: 4, width: None, height: None });
+    assert!(refused(ContourOp { passes: Some(2), tabs, ..ContourOp::default() }).contains("tabs go with one pass"));
+    assert!(contoured(&ContourOp { passes: Some(1), tabs, ..ContourOp::default() }).is_ok());
+    let inside = ContourOp { side: ContourSide::Inside, openings: vec![[0.0, 0.0]], passes: Some(2), ..ContourOp::default() };
+    assert!(refused(inside).contains("passes sideways are for the outside"));
+    // Kept by name, and none unless given.
+    let op: ContourOp = serde_json::from_str(r#"{"passes": 3, "stepover": 5}"#).unwrap();
+    assert_eq!((op.passes, op.stepover, ContourOp::default().passes, ContourOp::default().stepover), (Some(3), Some(5.0), None, None));
+    assert_eq!(serde_json::from_value::<ContourOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
+    // No number makes it panic.
+    for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0, 1e300, 5e-324] {
+        let _ = contoured(&ContourOp { passes: Some(3), stepover: Some(v), ..ContourOp::default() });
+    }
+    for n in [0, 1, 2, 100, 101, usize::MAX] {
+        let _ = contoured(&ContourOp { passes: Some(n), stepover: Some(1e-3), ..ContourOp::default() });
+    }
+}

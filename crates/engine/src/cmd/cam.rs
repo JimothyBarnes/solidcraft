@@ -74,7 +74,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
     CommandSpec::new("cam.op.contour", "Contour", crate::checked!("cam.op.contour", op_contour)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, lead?: mm (the arcs on to the wall and off it; 0 for none), tabs?: {count, width?, height?}, side?: outside | inside, openings?: [[x, y], …] (inside: a point in each opening to go round), ramp_angle?: radians (inside: default 3 degrees), rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock; or, inside, round the inside of each opening's wall (a pocket's, a window's, a round hole's: read from the model where its point is, down to the floor under the point or through the part), the tool going down a ramp along the wall"),
+        .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, lead?: mm (the arcs on to the wall and off it; 0 for none), tabs?: {count, width?, height?}, passes?: how many passes sideways at each level, the furthest from the wall first (outside; default 1), stepover?: mm between them (default 0.4 of the tool's diameter), side?: outside | inside, openings?: [[x, y], …] (inside: a point in each opening to go round), ramp_angle?: radians (inside: default 3 degrees), rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock; or, inside, round the inside of each opening's wall (a pocket's, a window's, a round hole's: read from the model where its point is, down to the floor under the point or through the part), the tool going down a ramp along the wall"),
     CommandSpec::new("cam.op.bore", "Bore", crate::checked!("cam.op.bore", op_bore)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill narrower than the holes, contour: {openings: [[x, y], …] (a point in each hole, in the WCS), bottom?: Z (default the hole's floor, or through the part), top?, stepdown?, leave?, direction?, lead?, ramp_angle?, rpm?, feed?} → id of the new operation, named Bore: an inside contour (as cam.op.contour with side inside) for round holes wider than the tool, cut down a helix along their wall and once round at each level"),
@@ -982,8 +982,8 @@ fn work(
             };
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "levels": done.levels,
-                "stepdown": done.stepdown, "offset": done.offset, "round": done.round, "entries": done.entries,
-                "leads": done.leads, "tabs": done.tabs, "tab_top": done.tab_top
+                "stepdown": done.stepdown, "offset": done.offset, "passes": done.passes, "stepover": done.stepover, "round": done.round,
+                "entries": done.entries, "leads": done.leads, "tabs": done.tabs, "tab_top": done.tab_top
             });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
         }
