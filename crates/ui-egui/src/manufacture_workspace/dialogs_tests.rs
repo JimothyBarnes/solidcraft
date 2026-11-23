@@ -480,7 +480,10 @@ fn post_process_names_the_file_and_comes_back_when_nothing_is_saved() {
     assert!(form.params().get("program_name").is_none());
     form.program_name = " TOP SIDE ".into();
     form.program_number = 7;
-    assert_eq!(form.params(), json!({"setup": "setup-1", "post": "haas_mill", "units": "mm", "program_number": 7, "program_name": "TOP SIDE"}));
+    assert_eq!(
+        form.params(),
+        json!({"setup": "setup-1", "post": "haas_mill", "units": "mm", "program_number": 7, "optional_stop": true, "program_name": "TOP SIDE"})
+    );
     // No file chosen in the save prompt: the form is back as it was, and nothing was posted.
     let slot = crate::picker_test_support::Slot::default();
     crate::picker_test_support::save(&mut h.app, &slot);
@@ -2218,5 +2221,27 @@ fn the_tool_library_lists_searches_sorts_and_changes_the_designs_tools() {
     ribbon(&mut h, "cam.tool.list");
     assert_eq!(open(&h), "library");
     press(&mut h, "Close");
+    assert_eq!(open(&h), "none");
+}
+
+#[test]
+fn post_process_offers_the_stop_between_tools_where_the_post_has_one() {
+    let mut h = harness();
+    // The block with a 20 mm end mill (T1), the vise setup and a facing.
+    faced(&mut h);
+    ribbon(&mut h, "cam.post");
+    // The Haas post, as the form opens: the tick is there, and on.
+    assert!(h.widget(tr("manufacture.post_optional_stop")).is_some());
+    assert_eq!(post_form(&mut h).params()["optional_stop"], json!(true));
+    // Unticked, the program is asked for none.
+    post_form(&mut h).optional_stop = false;
+    h.frames(2);
+    assert_eq!(post_form(&mut h).params()["optional_stop"], json!(false));
+    // The NIST post has no word for an optional stop: there is nothing to tick.
+    let reference = manufacture_posts().iter().position(|(id, _)| id == "rs274").unwrap();
+    post_form(&mut h).post = reference;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.post_optional_stop")).is_none());
+    press(&mut h, "Cancel");
     assert_eq!(open(&h), "none");
 }

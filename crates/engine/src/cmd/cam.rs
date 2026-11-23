@@ -116,7 +116,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, units?: mm | inch (default the design's), date?: text to write on it, path?: also write it to this .html file, overwrite?: replace an existing file (default false) → html: one page for the shop with the stock, the work origin, the tools (how far each sticks out, the lowest its tip goes), the operations in order with speeds, feeds and times, the setup from above, and what to check (the operations' and the simulation's notes, a tool that goes deeper than it sticks out)"),
     CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("cam_post").noundo().read_only()
         .contract(&TypedContract::<CamPostParams>::new()).output(output_schema_for::<CamPosted>)
-        .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
+        .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false), optional_stop?: write the post's optional stop (M1) before every tool change but the first, where the post has one (default true) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
 ];
 
 /// The built-in owner of `plugins/solidcraft-cam/`.
@@ -1257,6 +1257,12 @@ pub fn manufacture_posts() -> Vec<(String, String)> {
     BUILTIN_POSTS.iter().filter_map(|(id, _)| Post::builtin(id).ok().map(|post| ((*id).to_string(), post.name))).collect()
 }
 
+/// Whether the built-in post `id` has an optional stop to write before tool changes, for a
+/// form to offer the choice only where it means something.
+pub fn manufacture_post_stops(id: &str) -> bool {
+    Post::builtin(id).is_ok_and(|post| post.optional_stop.is_some())
+}
+
 /// One of the design's tools for a form to offer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolChoice {
@@ -2110,6 +2116,7 @@ fn post(s: &mut Session, p: &Value) -> Result<Value> {
         program_name: p.program_name.unwrap_or_else(|| setup.name.clone()),
         units,
         work_offset: setup.work_offset,
+        optional_stop: p.optional_stop.unwrap_or(true),
     };
     let posted = post.write(&program, &ctx).map_err(|e| bad(CMD, e.to_string()))?;
     if let Some(path) = &p.path {

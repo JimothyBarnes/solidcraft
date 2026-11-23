@@ -167,6 +167,13 @@ pub struct Post {
     /// axes comes down on its way across (whatever stands beside the work is in its way).
     #[serde(default)]
     pub xy_before_z: bool,
+    /// The word for an optional stop (`M1`), written on a line of its own before every tool
+    /// change but the program's first when the program asks for it ([`ProgramContext`]): with
+    /// the control's optional stop switched on the machine waits there, the tool at home and
+    /// the spindle stopped, for whoever runs it to look at the cut. `None` for a post that
+    /// writes none; a post file from before this has none.
+    #[serde(default)]
+    pub optional_stop: Option<String>,
     pub sequences: Sequences,
 }
 
@@ -179,11 +186,13 @@ pub struct ProgramContext {
     pub units: LengthUnit,
     /// The work offset, 1 to 6 for G54 to G59.
     pub work_offset: u8,
+    /// Whether the post's optional stop is written before tool changes, where it has one.
+    pub optional_stop: bool,
 }
 
 impl Default for ProgramContext {
     fn default() -> Self {
-        Self { program_number: 1, program_name: "PROGRAM".into(), units: LengthUnit::Millimetre, work_offset: 1 }
+        Self { program_number: 1, program_name: "PROGRAM".into(), units: LengthUnit::Millimetre, work_offset: 1, optional_stop: true }
     }
 }
 
@@ -267,6 +276,9 @@ impl Post {
         }
         if self.cycles.dwell && !self.dwell {
             return bad("cycles.dwell needs dwell: G82's P is written as a dwell's is".into());
+        }
+        if !self.optional_stop.as_deref().is_none_or(|word| matches!(word, "M1" | "M01")) {
+            return bad("optional_stop must be M1 or M01, the optional program stop".into());
         }
         if self.xy_before_z && !self.sequences.tool_change_before.iter().any(|line| line.contains("G28") || line.contains("G53")) {
             return bad(
@@ -411,6 +423,8 @@ struct Writer<'a> {
     spindle_speed: Option<f64>,
     /// The tool whose length offset goes on the next move.
     pending_offset: Option<u32>,
+    /// How many tool changes have been written.
+    tool_changes: usize,
     /// Whether the machine's position is known: not at the program start (the machine is
     /// wherever it was) nor after a tool change. Until it is, the next move must be a rapid,
     /// and it writes all three axes.
@@ -450,6 +464,7 @@ impl<'a> Writer<'a> {
             spindle_on: false,
             spindle_speed: None,
             pending_offset: None,
+            tool_changes: 0,
             position_known: false,
             cycle: None,
             written: Vec::new(),
@@ -619,6 +634,15 @@ impl<'a> Writer<'a> {
                     return Err(bad("stop the spindle before a tool change".into()));
                 }
                 self.sequence(&self.post.sequences.tool_change_before.clone(), Some(tool))?;
+                // An optional stop where the last tool has finished and the tool is out of the
+                // way: not before the program's first tool, which nothing has cut before.
+                if self.tool_changes > 0
+                    && self.ctx.optional_stop
+                    && let Some(word) = self.post.optional_stop.clone()
+                {
+                    self.emit(word);
+                }
+                self.tool_changes += 1;
                 self.emit(format!("T{tool} M6"));
                 self.sequence(&self.post.sequences.tool_change_after.clone(), Some(tool))?;
                 self.out = [None, None, None];

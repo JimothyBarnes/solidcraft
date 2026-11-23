@@ -409,3 +409,11 @@ fn g85_and_g89_read_as_holes_fed_in_and_fed_out() {
         assert!(e.contains(why), "{program:?}: {e:?} does not mention {why:?}");
     }
 }
+
+#[test]
+fn an_optional_stop_reads_as_nothing_and_a_program_stop_as_a_note() {
+    let optional = read("G0 X1\nM1\nG0 X2", &ReadSettings::default()).unwrap();
+    assert_eq!((optional.toolpath.moves.len(), optional.notes.clone()), (2, vec![]));
+    let stop = read("G0 X1\nM0\nG0 X2", &ReadSettings::default()).unwrap();
+    assert_eq!((stop.toolpath.moves.len(), stop.notes.clone()), (2, vec!["line 2: program stop (M0) ignored for read-back".to_string()]));
+}

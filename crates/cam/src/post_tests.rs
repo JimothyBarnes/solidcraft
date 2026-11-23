@@ -25,7 +25,7 @@ fn bracket() -> Toolpath {
 }
 
 fn ctx() -> ProgramContext {
-    ProgramContext { program_number: 1, program_name: "Bracket op1".into(), units: LengthUnit::Millimetre, work_offset: 1 }
+    ProgramContext { program_number: 1, program_name: "Bracket op1".into(), units: LengthUnit::Millimetre, work_offset: 1, optional_stop: true }
 }
 
 /// The largest difference between two toolpaths' positions and arc centres, in mm.
@@ -704,4 +704,58 @@ fn a_reamed_hole_is_g85_or_g89_where_the_post_has_them_and_plain_moves_where_not
     // With a dwell it is refused there, as a drilled hole's dwell is: that post's dwell is not verified.
     let e = Post::builtin("fanuc_mill").unwrap().write(&one_hole(DrillCycle::Ream { dwell: 0.5 }, 1.0), &ctx()).unwrap_err();
     assert!(e.to_string().contains("dwell"), "{e}");
+}
+
+#[test]
+fn an_optional_stop_is_written_before_every_tool_change_but_the_first() {
+    // Three tools, each down to a point and up again.
+    let tool = |number: u32, x: f64| {
+        [
+            Move::ToolChange { tool: number },
+            Move::Spindle { rpm: 1000.0, direction: SpindleDirection::Clockwise },
+            Move::Rapid { to: p(x, 0.0, 10.0) },
+            Move::Linear { to: p(x, 0.0, -1.0), feed: 100.0 },
+            Move::Rapid { to: p(x, 0.0, 10.0) },
+            Move::SpindleStop,
+        ]
+    };
+    let three = Toolpath { start: p(0.0, 0.0, 50.0), moves: [tool(1, 0.0), tool(2, 10.0), tool(3, 20.0)].concat() };
+    for id in ["haas_mill", "fanuc_mill"] {
+        let post = Post::builtin(id).unwrap();
+        assert_eq!(post.optional_stop.as_deref(), Some("M1"), "{id}");
+        let posted = post.write(&three, &ctx()).unwrap();
+        // The lines without their numbers, where the post numbers them.
+        let lines: Vec<&str> = posted
+            .text
+            .lines()
+            .map(|line| match line.strip_prefix('N').and_then(|rest| rest.split_once(' ')) {
+                Some((number, words)) if number.chars().all(|c| c.is_ascii_digit()) => words,
+                _ => line,
+            })
+            .collect();
+        // One before the second tool and one before the third, each on its own line right
+        // before the tool change, after the trip to machine home; none before the first.
+        let stops: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| **line == "M1").map(|(at, _)| at).collect();
+        assert_eq!(stops.len(), 2, "{id}:\n{}", posted.text);
+        for (&at, change) in stops.iter().zip(["T2 M6", "T3 M6"]) {
+            assert_eq!((lines[at - 1], lines[at + 1]), ("G90", change), "{id}:\n{}", posted.text);
+        }
+        let first = lines.iter().position(|line| *line == "T1 M6").unwrap();
+        assert!(first < stops[0] && lines[first - 1] != "M1", "{id}:\n{}", posted.text);
+        // The program reads back as the moves it was written for, and a stop is no note.
+        assert_eq!(posted.written.moves, three.moves, "{id}");
+        assert!(posted.notes.is_empty() && posted.read_back.notes.is_empty(), "{id}: {:?} {:?}", posted.notes, posted.read_back.notes);
+        // A program that asks for none has none.
+        let plain = post.write(&three, &ProgramContext { optional_stop: false, ..ctx() }).unwrap();
+        assert!(!plain.text.lines().any(|line| line.ends_with("M1")), "{id}:\n{}", plain.text);
+        assert_eq!(plain.text.lines().count() + 2, lines.len(), "{id}");
+    }
+    // The NIST post has no word for it, whatever the program asks.
+    let reference = Post::builtin("rs274").unwrap();
+    assert_eq!(reference.optional_stop, None);
+    assert!(!reference.write(&three, &ctx()).unwrap().text.contains("M1"));
+    // Another word is not an optional stop.
+    let mut wrong = Post::builtin("haas_mill").unwrap();
+    wrong.optional_stop = Some("M0".into());
+    assert!(wrong.check().unwrap_err().to_string().contains("optional_stop must be M1 or M01"));
 }

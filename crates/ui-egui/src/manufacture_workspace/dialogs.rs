@@ -16,7 +16,8 @@ use std::hash::{Hash, Hasher};
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
     CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, Simulated, ToolAt, ToolChoice, manufacture_data,
-    manufacture_holes, manufacture_library, manufacture_posts, manufacture_preview, manufacture_setup_preview, manufacture_tools,
+    manufacture_holes, manufacture_library, manufacture_post_stops, manufacture_posts, manufacture_preview, manufacture_setup_preview,
+    manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
@@ -1643,6 +1644,8 @@ pub(crate) struct PostForm {
     pub program_number: u32,
     /// The program's name; the setup's when empty.
     pub program_name: String,
+    /// Whether the post's optional stop is written before tool changes, where it has one.
+    pub optional_stop: bool,
     pub error: Option<String>,
 }
 
@@ -1653,7 +1656,7 @@ impl PostForm {
         let posts = manufacture_posts();
         let post = posts.iter().position(|(id, _)| id == "haas_mill").unwrap_or(0);
         let units = usize::from(imperial(&app.session.doc.units));
-        PostForm { setups, posts, setup, post, units, program_number: 1, program_name: String::new(), error: None }
+        PostForm { setups, posts, setup, post, units, program_number: 1, program_name: String::new(), optional_stop: true, error: None }
     }
 
     /// The `cam.post` parameters, without the file.
@@ -1663,6 +1666,7 @@ impl PostForm {
             "post": self.posts.get(self.post).map_or("", |p| p.0.as_str()),
             "units": word(&UNITS, self.units),
             "program_number": self.program_number,
+            "optional_stop": self.optional_stop,
         });
         if !self.program_name.trim().is_empty() {
             params["program_name"] = json!(self.program_name.trim());
@@ -1726,6 +1730,10 @@ impl PostForm {
                 ui_kit::row(ui, tr("manufacture.post_program_number"), |ui| ui_kit::whole_number_field(ui, &mut self.program_number, 0..=99_999, ""));
                 let usual_name = self.setups.get(self.setup).map_or("", |s| s.name.as_str());
                 ui_kit::text_row(ui, tr("manufacture.post_program_name"), &mut self.program_name, usual_name);
+                // The stop between tools, for the posts that have a word for it.
+                if self.posts.get(self.post).is_some_and(|post| manufacture_post_stops(&post.0)) {
+                    ui_kit::checkbox(ui, tr("manufacture.post_optional_stop"), &mut self.optional_stop);
+                }
                 ui_kit::status_line(ui, tr("manufacture.post_warning"), ui_kit::StatusTone::Warning);
                 refusal(ui, self.error.as_deref());
             });

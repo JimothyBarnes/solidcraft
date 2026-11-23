@@ -14,6 +14,7 @@
   "cycles": { "drill": true, "dwell": false, "peck": true, "chip_break": false, "tap": false, "g98": "block_start", "motion": { "peck_clearance": 0.5, "chip_break_back_off": 0.5, "peck_retract": "clear_z", "above_r": 0.0 } },
   "tool_length_offset": "G43 H{tool}",
   "xy_before_z": true,
+  "optional_stop": "M1",
   "sequences": {
     "program_start": ["%", "O{program_number} ({program_name})"],
     "safe_start": ["G17 G40 G49 G80 G90 G94 {units_code}"],

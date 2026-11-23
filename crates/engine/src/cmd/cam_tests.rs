@@ -299,11 +299,11 @@ fn a_faced_and_drilled_part_posts_as_one_program() {
     run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
     run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
     // Facing takes the stock down to the part's top (Z -1); the holes are 10 deep from there (Z -11).
-    // The drill starts where facing ended, changes tool with the spindle stopped, and comes in
-    // from the clearance height.
+    // The drill starts where facing ended, changes tool with the spindle stopped (after an
+    // optional stop, the tool at home), and comes in from the clearance height.
     let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = haas["text"].as_str().unwrap();
-    let join = "\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\nG28 G91 Z0.\nG90\nT3 M6\nS3183 M3\nM8\nG0 X-20. Y-10.\nG43 H3 Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\n";
+    let join = "\nX-43.\nG0 Z5.\nZ25.\nM9\nM5\nG28 G91 Z0.\nG90\nM1\nT3 M6\nS3183 M3\nM8\nG0 X-20. Y-10.\nG43 H3 Z25.\nG99 G83 X-20. Y-10. Z-11. R5. Q3. F636.6\n";
     assert!(text.contains(join), "{text}");
     assert!(haas["notes"].as_array().unwrap().is_empty(), "{haas}");
     for post in ["rs274", "fanuc_mill"] {
@@ -2423,4 +2423,29 @@ fn the_designs_tools_are_listed_by_number_and_searched_by_words() {
     assert!(refused(&mut s, "cam.tool.list", json!({"search": 5})).contains("parameters"));
     // A design with no Manufacture data has no tools to list.
     assert_eq!(run(&mut Session::default(), "cam.tool.list", json!({})), json!({"tools": [], "of": 0}));
+}
+
+#[test]
+fn a_program_stops_if_asked_before_every_tool_change_but_the_first() {
+    // The block faced with the 20 mm end mill (tool 4) and drilled with the 10 mm drill (tool 3):
+    // two tools, one change between them.
+    let mut s = milling();
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 4}));
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": three_holes()}));
+    let posted = |s: &mut Session, params: Value| run(s, "cam.post", params)["text"].as_str().unwrap().to_string();
+    // The Haas post: an optional stop after the trip home and before the second tool; none
+    // before the first, and none when the program is asked for none.
+    let haas = posted(&mut s, json!({"setup": "setup-1", "post": "haas_mill"}));
+    assert!(haas.contains("\nG28 G91 Z0.\nG90\nM1\nT3 M6\n"), "{haas}");
+    assert_eq!(haas.matches("\nM1\n").count(), 1, "{haas}");
+    assert!(haas.find("T4 M6").is_some_and(|first| first < haas.find("\nM1\n").unwrap_or(0)), "{haas}");
+    let without = posted(&mut s, json!({"setup": "setup-1", "post": "haas_mill", "optional_stop": false}));
+    assert!(!without.contains("M1\n") && without.lines().count() + 1 == haas.lines().count(), "{without}");
+    // The NIST post has no word for it; the Fanuc-style post numbers the line like any other.
+    assert!(!posted(&mut s, json!({"setup": "setup-1", "post": "rs274"})).contains("M1"));
+    let fanuc = posted(&mut s, json!({"setup": "setup-1", "post": "fanuc_mill"}));
+    assert_eq!(fanuc.lines().filter(|line| line.ends_with(" M1")).count(), 1, "{fanuc}");
+    // A form is told which posts have one.
+    assert_eq!(["haas_mill", "fanuc_mill", "rs274"].map(crate::cmd::manufacture_post_stops), [true, true, false]);
+    assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "optional_stop": "yes"})).contains("parameters"));
 }

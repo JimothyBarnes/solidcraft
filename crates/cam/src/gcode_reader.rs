@@ -52,7 +52,7 @@ pub struct ReadBack {
     pub toolpath: Toolpath,
     /// The length unit in force at the end.
     pub units: LengthUnit,
-    /// Things accepted but worth a look (an optional stop, text after the program end).
+    /// Things accepted but worth a look (a program stop, text after the program end).
     pub notes: Vec<String>,
     /// How many retracts to machine Z home (`G91 G28 Z0`, `G53 G0 Z…`) the program made. They
     /// are not moves of the toolpath: where the tool ends up depends on the machine.
@@ -608,8 +608,10 @@ impl Machine {
             return Err("a motion code needs at least one axis word".into());
         }
         // 21. Stop
-        if has_m(0) || has_m(1) {
-            self.notes.push(format!("line {line}: program stop (M0/M1) ignored for read-back"));
+        // A stop is not a move. A program stop (M0) is worth a look; an optional one (M1) is
+        // what posts write between tools, and stops only when the operator has asked for it.
+        if has_m(0) {
+            self.notes.push(format!("line {line}: program stop (M0) ignored for read-back"));
         }
         if has_m(2) || has_m(30) {
             self.ended = true;

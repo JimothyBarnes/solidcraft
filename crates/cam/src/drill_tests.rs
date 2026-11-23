@@ -307,7 +307,13 @@ fn a_tap_turns_a_whole_number_of_times_a_minute_and_feeds_one_pitch_a_turn() {
     let d = drilled(&DrillOp { rpm: Some(250.4), ..tapping.clone() }, &tap).unwrap();
     assert_eq!((d.rpm, d.feed), (250.0, 375.0));
     // It posts as G84 and reads back as the tapped holes it is.
-    let ctx = crate::ProgramContext { program_number: 7, program_name: "Tapped".into(), units: crate::LengthUnit::Millimetre, work_offset: 1 };
+    let ctx = crate::ProgramContext {
+        program_number: 7,
+        program_name: "Tapped".into(),
+        units: crate::LengthUnit::Millimetre,
+        work_offset: 1,
+        optional_stop: true,
+    };
     let posted = crate::Post::builtin("haas_mill").unwrap().write(&drilled(&tapping, &tap).unwrap().toolpath, &ctx).unwrap();
     assert!(posted.text.contains("\nS318 M3\n") && posted.text.contains("\nG99 G84 X0. Y0. Z-13. R5. F477.\nX20. Y0.\nG80\n"), "{}", posted.text);
 }

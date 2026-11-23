@@ -1,0 +1,26 @@
+{
+  "en": {
+    "manufacture.post_optional_stop": "Optional stop (M1) before each tool change"
+  },
+  "ar": {
+    "manufacture.post_optional_stop": "توقف اختياري (M1) قبل كل تبديل أداة"
+  },
+  "he": {
+    "manufacture.post_optional_stop": "עצירה אופציונלית (M1) לפני כל החלפת כלי"
+  },
+  "ja": {
+    "manufacture.post_optional_stop": "工具交換の前にオプショナルストップ（M1）"
+  },
+  "vi": {
+    "manufacture.post_optional_stop": "Dừng tùy chọn (M1) trước mỗi lần đổi dao"
+  },
+  "zh": {
+    "manufacture.post_optional_stop": "每次换刀前的选择性停止（M1）"
+  },
+  "de": {
+    "manufacture.post_optional_stop": "Wahlweiser Halt (M1) vor jedem Werkzeugwechsel"
+  },
+  "ko": {
+    "manufacture.post_optional_stop": "공구 교환 전 옵셔널 스톱(M1)"
+  }
+}

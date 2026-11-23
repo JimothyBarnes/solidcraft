@@ -794,6 +794,10 @@ pub struct CamPostParams {
     /// Replace a file that is already there (default false).
     #[serde(default)]
     pub overwrite: bool,
+    /// Write the post's optional stop (M1) before every tool change but the first, where the
+    /// post has one (default true): with the control's Optional Stop on, the machine waits there.
+    #[serde(default)]
+    pub optional_stop: Option<bool>,
 }
 
 /// A posted program and what reading it back found. The program is never "safe to run": it says
