@@ -41,9 +41,9 @@ pub const DEFAULT_POCKET_STEPDOWN: f64 = 0.5;
 /// The angle the tool goes down the innermost ring at when the operation gives none, radians (3°).
 pub const DEFAULT_RAMP_ANGLE: f64 = 3.0 * std::f64::consts::PI / 180.0;
 /// The shallowest and steepest ramps, radians (0.5° and 30°).
-const RAMP_ANGLES: (f64, f64) = (0.5 * std::f64::consts::PI / 180.0, 30.0 * std::f64::consts::PI / 180.0);
+pub(crate) const RAMP_ANGLES: (f64, f64) = (0.5 * std::f64::consts::PI / 180.0, 30.0 * std::f64::consts::PI / 180.0);
 /// The most turns a ramp may take down one level.
-const MAX_RAMP_TURNS: f64 = 500.0;
+pub(crate) const MAX_RAMP_TURNS: f64 = 500.0;
 /// How far short of the next ring a move between rings is checked: it ends on that ring.
 const LINK_SLACK: f64 = 1e-5;
 /// How much further than the stepover a ring may be from the ring outside it, mm: the
@@ -286,7 +286,7 @@ impl PocketOp {
                         // Down to the level above in the air it left, then down the ring itself.
                         moves.push(Move::Rapid { to: at(ring.start, retract) });
                         moves.push(Move::Linear { to: at(ring.start, above), feed: f.plunge_feed });
-                        ramp(&mut moves, ring, above, z, angle, f.ramp_feed);
+                        ramp(&mut moves, ring.start, &ring.segs, above, z, angle, f.ramp_feed);
                     } else {
                         // From the ring inside, the shortest way: one stepover, in the region.
                         moves.push(Move::Linear { to: at(ring.start, z), feed: f.feed });
@@ -330,19 +330,19 @@ impl PocketOp {
     }
 }
 
-/// The moves down `ring` from the height `above` to `z`: whole turns, falling evenly along its
-/// length, no steeper than `angle`.
-fn ramp(moves: &mut Vec<Move>, ring: &Ring, above: f64, z: f64, angle: f64, feed: f64) {
-    let round = ring.round();
+/// The moves down a closed path (`segs`, from `start` back to it) from the height `above` to
+/// `z`: whole turns, falling evenly along its length, no steeper than `angle`.
+pub(crate) fn ramp(moves: &mut Vec<Move>, start: Vec2, segs: &[Seg2], above: f64, z: f64, angle: f64, feed: f64) {
+    let round: f64 = segs.iter().map(Seg2Geom::length).sum();
     let turns = ((above - z) / angle.tan() / round).ceil().clamp(1.0, MAX_RAMP_TURNS);
     let whole = turns * round;
     let height = |along: f64| if along >= whole { z } else { above - (above - z) * along / whole };
     let mut along = 0.0;
-    let mut from = ring.start;
+    let mut from = start;
     for turn in 0..turns as usize {
-        for (k, seg) in ring.segs.iter().enumerate() {
-            let closes = k + 1 == ring.segs.len();
-            let to = if closes { ring.start } else { seg.end() };
+        for (k, seg) in segs.iter().enumerate() {
+            let closes = k + 1 == segs.len();
+            let to = if closes { start } else { seg.end() };
             let next = if closes && turn + 1 == turns as usize { whole } else { along + seg.length() };
             cut(moves, seg, from, to, (height(along), height(next)), feed);
             (along, from) = (next, to);

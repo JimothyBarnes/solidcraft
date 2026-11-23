@@ -3,6 +3,12 @@
 //! (the stock, to go down beside it in the air), the tool, and the outline the engine takes from
 //! the model; it keeps no geometry of its own.
 //!
+//! Or round the inside of an opening (decision 0021): a pocket's wall, a window through the
+//! part, a round hole wider than the tool. The tool's centre is on the wall moved in by its
+//! radius. There is nowhere beside the stock to go down, so it goes down along the wall itself,
+//! on a ramp, to each level, then once round at the level; at the bottom it leaves the wall by
+//! a quarter turn into the opening. Round a hole that is a helix: boring with an end mill.
+//!
 //! How the tool meets the wall and what holds the part (decision 0016): it comes on to the round
 //! and leaves it by a quarter turn that meets it at a tangent, and tabs, when asked for, are
 //! places along the round where the tool lifts over a bridge of stock left at the bottom.
@@ -11,11 +17,12 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use serde::{Deserialize, Serialize};
 use solidcore_record::{Loop2, Region2, Seg2, Vec2, Vec3};
-use solidcraft_geom::{Loop2Geom, Seg2Geom};
+use solidcraft_geom::{Loop2Geom, Region2Geom, Seg2Geom};
 
 use crate::feeds::op_feeds;
 use crate::offset::{JOINT_TOLERANCE, offset_regions};
 use crate::placement::Placement;
+use crate::pocket::{DEFAULT_RAMP_ANGLE, MAX_RAMP_TURNS, RAMP_ANGLES, ramp};
 use crate::tool::{Engagement, Tool, ToolKind};
 use crate::toolpath::{ArcDirection, Coolant, MAX_FEED, MAX_SPINDLE_RPM, MIN_ARC_RADIUS, Move, Plane, SpindleDirection, Toolpath};
 use crate::units::MAX_COORDINATE;
@@ -50,6 +57,8 @@ pub const DEFAULT_LEAD_RADIUS: f64 = 0.1;
 const LEAD_SHARES: [f64; 3] = [1.0, 0.5, 0.25];
 /// The most tabs round one part.
 pub const MAX_TABS: usize = 1_000;
+/// The most openings one inside contour goes round.
+pub const MAX_CONTOUR_OPENINGS: usize = 1_000;
 /// A tab's width and height when the operation gives none, mm.
 pub const DEFAULT_TAB_WIDTH: f64 = 6.0;
 pub const DEFAULT_TAB_HEIGHT: f64 = 2.0;
@@ -71,6 +80,18 @@ pub enum CutDirection {
     Climb,
     /// The other way round.
     Conventional,
+}
+
+/// Which side of the loops it is given a contour goes round.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContourSide {
+    /// Round the outside of the part, in from beside the stock.
+    #[default]
+    Outside,
+    /// Round the inside of an opening (a pocket's wall, a window, a round hole), down a ramp
+    /// along the wall.
+    Inside,
 }
 
 /// A contour operation's parameters, as the design keeps them. Every one has a default.
@@ -107,6 +128,16 @@ pub struct ContourOp {
     /// Bridges of stock left at the bottom to hold the part; `None` for none.
     #[serde(default)]
     pub tabs: Option<Tabs>,
+    /// Round the outside of the part, or round the inside of the openings it is given.
+    #[serde(default)]
+    pub side: ContourSide,
+    /// Inside: a point in each opening to go round, X and Y in the setup's WCS, mm: the model
+    /// is read there each time the toolpath is worked out.
+    #[serde(default)]
+    pub openings: Vec<[f64; 2]>,
+    /// Inside: the angle the tool goes down along the wall at, radians; `None` for 3 degrees.
+    #[serde(default)]
+    pub ramp_angle: Option<f64>,
 }
 
 /// The tabs a contour leaves round each part it cuts: evenly spaced, kept on straight sides
@@ -218,6 +249,30 @@ impl ContourOp {
                 return bad(format!("a tab's width and height must be {MIN_TAB} to {MAX_LEAVE} mm"));
             }
         }
+        if !self.ramp_angle.is_none_or(|v| (RAMP_ANGLES.0..=RAMP_ANGLES.1).contains(&v)) {
+            return bad("the ramp angle must be 0.5 to 30 degrees".into());
+        }
+        match self.side {
+            ContourSide::Inside => {
+                if self.tabs.is_some() {
+                    return bad("tabs hold a part that is cut round its outside: an inside contour takes none".into());
+                }
+                if self.openings.is_empty() || self.openings.len() > MAX_CONTOUR_OPENINGS {
+                    return bad(format!("an inside contour goes round 1 to {MAX_CONTOUR_OPENINGS} openings, not {}", self.openings.len()));
+                }
+                if self.openings.iter().flatten().any(|v| !finite(*v)) {
+                    return bad(format!("an opening's point must be finite and within {MAX_COORDINATE} mm"));
+                }
+            }
+            ContourSide::Outside => {
+                if self.ramp_angle.is_some() {
+                    return bad("a ramp angle is for an inside contour: round the outside the tool goes down beside the stock".into());
+                }
+                if !self.openings.is_empty() {
+                    return bad("openings are for an inside contour: round the outside it is the part's own outline that is cut".into());
+                }
+            }
+        }
         match tool.kind {
             ToolKind::FlatEndMill | ToolKind::BullNoseEndMill => Ok(()),
             other => bad(format!("tool {} ({other:?}) does not cut a contour: use a flat or bull-nose end mill", tool.number)),
@@ -230,48 +285,17 @@ impl ContourOp {
     /// and arcs, X and Y in the WCS, none overlapping another.
     pub fn toolpath(&self, start: Option<Vec3>, tool: &Tool, placement: &Placement, material: Option<&str>, outline: &[Loop2]) -> Result<Contoured> {
         self.validate(tool)?;
-        let (stock, model) = (placement.stock, placement.model);
-        let top = self.top.unwrap_or(stock.max.z);
-        let bottom = self.bottom.unwrap_or(model.min.z);
-        let depth = top - bottom;
-        if !(depth > SAME_HEIGHT) {
-            return bad(format!("nothing to cut: the bottom ({bottom} mm) is not below the top ({top} mm)"));
-        }
+        let Depths { top, bottom, levels, per_level, stepdown } = self.depths(tool, placement)?;
+        let (stock, g, depth) = (placement.stock, tool.geometry, top - bottom);
         let (retract, clearance) = (placement.retract_z, placement.clearance_z);
-        if !(retract - top > SAME_HEIGHT) {
-            return bad(format!("the retract height ({retract} mm) must be above the contour's top ({top} mm)"));
-        }
-        // The tool runs down the finished wall: the whole of it must be within the tool's reach
-        // below anything wider than its cutting diameter.
-        let g = tool.geometry;
-        if !(g.diameter > 0.0 && g.diameter <= MAX_COORDINATE) {
-            return bad(format!("tool {}'s diameter must be above 0", tool.number));
-        }
-        let reach = if g.shoulder_length > 0.0 { g.shoulder_length } else { g.flute_length };
-        if !(depth <= reach + 1e-9) {
-            return bad(format!(
-                "the cut is {depth} mm deep, more than the {reach} mm tool {} reaches down a wall: raise the bottom or use a longer tool",
-                tool.number
-            ));
-        }
-        // Levels of equal depth, none deeper than the stepdown.
-        let stepdown = self.stepdown.unwrap_or(DEFAULT_CONTOUR_STEPDOWN * g.diameter);
-        let count = (depth / stepdown - 1e-9).ceil().max(1.0);
-        if !(count <= MAX_CONTOUR_LEVELS as f64) {
-            return bad(format!("{depth} mm in steps of {stepdown} mm takes more than {MAX_CONTOUR_LEVELS} levels"));
-        }
-        let count = count as usize;
-        let per_level = depth / count as f64;
-        if !(per_level <= g.flute_length + 1e-9) {
-            return bad(format!(
-                "each level is {per_level} mm deep, past tool {}'s {} mm of flutes: give the operation a smaller stepdown",
-                tool.number, g.flute_length
-            ));
-        }
-        let levels: Vec<f64> = (1..=count).map(|k| if k == count { bottom } else { top - per_level * k as f64 }).collect();
         // The tool's centre: the outline moved out by the tool's radius and the stock to leave.
         if outline.is_empty() {
             return bad("there is no outline to cut round".into());
+        }
+        if self.side == ContourSide::Inside {
+            // Loops alone are openings with nothing standing in them.
+            let openings: Vec<Region2> = outline.iter().map(|l| Region2 { outer: l.clone(), holes: Vec::new() }).collect();
+            return self.toolpath_inside(start, tool, placement, material, &openings);
         }
         let radius = 0.5 * g.diameter;
         let offset = radius + self.leave.unwrap_or(0.0);
@@ -396,6 +420,243 @@ impl ContourOp {
             notes,
         })
     }
+}
+
+/// The heights a contour is cut at.
+struct Depths {
+    top: f64,
+    bottom: f64,
+    /// Each level's Z, top down: the last is the bottom.
+    levels: Vec<f64>,
+    per_level: f64,
+    stepdown: f64,
+}
+
+impl ContourOp {
+    /// The heights the cut is made at for `tool` in a setup placed at `placement`: from the top
+    /// down to the bottom in levels of equal depth, none deeper than the stepdown, all within the
+    /// tool's reach.
+    fn depths(&self, tool: &Tool, placement: &Placement) -> Result<Depths> {
+        let (stock, model) = (placement.stock, placement.model);
+        let top = self.top.unwrap_or(stock.max.z);
+        let bottom = self.bottom.unwrap_or(model.min.z);
+        let depth = top - bottom;
+        if !(depth > SAME_HEIGHT) {
+            return bad(format!("nothing to cut: the bottom ({bottom} mm) is not below the top ({top} mm)"));
+        }
+        let retract = placement.retract_z;
+        if !(retract - top > SAME_HEIGHT) {
+            return bad(format!("the retract height ({retract} mm) must be above the contour's top ({top} mm)"));
+        }
+        // The tool runs down the finished wall: the whole of it must be within the tool's reach
+        // below anything wider than its cutting diameter.
+        let g = tool.geometry;
+        if !(g.diameter > 0.0 && g.diameter <= MAX_COORDINATE) {
+            return bad(format!("tool {}'s diameter must be above 0", tool.number));
+        }
+        let reach = if g.shoulder_length > 0.0 { g.shoulder_length } else { g.flute_length };
+        if !(depth <= reach + 1e-9) {
+            return bad(format!(
+                "the cut is {depth} mm deep, more than the {reach} mm tool {} reaches down a wall: raise the bottom or use a longer tool",
+                tool.number
+            ));
+        }
+        // Levels of equal depth, none deeper than the stepdown.
+        let stepdown = self.stepdown.unwrap_or(DEFAULT_CONTOUR_STEPDOWN * g.diameter);
+        let count = (depth / stepdown - 1e-9).ceil().max(1.0);
+        if !(count <= MAX_CONTOUR_LEVELS as f64) {
+            return bad(format!("{depth} mm in steps of {stepdown} mm takes more than {MAX_CONTOUR_LEVELS} levels"));
+        }
+        let count = count as usize;
+        let per_level = depth / count as f64;
+        if !(per_level <= g.flute_length + 1e-9) {
+            return bad(format!(
+                "each level is {per_level} mm deep, past tool {}'s {} mm of flutes: give the operation a smaller stepdown",
+                tool.number, g.flute_length
+            ));
+        }
+        let levels: Vec<f64> = (1..=count).map(|k| if k == count { bottom } else { top - per_level * k as f64 }).collect();
+        Ok(Depths { top, bottom, levels, per_level, stepdown })
+    }
+
+    /// An inside contour's toolpath round `openings`, one for each of the operation's points, in
+    /// their order: each a closed wall (its outer loop) with whatever stands inside it (its
+    /// holes: islands the tool must keep its radius from too), of lines and arcs, X and Y in
+    /// the WCS. The rest as [`ContourOp::toolpath`].
+    pub fn toolpath_inside(
+        &self,
+        start: Option<Vec3>,
+        tool: &Tool,
+        placement: &Placement,
+        material: Option<&str>,
+        openings: &[Region2],
+    ) -> Result<Contoured> {
+        self.validate(tool)?;
+        if self.side != ContourSide::Inside {
+            return bad("an outside contour goes round the part's outline, not round openings".into());
+        }
+        if openings.len() != self.openings.len() {
+            return bad(format!("{} openings were read from the model for the operation's {} points", openings.len(), self.openings.len()));
+        }
+        let d = self.depths(tool, placement)?;
+        self.inside(start, tool, placement, material, openings, &d)
+    }
+
+    /// Round the inside of each of `openings`: the tool's centre on the wall moved in by its
+    /// radius and the stock to leave (and as far from anything standing in the opening), down a
+    /// ramp along that path to each level and once round at the level, and off the wall at the
+    /// bottom by a quarter turn into the opening.
+    fn inside(
+        &self,
+        start: Option<Vec3>,
+        tool: &Tool,
+        placement: &Placement,
+        material: Option<&str>,
+        openings: &[Region2],
+        d: &Depths,
+    ) -> Result<Contoured> {
+        let g = tool.geometry;
+        let (retract, clearance) = (placement.retract_z, placement.clearance_z);
+        let radius = 0.5 * g.diameter;
+        let offset = radius + self.leave.unwrap_or(0.0);
+        let angle = self.ramp_angle.unwrap_or(DEFAULT_RAMP_ANGLE);
+        let lead = self.lead.unwrap_or(DEFAULT_LEAD_RADIUS * g.diameter);
+        let mut rounds = Vec::new();
+        let mut notes = Vec::new();
+        for (k, opening) in openings.iter().enumerate() {
+            let what = format!("opening {}", k + 1);
+            let region = Region2 { outer: opening.outer.ccw(), holes: opening.holes.iter().map(|island| island.ccw().reversed()).collect() };
+            let moved = moved_at_least(std::slice::from_ref(&region), offset).map_err(|e| Error::BadValue(format!("{what}: {e}")))?;
+            if moved.is_empty() {
+                let widest = 2.0 * region.inradius(1e-4);
+                return bad(format!(
+                    "tool {} ({} mm across) does not fit in {what}, which is about {widest:.2} mm across at its widest: use a narrower tool",
+                    tool.number, g.diameter
+                ));
+            }
+            for path in &moved {
+                let r = round_inside(path, self.direction, lead);
+                let round: f64 = r.segs.iter().map(Seg2Geom::length).sum();
+                let turns = (d.per_level / angle.tan() / round).ceil();
+                if !(round > 0.0 && turns <= MAX_RAMP_TURNS) {
+                    return bad(format!(
+                        "{what}: the tool's path is {round:.3} mm round, so the ramp down {} mm would take {turns} turns: use a narrower tool or a steeper ramp",
+                        d.per_level
+                    ));
+                }
+                // What the tool does not pass over in the middle stays: loose, once the cut is
+                // through.
+                let core = 2.0 * (path.inradius(1e-4) - radius);
+                if core > 10.0 * JOINT_TOLERANCE {
+                    notes.push(format!(
+                        "{what}: a core about {core:.1} mm across is left in its middle, loose once the cut is through; where it must be cut away, use Pocket"
+                    ));
+                }
+                rounds.push(r);
+            }
+        }
+        let f = op_feeds(tool, Engagement { axial: d.per_level.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
+        let Some(first) = rounds.first().map(|r| r.start) else { return bad("the openings left nothing to cut round".into()) };
+        let bottom = d.bottom;
+        let mut moves = vec![Move::ToolChange { tool: tool.number }, Move::Spindle { rpm: f.rpm, direction: SpindleDirection::Clockwise }];
+        if tool.coolant != Coolant::Off {
+            moves.push(Move::Coolant { mode: tool.coolant });
+        }
+        moves.push(Move::Rapid { to: at(first, clearance) });
+        let mut last = first;
+        for r in &rounds {
+            // Above where the path starts, down to the cut's top in the air, and from there
+            // along the wall: a ramp to each level, and the level once round.
+            moves.push(Move::Rapid { to: at(r.start, retract) });
+            moves.push(Move::Linear { to: at(r.start, d.top), feed: f.plunge_feed });
+            let mut above = d.top;
+            for &z in &d.levels {
+                ramp(&mut moves, r.start, &r.segs, above, z, angle, f.ramp_feed);
+                go_round(&mut moves, r, z, None, f.feed, f.plunge_feed);
+                above = z;
+            }
+            // Off the wall by the quarter turn and up, or straight up where there is no room.
+            last = r.start;
+            if let Some((_, off)) = &r.leads {
+                cut(&mut moves, off, r.start, off.end(), (bottom, bottom), f.feed);
+                last = off.end();
+            }
+            moves.push(Move::Rapid { to: at(last, retract) });
+        }
+        moves.push(Move::Rapid { to: at(last, clearance) });
+        if tool.coolant != Coolant::Off {
+            moves.push(Move::Coolant { mode: Coolant::Off });
+        }
+        moves.push(Move::SpindleStop);
+        let toolpath = Toolpath { start: start.unwrap_or(at(first, clearance)), moves };
+        toolpath.validate()?;
+
+        notes.extend(f.notes);
+        if lead > 0.0 && rounds.iter().any(|r| r.leads.is_none()) {
+            notes.push("there is no room for the arc off the wall in an opening: the tool goes straight up from the wall".into());
+        }
+        Ok(Contoured {
+            toolpath,
+            rpm: f.rpm,
+            feed: f.feed,
+            plunge_feed: f.plunge_feed,
+            top: d.top,
+            levels: d.levels.clone(),
+            stepdown: d.stepdown,
+            offset,
+            round: rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum::<f64>()).sum(),
+            entries: rounds.iter().map(|r| [r.start.x, r.start.y]).collect(),
+            leads: rounds.iter().map(Round::lead).collect(),
+            tabs: Vec::new(),
+            tab_top: None,
+            notes,
+        })
+    }
+}
+
+/// The outer loop of where the tool's centre may be in an opening, as a round to cut along the
+/// inside of its wall, turned the way `direction` asks: climb with a clockwise spindle is counter-clockwise round
+/// the inside. It starts at the middle of its longest straight side (the longest arc when there
+/// is none; of equals, the one nearest the front, then the left), where the tool comes down from
+/// above, and leaves the wall there by a quarter turn of `lead` (or a half or a quarter of it,
+/// where that is what fits) into the opening.
+fn round_inside(region: &Region2, direction: CutDirection, lead: f64) -> Round {
+    let path = &region.outer;
+    let micron = |v: f64| (v * 1e6).round() as i64;
+    let longest = path.segs.iter().enumerate().max_by_key(|(i, s)| {
+        let mid = s.mid();
+        (matches!(s, Seg2::Line { .. }), micron(s.length()), -micron(mid.y), -micron(mid.x), std::cmp::Reverse(*i))
+    });
+    let Some((at, seg)) = longest else {
+        return Round { entry: Vec2 { x: 0.0, y: 0.0 }, start: Vec2 { x: 0.0, y: 0.0 }, segs: Vec::new(), leads: None };
+    };
+    let (before, after) = seg.split_half();
+    let (start, along) = (after.start(), after.start_tangent());
+    let mut segs = vec![after];
+    segs.extend(path.segs.iter().skip(at + 1).copied());
+    segs.extend(path.segs.iter().take(at).copied());
+    segs.push(before);
+    let travel = if direction == CutDirection::Climb {
+        along
+    } else {
+        segs = Loop2 { segs }.reversed().segs;
+        Vec2 { x: -along.x, y: -along.y }
+    };
+    // Into the opening: to the left of the loop's own way round, the loop being counter-clockwise.
+    let inn = Vec2 { x: -along.y, y: along.x };
+    let leads = LEAD_SHARES.iter().map(|share| share * lead).filter(|&radius| radius >= MIN_ARC_RADIUS).find_map(|radius| {
+        // A wall that curves round the tool has room for the arc only well inside its own curve.
+        if matches!(*seg, Seg2::Arc { radius: own, sweep, .. } if sweep > 0.0 && radius > 0.5 * own) {
+            return None;
+        }
+        let centre = Vec2 { x: start.x + radius * inn.x, y: start.y + radius * inn.y };
+        // Turning the way that leaves along the travel: left when the opening is on the left.
+        let sweep = FRAC_PI_2.copysign(travel.x * inn.y - travel.y * inn.x);
+        let off = Seg2::Arc { center: centre, radius, start: (-inn.y).atan2(-inn.x), sweep };
+        arc_is_clear(&off, std::slice::from_ref(region), (path, at)).then_some((off, off))
+    });
+    Round { entry: start, start, segs, leads }
 }
 
 /// The cutting moves once round `r` at the height `z` from its start back to it. With `over`

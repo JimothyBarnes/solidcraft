@@ -938,3 +938,248 @@ fn a_round_part_has_its_tabs_evenly_round_it() {
     }
     assert!(close(over, 36.0), "{over}");
 }
+
+/// A plate 120 x 100 x 10 with a window 80 x 60 through its middle: in the WCS the plate is X -60
+/// to 60, Y -50 to 50, Z -11 to -1 under 1 mm of stock, and the window X -40 to 40, Y -30 to 30.
+fn plate() -> Placement {
+    placed_on(Bounds { min: p(0.0, 0.0, 0.0), max: p(120.0, 100.0, 10.0) }, 1.0)
+}
+
+const WINDOW: [(f64, f64); 4] = [(-40.0, -30.0), (40.0, -30.0), (40.0, 30.0), (-40.0, 30.0)];
+
+fn inside(op: &ContourOp) -> Result<Contoured> {
+    ContourOp { side: ContourSide::Inside, openings: vec![[0.0, 0.0]], ..op.clone() }.toolpath(
+        None,
+        &mill20(),
+        &plate(),
+        Some("aluminium"),
+        &[polygon(&WINDOW)],
+    )
+}
+
+#[test]
+fn an_inside_contour_goes_down_a_ramp_along_the_wall_and_once_round_at_each_level() {
+    // The 20 mm tool's centre is 10 inside the window's wall: a rectangle X ±30, Y ±20, 200 round.
+    // The stock's top is Z 0 and the plate's bottom Z -11: two levels of 5.5. Climb, with a
+    // clockwise spindle, is counter-clockwise round the inside. The tool comes down over the
+    // middle of the front side, (0, -20), and from the top goes down along the wall: at 3
+    // degrees 5.5 mm takes 105 mm, so one turn of the 200, falling evenly, then the level once
+    // round. At the bottom it leaves the wall by a quarter turn of 2 (a tenth of the tool) into
+    // the window.
+    let d = inside(&ContourOp::default()).unwrap();
+    assert_eq!((d.top, d.levels.clone(), d.stepdown, d.offset), (0.0, vec![-5.5, -11.0], 10.0, 10.0));
+    assert_eq!((d.entries.clone(), d.leads.clone(), d.tabs.len(), d.tab_top), (vec![[0.0, -20.0]], vec![2.0], 0, None));
+    assert!(close(d.round, 200.0), "{}", d.round);
+    // A cut as wide as the tool, 0.2 mm a revolution; down the ramp at half that.
+    let (cut, ramp) = (0.2 * RPM, 0.1 * RPM);
+    assert!(close(d.rpm, RPM) && close(d.feed, cut) && close(d.plunge_feed, ramp), "{} {} {}", d.rpm, d.feed, d.plunge_feed);
+    // What the tool does not pass over: the middle 40 x 20, about 20 across.
+    assert_eq!(
+        d.notes,
+        ["opening 1: a core about 20.0 mm across is left in its middle, loose once the cut is through; where it must be cut away, use Pocket"]
+    );
+    let corners = [(30.0, -20.0), (30.0, 20.0), (-30.0, 20.0), (-30.0, -20.0), (0.0, -20.0)];
+    // How far round each corner is from the start, of the 200.
+    let along = [30.0, 70.0, 130.0, 170.0, 200.0];
+    let mut want = vec![
+        Move::ToolChange { tool: 4 },
+        Move::Spindle { rpm: d.rpm, direction: SpindleDirection::Clockwise },
+        Move::Coolant { mode: Coolant::Flood },
+        Move::Rapid { to: p(0.0, -20.0, 25.0) },
+        Move::Rapid { to: p(0.0, -20.0, 5.0) },
+        Move::Linear { to: p(0.0, -20.0, 0.0), feed: ramp },
+    ];
+    for (above, z) in [(0.0, -5.5), (-5.5, -11.0)] {
+        want.extend(corners.iter().zip(along).map(|(&(x, y), s)| Move::Linear { to: p(x, y, above + (z - above) * s / 200.0), feed: ramp }));
+        want.extend(corners.iter().map(|&(x, y)| Move::Linear { to: p(x, y, z), feed: cut }));
+    }
+    want.extend([
+        Move::Arc { to: p(2.0, -18.0, -11.0), center: p(0.0, -18.0, -11.0), plane: Plane::Xy, direction: ArcDirection::CounterClockwise, feed: cut },
+        Move::Rapid { to: p(2.0, -18.0, 5.0) },
+        Move::Rapid { to: p(2.0, -18.0, 25.0) },
+        Move::Coolant { mode: Coolant::Off },
+        Move::SpindleStop,
+    ]);
+    assert!(same_moves(&d.toolpath.moves, &want), "{:#?}", d.toolpath.moves);
+    assert_eq!(d.toolpath.start, p(0.0, -20.0, 25.0));
+    // Measured: 5 down to the top, two ramps of 200 falling 5.5 (each side longer by the same
+    // share), two rounds of 200, and the quarter turn of radius 2.
+    let s = d.toolpath.stats().unwrap();
+    assert!(close(s.feed_length, 5.0 + 2.0 * 200.0 * (1.0 + (5.5f64 / 200.0).powi(2)).sqrt() + 400.0 + PI), "{}", s.feed_length);
+    assert_eq!((s.min, s.max), (p(-30.0, -20.0, -11.0), p(30.0, 20.0, 25.0)));
+
+    // The simulation: the band the tool passes over is the window with its corners left round
+    // (4800 less 4 (100 - 25 pi)) less the middle 40 x 20, through the 11 mm of stock; nothing
+    // of the plate is cut into, and no rapid passes through material.
+    let placement = plate();
+    let sim = crate::sim::Simulation::new(placement.stock, 0.25, 0.01).unwrap();
+    let f = sim.stock.clone();
+    let part: Vec<f64> = (0..f.nx * f.ny)
+        .map(|k| {
+            let c = f.centre(k % f.nx, k / f.nx);
+            if c.x.abs() < 40.0 && c.y.abs() < 30.0 { -12.0 } else { -1.0 }
+        })
+        .collect();
+    let mut sim = sim.with_part(part).unwrap();
+    let report = sim.cut(0, &d.toolpath, &mill20()).unwrap();
+    assert_eq!((report.gouges, report.rapid_hits, report.body_hits), (0, 0, 0), "{:?}", sim.gouges.first());
+    let band = (4800.0 - 4.0 * (100.0 - 25.0 * PI) - 800.0) * 11.0;
+    assert!((report.removed - band).abs() < 0.01 * band, "{} mm3, not {band}", report.removed);
+}
+
+#[test]
+fn conventional_inside_goes_the_other_way_and_stock_to_leave_moves_the_path_in() {
+    // Clockwise round the inside: from the middle of the front side towards -X, and off the
+    // wall by a quarter turn the other way.
+    let d = inside(&ContourOp { direction: CutDirection::Conventional, stepdown: Some(11.0), ..ContourOp::default() }).unwrap();
+    assert_eq!(d.levels, vec![-11.0]);
+    let cuts: Vec<Vec3> = d.toolpath.moves.iter().filter_map(|m| if let Move::Linear { to, .. } = m { Some(*to) } else { None }).collect();
+    // Down to the top, then the ramp's first side, to the front left corner. One level of 11 mm
+    // at 3 degrees is 210 mm of path, more than the 200 round: two turns, so the corner, 30
+    // round, is 30 of 400 of the way down.
+    assert_eq!(cuts[0], p(0.0, -20.0, 0.0));
+    assert!((cuts[1].x + 30.0).abs() < 1e-9 && (cuts[1].y + 20.0).abs() < 1e-9 && (cuts[1].z + 11.0 * 30.0 / 400.0).abs() < 1e-9, "{:?}", cuts[1]);
+    let Some(Move::Arc { to, center, direction, .. }) = d.toolpath.moves.iter().find(|m| matches!(m, Move::Arc { .. })) else {
+        panic!("no arc off the wall")
+    };
+    assert_eq!((*to, *center, *direction), (p(-2.0, -18.0, -11.0), p(0.0, -18.0, -11.0), ArcDirection::Clockwise));
+    // Half a millimetre left on the wall: the path is 10.5 inside it, 59 x 39, 196 round.
+    let d = inside(&ContourOp { leave: Some(0.5), lead: Some(0.0), ..ContourOp::default() }).unwrap();
+    assert!(close(d.round, 196.0) && d.offset == 10.5 && d.entries == vec![[0.0, -19.5]] && d.leads == vec![0.0], "{} {:?}", d.round, d.entries);
+    // No arc was asked for: straight up from the wall, with nothing to note about it.
+    assert!(!d.toolpath.moves.iter().any(|m| matches!(m, Move::Arc { .. })) && d.notes.len() == 1, "{:?}", d.notes);
+}
+
+#[test]
+fn a_round_hole_is_bored_down_a_helix() {
+    // A hole of 24 through the plate's middle, with the 20 mm tool: its centre goes round a
+    // circle of radius 2, 12.57 round. Down 5.5 mm at 3 degrees is 105 mm of path: nine turns to
+    // each level, every one an arc about the hole's middle, counter-clockwise, falling as it
+    // goes; then the level once round. The tool passes over the whole hole: nothing is left in
+    // its middle, and the hole is cut to its wall all round and no further.
+    let hole = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 12.0, start: 0.0, sweep: 2.0 * PI }] };
+    let op = ContourOp { side: ContourSide::Inside, openings: vec![[0.0, 0.0]], ..ContourOp::default() };
+    let d = op.toolpath(None, &mill20(), &plate(), Some("aluminium"), &[hole]).unwrap();
+    assert!(close(d.round, 4.0 * PI) && d.levels == vec![-5.5, -11.0] && d.notes.is_empty(), "{} {:?}", d.round, d.notes);
+    let arcs: Vec<(Vec3, Vec3, ArcDirection)> = d
+        .toolpath
+        .moves
+        .iter()
+        .filter_map(|m| if let Move::Arc { to, center, direction, .. } = m { Some((*to, *center, *direction)) } else { None })
+        .collect();
+    let about_the_middle = |a: &&(Vec3, Vec3, ArcDirection)| a.1.x.abs() < 1e-9 && a.1.y.abs() < 1e-9;
+    let turns: Vec<&(Vec3, Vec3, ArcDirection)> = arcs.iter().filter(about_the_middle).collect();
+    assert!(turns.iter().all(|a| a.2 == ArcDirection::CounterClockwise && (a.0.x.hypot(a.0.y) - 2.0).abs() < 1e-9), "{arcs:?}");
+    // Never upward. The path is two half circles and the tool starts at the middle of one: three
+    // arcs a turn, and each level's nine turns and its round are 3 (9 + 1), twice. At each
+    // level's own depth: the last arc of its ramp and the three of its round.
+    assert_eq!(turns.len(), 60);
+    assert!(turns.windows(2).all(|pair| pair[1].0.z <= pair[0].0.z + 1e-12));
+    assert_eq!((turns.iter().filter(|a| a.0.z == -5.5).count(), turns.iter().filter(|a| a.0.z == -11.0).count()), (4, 4));
+    // Off the wall by a quarter turn of 1: a half of the 2 asked, which is as wide as the path.
+    assert_eq!(d.leads, vec![1.0]);
+
+    let placement = plate();
+    let sim = crate::sim::Simulation::new(placement.stock, 0.25, 0.01).unwrap();
+    let f = sim.stock.clone();
+    let out = |k: usize| f.centre(k % f.nx, k / f.nx).x.hypot(f.centre(k % f.nx, k / f.nx).y);
+    let part: Vec<f64> = (0..f.nx * f.ny).map(|k| if out(k) < 12.0 { -12.0 } else { -1.0 }).collect();
+    let mut sim = sim.with_part(part).unwrap();
+    let report = sim.cut(0, &d.toolpath, &mill20()).unwrap();
+    assert_eq!((report.gouges, report.rapid_hits), (0, 0), "{:?}", sim.gouges.first());
+    assert!(
+        (0..f.nx * f.ny).all(|k| sim.stock.heights[k] == if out(k) < 12.0 { -11.0 } else { 0.0 }),
+        "the hole and nothing else, to the stock's bottom"
+    );
+}
+
+#[test]
+fn what_cannot_be_contoured_inside_is_refused_with_the_reason() {
+    // A slot 15 wide does not take a 20 mm tool; its width is said.
+    let slot = polygon(&[(-40.0, -7.5), (40.0, -7.5), (40.0, 7.5), (-40.0, 7.5)]);
+    let op = ContourOp { side: ContourSide::Inside, openings: vec![[0.0, 0.0]], ..ContourOp::default() };
+    let refused = op.toolpath(None, &mill20(), &plate(), Some("aluminium"), std::slice::from_ref(&slot)).unwrap_err().to_string();
+    assert!(refused.contains("tool 4 (20 mm across) does not fit in opening 1, which is about 15.00 mm across"), "{refused}");
+    // The 6 mm tool does; given clockwise, the wall is gone round all the same.
+    let d = op.toolpath(None, &mill6(), &plate(), Some("aluminium"), &[slot.reversed()]).unwrap();
+    assert!(close(d.round, 2.0 * (74.0 + 9.0)) && d.entries == vec![[0.0, -4.5]], "{} {:?}", d.round, d.entries);
+    // Tabs are for a part cut round its outside, a ramp for the inside, and the ramp has its limits.
+    let tabs = Some(Tabs { count: 2, width: None, height: None });
+    assert!(inside(&ContourOp { tabs, ..ContourOp::default() }).unwrap_err().to_string().contains("an inside contour takes none"));
+    let ramp = ContourOp { ramp_angle: Some(0.1), ..ContourOp::default() };
+    assert!(contoured(&ramp).unwrap_err().to_string().contains("a ramp angle is for an inside contour"));
+    assert!(inside(&ContourOp { ramp_angle: Some(1.0), ..ContourOp::default() }).unwrap_err().to_string().contains("0.5 to 30 degrees"));
+    assert!(inside(&ContourOp { ramp_angle: Some(f64::NAN), ..ContourOp::default() }).is_err());
+    // A hole hardly wider than the tool: the path is so short that the ramp takes too many turns.
+    let tight = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 10.001, start: 0.0, sweep: 2.0 * PI }] };
+    let refused = op.toolpath(None, &mill20(), &plate(), Some("aluminium"), &[tight]).unwrap_err().to_string();
+    assert!(refused.contains("would take") && refused.contains("turns"), "{refused}");
+    // Kept as plain data, and an operation saved before there was a side is an outside one.
+    // An inside contour is given its openings, one for each of its points; an outside one has none.
+    let none = ContourOp { side: ContourSide::Inside, ..ContourOp::default() };
+    assert!(
+        none.toolpath(None, &mill20(), &plate(), Some("aluminium"), &[polygon(&WINDOW)])
+            .unwrap_err()
+            .to_string()
+            .contains("1 to 1000 openings, not 0")
+    );
+    let two = ContourOp { openings: vec![[0.0, 0.0], [1.0, 1.0]], ..op.clone() };
+    let refused = two.toolpath(None, &mill20(), &plate(), Some("aluminium"), &[polygon(&WINDOW)]).unwrap_err().to_string();
+    assert!(refused.contains("1 openings were read from the model for the operation's 2 points"), "{refused}");
+    assert!(
+        contoured(&ContourOp { openings: vec![[0.0, 0.0]], ..ContourOp::default() })
+            .unwrap_err()
+            .to_string()
+            .contains("openings are for an inside contour")
+    );
+    let region = Region2 { outer: polygon(&WINDOW), holes: Vec::new() };
+    let outside = ContourOp::default().toolpath_inside(None, &mill20(), &plate(), Some("aluminium"), std::slice::from_ref(&region));
+    assert!(outside.unwrap_err().to_string().contains("an outside contour goes round the part's outline"));
+    assert!(ContourOp { openings: vec![[f64::NAN, 0.0]], ..op.clone() }.toolpath_inside(None, &mill20(), &plate(), None, &[region]).is_err());
+    // Kept as plain data, and an operation saved before there was a side is an outside one.
+    let kept =
+        serde_json::to_value(ContourOp { side: ContourSide::Inside, openings: vec![[1.0, 2.0]], ramp_angle: Some(0.1), ..ContourOp::default() })
+            .unwrap();
+    assert_eq!(
+        (kept["side"].as_str(), kept["ramp_angle"].as_f64(), kept["openings"].clone()),
+        (Some("inside"), Some(0.1), serde_json::json!([[1.0, 2.0]]))
+    );
+    let old: ContourOp = serde_json::from_str(r#"{"top": null, "bottom": -5.0}"#).unwrap();
+    assert_eq!((old.side, old.ramp_angle, old.bottom, old.openings.len()), (ContourSide::Outside, None, Some(-5.0), 0));
+}
+
+#[test]
+fn a_post_near_the_wall_is_gone_round_at_the_tools_radius() {
+    // A post 10 across stands in the window at (25, 0), 10 from the wall on its right: the 20 mm
+    // tool does not pass between them. Where the tool's centre may be is the rectangle X ±30,
+    // Y ±20 less a circle of 15 about the post's middle (its radius and the tool's), which takes
+    // the right side from Y -14.14 to 14.14 (15² - 5² = 200). The tool leaves the wall there,
+    // goes round the far side of the post on that circle (360 less twice atan(14.14 / 5), 218.9
+    // degrees of it) and comes back to the wall: 200 - 28.28 + 57.32 round.
+    let post = Loop2 { segs: vec![Seg2::Arc { center: q(25.0, 0.0), radius: 5.0, start: 0.0, sweep: 2.0 * PI }] };
+    let opening = Region2 { outer: polygon(&WINDOW), holes: vec![post] };
+    let op = ContourOp { side: ContourSide::Inside, openings: vec![[0.0, 0.0]], stepdown: Some(11.0), ..ContourOp::default() };
+    let d = op.toolpath_inside(None, &mill20(), &plate(), Some("aluminium"), &[opening]).unwrap();
+    let chord = 200f64.sqrt();
+    let round = 200.0 - 2.0 * chord + 15.0 * (2.0 * PI - 2.0 * (chord / 5.0).atan());
+    assert!(close(d.round, round) && (round - 229.03).abs() < 0.01, "{} and {round}", d.round);
+    assert_eq!((d.entries.clone(), d.leads.clone()), (vec![[0.0, -20.0]], vec![2.0]));
+    // Never nearer the wall or the post than its radius, wherever it cuts.
+    let cuts = cutting_points(&d.toolpath);
+    assert!(cuts.len() > 50);
+    for at in cuts {
+        assert!(at.x.abs() <= 30.0 + 1e-6 && at.y.abs() <= 20.0 + 1e-6 && (at.x - 25.0).hypot(at.y) >= 15.0 - 1e-6, "{at:?}");
+    }
+    // The simulation, with the post standing as high as the plate: nothing of either is cut into.
+    let sim = crate::sim::Simulation::new(plate().stock, 0.25, 0.01).unwrap();
+    let f = sim.stock.clone();
+    let part: Vec<f64> = (0..f.nx * f.ny)
+        .map(|k| {
+            let c = f.centre(k % f.nx, k / f.nx);
+            if c.x.abs() < 40.0 && c.y.abs() < 30.0 && (c.x - 25.0).hypot(c.y) >= 5.0 { -12.0 } else { -1.0 }
+        })
+        .collect();
+    let mut sim = sim.with_part(part).unwrap();
+    let report = sim.cut(0, &d.toolpath, &mill20()).unwrap();
+    assert_eq!((report.gouges, report.rapid_hits), (0, 0), "{:?}", sim.gouges.first());
+}
