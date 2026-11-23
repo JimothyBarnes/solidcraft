@@ -2103,3 +2103,29 @@ fn slot_offers_the_slots_found_and_the_widest_tool_that_goes_into_them() {
     let after = data(&mut h)["setups"][0]["operations"][0]["operation"]["slot"].clone();
     assert_eq!((after["slots"].clone(), after["stepdown"].as_f64()), (kept["operation"]["slot"]["slots"].clone(), Some(2.0)));
 }
+
+#[test]
+fn bore_goes_to_the_bottom_typed_to_break_through() {
+    let mut h = harness();
+    // The block with a hole of 24 through it and a 20 mm end mill (T1): in the WCS the block's
+    // bottom is at Z -21.
+    block(&mut h);
+    h.app.run("solid.cylinder", json!({"diameter": 24, "height": 30, "base": [18, 20, -5], "operation": "cut"})).unwrap();
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    h.frames(3);
+    // The form shows where the hole ends, and leaves it to the command until it is typed.
+    let form = bore_form(&mut h);
+    assert_eq!((form.bottom, form.typed_bottom, form.params()["contour"]["bottom"].clone()), (-21.0, false, json!(null)));
+    assert!(h.widget(tr("manufacture.contour_bottom")).is_some());
+    // Half a millimetre under the part: the helix goes that far, and the operation keeps it.
+    let form = bore_form(&mut h);
+    (form.bottom, form.typed_bottom) = (-21.5, true);
+    h.frames(3);
+    let last = bore_form(&mut h).worked.get().and_then(|(_, preview)| preview.numbers["levels"].as_array()?.last()?.as_f64());
+    assert_eq!(last, Some(-21.5));
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"]["bottom"], json!(-21.5));
+}

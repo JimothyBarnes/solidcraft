@@ -32,6 +32,10 @@ pub(crate) struct BoreForm {
     /// with room for its helix.
     pub picked_tool: bool,
     pub direction: usize,
+    /// The Z the cut ends at: the end of the holes' wall until it is typed (a little under the
+    /// part, to break through).
+    pub bottom: f64,
+    pub typed_bottom: bool,
     /// Spindle speed, rev/min, and cutting feed, mm/min: what the tool's cutting data gives for
     /// the setup's stock material, until typed.
     pub rpm: f64,
@@ -59,6 +63,8 @@ impl BoreForm {
             tool: 0,
             picked_tool: false,
             direction: 0,
+            bottom: 0.0,
+            typed_bottom: false,
             rpm: 0.0,
             feed: 0.0,
             typed_rpm: false,
@@ -99,13 +105,14 @@ impl BoreForm {
     }
 
     /// The `cam.op.bore` parameters: a point in each hole of the group (its centre), and where
-    /// the cut ends: at the end of the wall of a hole with a floor or a drill's point, through
-    /// the part for one that goes through. A speed or feed that was not typed is left to the
-    /// command.
+    /// the cut ends: where it was typed to, else at the end of the wall of a hole with a floor or
+    /// a drill's point, and through the part for one that goes through. A speed or feed that was
+    /// not typed is left to the command.
     pub fn params(&self) -> Value {
         let mut contour = match self.picked() {
             Some(group) => {
                 let bottom = match group.bottom {
+                    _ if self.typed_bottom => json!(self.bottom),
                     HoleBottom::Through => Value::Null,
                     HoleBottom::Flat | HoleBottom::Point => json!(group.top - group.depth),
                 };
@@ -135,10 +142,14 @@ impl BoreForm {
             self.group = 0;
         }
         if self.suited_to != Some(self.group) {
-            self.suited_to = Some(self.group);
+            // Other holes: their own bottom again, and the tool that suits them.
+            (self.suited_to, self.typed_bottom) = (Some(self.group), false);
             if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
                 self.tool = self.fitting_tool(diameter);
             }
+        }
+        if let Some(ends) = self.picked().map(|group| group.top - group.depth).filter(|_| !self.typed_bottom) {
+            self.bottom = ends;
         }
         let params = self.params();
         if !self.worked.refresh(app, &params, || manufacture_preview(&app.session, "cam.op.bore", &params)) {
@@ -216,6 +227,9 @@ impl BoreForm {
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_bore_tool", &mut self.tool, &tool_labels);
                 self.picked_tool |= self.tool != tool;
                 ui_kit::choice_row(ui, tr("manufacture.contour_direction"), "manufacture_bore_direction", &mut self.direction, &directions);
+                if ui_kit::row(ui, tr("manufacture.contour_bottom"), |ui| ui_kit::length_field(ui, &mut self.bottom, units, decimals)).changed() {
+                    self.typed_bottom = true;
+                }
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;
