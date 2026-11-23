@@ -34,6 +34,16 @@ pub(super) struct Pocket {
     pub region: Region2,
 }
 
+/// What is under a point of the plane, seen from above.
+enum Under {
+    /// Nothing of the bodies: the open, or an opening through them.
+    Nothing,
+    /// A flat face that faces up, this high above the plane.
+    Floor(f64),
+    /// Something that is not a flat face facing up.
+    NotFlat,
+}
+
 /// Looks for pockets in `bodies` (each with its name, for errors) from above `plane`: its
 /// normal is up, and `top` is a height above it that nothing of the bodies passes.
 pub(super) struct Finder<'a> {
@@ -81,7 +91,22 @@ impl<'a> Finder<'a> {
     /// The floor under the point `at` of the plane and the air just above it, whatever is over it.
     fn region_at(&mut self, at: Vec2) -> Result<Pocket, String> {
         let here = format!("X {} Y {}", at.x, at.y);
-        // Down from above everything: the first thing met is the floor.
+        let floor = match self.under(at)? {
+            Under::Nothing => return Err(format!("there is nothing of the part under {here}")),
+            Under::NotFlat => return Err(format!("the part is not flat and facing up at {here}: a pocket is named by a point on its floor")),
+            Under::Floor(floor) => floor,
+        };
+        if self.top - floor <= 2.0 * self.hair {
+            return Err(format!("{here} is on top of the part, not on the floor of a pocket"));
+        }
+        let Some(region) = self.air_at(floor, at)? else {
+            return Err(format!("the pocket at {here} is open to the outside of the part: only pockets with walls all round are cut, for now"));
+        };
+        Ok(Pocket { floor, region })
+    }
+
+    /// What is under the point `at` of the plane, looking down from above everything.
+    fn under(&self, at: Vec2) -> Result<Under, String> {
         let (up, above) = (self.plane.normal(), self.top + 1.0);
         let from = self.plane.to_world(at) + up * above;
         let mut floor: Option<(f64, &Body, usize)> = None;
@@ -95,34 +120,62 @@ impl<'a> Finder<'a> {
                 floor = Some((hit.depth, body, hit.face));
             }
         }
-        let Some((depth, body, face)) = floor else { return Err(format!("there is nothing of the part under {here}")) };
+        let Some((depth, body, face)) = floor else { return Ok(Under::Nothing) };
         if !body.planar_face(face).is_some_and(|on| on.normal().dot(up) >= FACING) {
-            return Err(format!("the part is not flat and facing up at {here}: a pocket is named by a point on its floor"));
+            return Ok(Under::NotFlat);
         }
         // Without the last bits of the ray's arithmetic, so that a floor at -7 reads -7.
-        let floor = ((above - depth) * 1e9).round() / 1e9;
-        if self.top - floor <= 2.0 * self.hair {
-            return Err(format!("{here} is on top of the part, not on the floor of a pocket"));
-        }
-        // The air there, just above the floor: the smallest hole of a cut face that the point is
-        // in is the pocket's wall.
+        Ok(Under::Floor(((above - depth) * 1e9).round() / 1e9))
+    }
+
+    /// The air round the point `at` a hair above the height `floor`: the smallest hole of a cut
+    /// face of the bodies' section there that the point is in (a wall all round it), with the
+    /// cut faces inside that hole as its own holes: material standing there, islands, but for
+    /// those that stand inside another one (in a pocket of an island). `None` when the point is
+    /// in no such hole: on the part, or open to its outside.
+    fn air_at(&mut self, floor: f64, at: Vec2) -> Result<Option<Region2>, String> {
         let faces = self.faces_above(floor)?;
         let wall = faces
             .iter()
             .flat_map(|rings| rings.iter().skip(1))
             .filter(|ring| ring.contains(at))
             .min_by(|a, b| a.signed_area().abs().total_cmp(&b.signed_area().abs()));
-        let Some(wall) = wall else {
-            return Err(format!("the pocket at {here} is open to the outside of the part: only pockets with walls all round are cut, for now"));
-        };
-        // The cut faces inside the wall are material standing on the floor: islands, but for
-        // those that stand inside another one (in a pocket of an island).
+        let Some(wall) = wall else { return Ok(None) };
         let inside: Vec<&Loop2> =
             faces.iter().filter_map(|rings| rings.first()).filter(|outer| outer.segs.first().is_some_and(|seg| wall.contains(seg.start()))).collect();
         let islands = inside.iter().filter(|outer| {
             !inside.iter().any(|other| !std::ptr::eq(*other, **outer) && outer.segs.first().is_some_and(|seg| other.contains(seg.start())))
         });
-        Ok(Pocket { floor, region: Region2 { outer: wall.ccw(), holes: islands.map(|island| island.ccw().reversed()).collect() } })
+        Ok(Some(Region2 { outer: wall.ccw(), holes: islands.map(|island| island.ccw().reversed()).collect() }))
+    }
+
+    /// The opening the point `at` of the plane is in, for a cut round the inside of its wall
+    /// (decision 0021 of the CAM work), with the height its wall is read at as its floor:
+    /// `bottom` when given (`lowest`, the bodies' own bottom, for a cut that goes on under them:
+    /// there is no wall to read there); else the floor under the point, or `lowest` where
+    /// nothing is under it and the opening goes through. The wall and what stands in the
+    /// opening are read a hair above that height, with nothing in the way above.
+    pub(super) fn opening_at(&mut self, at: Vec2, bottom: Option<f64>, lowest: f64) -> Result<Pocket, String> {
+        let here = format!("X {} Y {}", at.x, at.y);
+        let floor = match bottom {
+            Some(bottom) => bottom.max(lowest),
+            None => match self.under(at)? {
+                Under::Floor(floor) => floor,
+                Under::Nothing => lowest,
+                Under::NotFlat => return Err(format!("the part is not flat and facing up under {here}: give the contour its bottom")),
+            },
+        };
+        if self.top - floor <= 2.0 * self.hair {
+            return Err(format!("{here} is on top of the part, not in an opening"));
+        }
+        let Some(region) = self.air_at(floor, at)? else {
+            return Err(format!(
+                "{here} is not in an opening of the part at Z {floor} mm: an inside contour goes round a wall that is closed all round"
+            ));
+        };
+        let opening = Pocket { floor, region };
+        self.clear_above(&opening, at)?;
+        Ok(opening)
     }
 
     /// Checks that nothing is in the way above `pocket` (found at `at`): its walls go straight

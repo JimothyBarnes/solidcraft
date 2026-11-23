@@ -26,6 +26,14 @@ fn ribbon(h: &mut Harness, id: &str) {
     h.frames(3);
 }
 
+/// A click on a command in a panel's menu, where the commands the panel has no button for are.
+fn panel_menu(h: &mut Harness, panel: &str, id: &str) {
+    h.step(&json!({"click": {"handle": format!("panel:MANUFACTURE:{panel}")}})).unwrap_or_else(|e| panic!("the {panel} panel's menu: {e}"));
+    h.frames(3);
+    h.step(&json!({"click": {"handle": format!("dropdown:{id}")}})).unwrap_or_else(|e| panic!("{id} in the {panel} panel's menu: {e}"));
+    h.frames(3);
+}
+
 /// A click on a button of the open form.
 fn press(h: &mut Harness, label: &str) {
     h.step(&json!({"widget": label})).unwrap_or_else(|e| panic!("{e}"));
@@ -47,6 +55,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Pocket(_)) => "pocket",
         Some(Dialog::Chamfer(_)) => "chamfer",
         Some(Dialog::Drill(_)) => "drill",
+        Some(Dialog::Bore(_)) => "bore",
         Some(Dialog::Simulate(_)) => "simulate",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
@@ -514,6 +523,14 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
         assert_eq!(crate::workspace::destination(solidcraft_engine::find_command(id).unwrap()), Some(("MANUFACTURE", panel)), "{id}");
         assert!(crate::scenario::handle_at(&format!("toolbar:{id}")).is_some(), "{id} is on the ribbon");
     }
+    // Bore is a milling operation too, the panel's fifth: a panel has four buttons, so it is in
+    // the panel's menu.
+    let bore = solidcraft_engine::find_command("cam.op.bore").unwrap();
+    assert_eq!(crate::workspace::destination(bore), Some(("MANUFACTURE", "MILLING")));
+    assert!(crate::scenario::handle_at("toolbar:cam.op.bore").is_none(), "no button of its own");
+    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    assert_eq!(open(&h), "bore");
+    h.app.manufacture_workspace.dialog = None;
     // Other commands have no form here, and run as before.
     assert!(!start(&mut h.app, "cam.op.manual") && !start(&mut h.app, "solid.box"));
     assert_eq!(open(&h), "none");
@@ -1052,7 +1069,7 @@ fn contour_cuts_round_the_part_and_keeps_only_what_is_typed() {
     // and its tool.
     assert_eq!(
         data(&mut h)["setups"][0]["operations"][0]["operation"],
-        json!({"kind": "contour", "contour": {"top": null, "bottom": null, "stepdown": null, "leave": null, "direction": "climb", "clear": null, "rpm": null, "feed": null, "lead": null, "tabs": null}})
+        json!({"kind": "contour", "contour": {"top": null, "bottom": null, "stepdown": null, "leave": null, "direction": "climb", "clear": null, "rpm": null, "feed": null, "lead": null, "tabs": null, "side": "outside", "openings": [], "ramp_angle": null}})
     );
     assert_eq!(scene::counts(&h.app), drawn, "the operation's own toolpath, where the preview was");
     let made = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
@@ -1134,7 +1151,7 @@ fn contour_says_why_it_would_cut_into_the_part_and_its_form_changes_only_what_it
     let form = ContourForm::edit(&h.app, "op-2").unwrap();
     assert_eq!(
         form.params(),
-        json!({"setup": "setup-1", "tool": 1, "contour": {"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "direction": "climb", "clear": 4.0}})
+        json!({"setup": "setup-1", "tool": 1, "contour": {"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "direction": "climb", "clear": 4.0, "side": "outside", "openings": [], "ramp_angle": null}})
     );
     assert!(ContourForm::edit(&h.app, "op-9").is_err());
     // Its row's Edit opens the form on what it keeps; a change is one edit of the operation.
@@ -1152,7 +1169,7 @@ fn contour_says_why_it_would_cut_into_the_part_and_its_form_changes_only_what_it
     assert_eq!((kept["id"].as_str(), kept["name"].as_str(), kept["tool"].as_u64()), (Some("op-2"), Some("Contour 2"), Some(1)));
     assert_eq!(
         kept["operation"]["contour"],
-        json!({"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "leave": 0.2, "direction": "climb", "clear": 4.0, "rpm": null, "feed": null, "lead": null, "tabs": null})
+        json!({"top": -1.0, "bottom": -11.0, "stepdown": 5.0, "leave": 0.2, "direction": "climb", "clear": 4.0, "rpm": null, "feed": null, "lead": null, "tabs": null, "side": "outside", "openings": [], "ramp_angle": null})
     );
     // A double click on the row opens the same form.
     h.step(&json!({"click": {"browser": "Contour 1 (T1)"}, "double": true})).unwrap();
@@ -1595,4 +1612,82 @@ fn the_browser_copies_reorders_and_leaves_out_operations() {
     h.app.run("edit.undo", json!({})).unwrap();
     h.app.run("edit.undo", json!({})).unwrap();
     assert_eq!(order(&mut h), ["op-1 Face 1", "op-2 Contour 2"]);
+}
+
+fn bore_form(h: &mut Harness) -> &mut BoreForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Bore(form)) => form,
+        _ => panic!("Bore is not open"),
+    }
+}
+
+#[test]
+fn bore_offers_the_holes_and_the_widest_end_mill_that_leaves_room_for_its_helix() {
+    let mut h = harness();
+    // The block (60 x 40 x 20) with a hole of 24 through it and a hole of 16, 8 deep, and three
+    // end mills: 20 (T1), 10 (T2) and 6 mm (T3).
+    block(&mut h);
+    h.app.run("solid.cylinder", json!({"diameter": 24, "height": 30, "base": [18, 20, -5], "operation": "cut"})).unwrap();
+    h.app.run("solid.cylinder", json!({"diameter": 16, "height": 8, "base": [45, 20, 12], "operation": "cut"})).unwrap();
+    add_tool(&mut h, "flat_end_mill", 20.0);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    add_tool(&mut h, "flat_end_mill", 6.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    assert_eq!(open(&h), "bore");
+    h.frames(3);
+    // The holes Drill offers, and for the first group the widest tool that is no more than nine
+    // tenths of the hole: the 20 mm one goes into the hole of 24, the 10 mm one into the 16.
+    let form = bore_form(&mut h);
+    let sizes: Vec<(f64, usize)> = form.groups().iter().map(|group| (group.diameter, group.holes.len())).collect();
+    assert_eq!(sizes.len(), 2, "{sizes:?}");
+    let through = form.groups().iter().position(|group| group.diameter == 24.0).unwrap();
+    form.group = through;
+    h.frames(3);
+    let form = bore_form(&mut h);
+    assert_eq!((form.tool, form.picked_tool), (0, false));
+    form.group = 1 - through;
+    h.frames(3);
+    let form = bore_form(&mut h);
+    assert_eq!(form.tool, 1, "the 10 mm tool for the hole of 16");
+    assert!(h.widget(tr("manufacture.bore_note")).is_some() && h.widget(tr("manufacture.preview_note")).is_some());
+    assert!(scene::counts(&h.app).2 > 0, "drawn before it exists");
+    // Create: an inside contour named Bore on the hole's centre, down to its floor (Z -9: the
+    // block's top is at -1 under the stock and the hole 8 deep), with nothing typed kept.
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["name"].as_str(), kept["tool"].as_u64(), kept["operation"]["kind"].as_str()), (Some("Bore 1"), Some(2), Some("contour")));
+    let contour = &kept["operation"]["contour"];
+    assert_eq!(
+        (contour["side"].clone(), contour["openings"].clone(), contour["bottom"].clone()),
+        (json!("inside"), json!([[15.0, 0.0]]), json!(-9.0))
+    );
+    assert_eq!((contour["rpm"].clone(), contour["feed"].clone(), contour["direction"].clone()), (json!(null), json!(null), json!("climb")));
+    // The hole through the block next: bored through, with the 20 mm tool.
+    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    h.frames(3);
+    bore_form(&mut h).group = through;
+    h.frames(3);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][1].clone();
+    assert_eq!(
+        (kept["name"].as_str(), kept["tool"].as_u64(), kept["operation"]["contour"]["bottom"].clone()),
+        (Some("Bore 2"), Some(1), json!(null))
+    );
+    // The simulation: both holes cut, nothing of the block cut into.
+    let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // Edit on a bore's row opens Bore's form on it, on the hole it has.
+    row_menu(&mut h, "Bore 1 (T2)", "manufacture.edit");
+    assert_eq!(open(&h), "bore");
+    let count = solidcraft_ui_text::format("manufacture.drill_holes_kept", &[("count", "1")]);
+    assert!(h.widget(&count).is_some() && h.widget("OK").is_some());
+    let form = bore_form(&mut h);
+    (form.rpm, form.typed_rpm) = (3000.0, true);
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"].clone();
+    assert_eq!((kept["rpm"].clone(), kept["side"].clone(), kept["openings"].clone()), (json!(3000.0), json!("inside"), json!([[15.0, 0.0]])));
 }

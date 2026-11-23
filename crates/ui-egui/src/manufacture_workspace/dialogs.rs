@@ -1,4 +1,4 @@
-//! Manufacture's forms: Add Tool, Import Tools, New Setup, Face, Contour, Pocket, Drill, Simulate and Post Process. Each is a front end that
+//! Manufacture's forms: Add Tool, Import Tools, New Setup, Face, Contour, Pocket, Chamfer, Drill, Bore, Simulate and Post Process. Each is a front end that
 //! builds the parameters of one `cam.*` command and runs it: every change is a command, and a
 //! script calls the command directly and sees no window. They are standalone windows, opened
 //! when the ribbon starts one of those commands ([`start`]) and drawn once a frame ([`show`]).
@@ -24,10 +24,12 @@ use solidcraft_ui_text::{tr, tr_label};
 use crate::SolveApp;
 use crate::ui_kit;
 
+mod bore;
 mod chamfer;
 mod contour;
 mod pocket;
 mod simulate;
+pub(crate) use bore::BoreForm;
 pub(crate) use chamfer::ChamferForm;
 pub(crate) use contour::ContourForm;
 pub(crate) use pocket::PocketForm;
@@ -43,6 +45,7 @@ pub(crate) enum Dialog {
     Pocket(PocketForm),
     Chamfer(ChamferForm),
     Drill(DrillForm),
+    Bore(BoreForm),
     Simulate(SimForm),
     Post(PostForm),
     Posted(Posted),
@@ -83,6 +86,7 @@ impl Dialog {
             | Dialog::Contour(ContourForm { editing: Some(edited), .. })
             | Dialog::Pocket(PocketForm { editing: Some(edited), .. })
             | Dialog::Chamfer(ChamferForm { editing: Some(edited), .. })
+            | Dialog::Bore(BoreForm { editing: Some(edited), .. })
             | Dialog::Drill(DrillForm { editing: Some(edited), .. }) => edited.id.as_str(),
             _ => None,
         }
@@ -97,6 +101,7 @@ impl Dialog {
             Dialog::Pocket(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Chamfer(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Drill(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
+            Dialog::Bore(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Simulate(form) => form.worked.get().map(|(key, simulated)| (key, Shown::Stock(simulated))),
             _ => None,
         }
@@ -1752,6 +1757,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
             | "cam.op.pocket"
             | "cam.op.chamfer"
             | "cam.op.drill"
+            | "cam.op.bore"
             | "cam.simulate"
             | "cam.setup.sheet"
             | "cam.post"
@@ -1782,6 +1788,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         "cam.op.pocket" => Dialog::Pocket(PocketForm::new(app)),
         "cam.op.chamfer" => Dialog::Chamfer(ChamferForm::new(app)),
         "cam.op.drill" => Dialog::Drill(DrillForm::new(app)),
+        "cam.op.bore" => Dialog::Bore(BoreForm::new(app)),
         "cam.simulate" => Dialog::Simulate(SimForm::new(app)),
         _ => Dialog::Post(PostForm::new(app)),
     });
@@ -1795,8 +1802,10 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
     let form = match target {
         Target::Tool(number) => ToolForm::edit(app, *number).map(Dialog::Tool),
         Target::Setup(id) => SetupForm::edit(app, id).map(Dialog::Setup),
-        Target::Operation(id) => kept_operation(app, id).and_then(|(.., kind, _)| match kind.as_str() {
+        Target::Operation(id) => kept_operation(app, id).and_then(|(.., kind, kept)| match kind.as_str() {
             "face" => FaceForm::edit(app, id).map(Dialog::Face),
+            // A contour round the inside of round holes was made by Bore, and is changed there.
+            "contour" if kept["side"] == "inside" => BoreForm::edit(app, id).map(Dialog::Bore),
             "contour" => ContourForm::edit(app, id).map(Dialog::Contour),
             "pocket" => PocketForm::edit(app, id).map(Dialog::Pocket),
             "chamfer" => ChamferForm::edit(app, id).map(Dialog::Chamfer),
@@ -1827,6 +1836,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Pocket(form) => form.show(app, ctx, &units, decimals).map(Dialog::Pocket),
         Dialog::Chamfer(form) => form.show(app, ctx, &units, decimals).map(Dialog::Chamfer),
         Dialog::Drill(form) => form.show(app, ctx, &units, decimals).map(Dialog::Drill),
+        Dialog::Bore(form) => form.show(app, ctx, &units, decimals).map(Dialog::Bore),
         Dialog::Simulate(form) => form.show(app, ctx, &units, decimals).map(Dialog::Simulate),
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),

@@ -1,0 +1,42 @@
+{
+  "en": {
+    "cmd.cam_op_bore": "Bore",
+    "help.cam.op.bore": "Cuts round holes wider than the tool with an end mill. The tool goes down a helix along the hole's wall to each level and once round there, and leaves the wall by a small arc at the bottom. The form offers the holes found on the model, one size at a time, and picks the widest end mill that goes into them. A hole with a floor is cut down to it; one that goes through, through the part. A hole more than twice as wide as the tool keeps a core in its middle, which comes loose when the cut goes through: use Pocket where that will not do.",
+    "manufacture.bore_note": "Down a helix along the hole's wall, and once round at each level. A hole more than twice as wide as the tool keeps a core in its middle."
+  },
+  "ar": {
+    "cmd.cam_op_bore": "تفريز ثقب",
+    "help.cam.op.bore": "يقطع الثقوب الدائرية الأوسع من الأداة بقاطعة طرفية. تنزل الأداة في مسار حلزوني على طول جدار الثقب حتى كل مستوى ثم تدور دورة كاملة عنده، وتغادر الجدار بقوس صغير عند القاع. يعرض النموذج الثقوب الموجودة في المجسّم، مقاسًا واحدًا في كل مرة، ويختار أعرض قاطعة طرفية تدخل فيها. الثقب ذو القاع يُقطع حتى قاعه، والثقب النافذ يُقطع عبر القطعة. الثقب الأوسع من ضعف قطر الأداة يبقى في وسطه لبّ ينفصل عندما ينفذ القطع: استخدم «تفريز الجيب» إن لم يكن ذلك مقبولًا.",
+    "manufacture.bore_note": "نزولًا في مسار حلزوني على طول جدار الثقب، ثم دورة كاملة عند كل مستوى. الثقب الأوسع من ضعف قطر الأداة يبقى في وسطه لبّ."
+  },
+  "he": {
+    "cmd.cam_op_bore": "כרסום קדח",
+    "help.cam.op.bore": "חותך קדחים עגולים הרחבים מהכלי בעזרת כרסום אצבע. הכלי יורד בסליל לאורך דופן הקדח עד כל מפלס ומקיף אותו שם פעם אחת, ועוזב את הדופן בקשת קטנה בתחתית. הטופס מציע את הקדחים שנמצאו במודל, מידה אחת בכל פעם, ובוחר את כרסום האצבע הרחב ביותר שנכנס בהם. קדח בעל תחתית נחתך עד אליה; קדח עובר נחתך דרך החלק. בקדח שרוחבו יותר מפי שניים מהכלי נשארת ליבה במרכזו, והיא משתחררת כשהחיתוך עובר: השתמש ב'כרסום כיס' כשזה לא מתאים.",
+    "manufacture.bore_note": "בירידה בסליל לאורך דופן הקדח, ופעם אחת סביב בכל מפלס. בקדח שרוחבו יותר מפי שניים מהכלי נשארת ליבה במרכזו."
+  },
+  "ja": {
+    "cmd.cam_op_bore": "ヘリカル穴加工",
+    "help.cam.op.bore": "工具より大きい丸穴をエンドミルで加工します。工具は穴の壁に沿ってらせん状に各レベルまで下り、そのレベルで一周し、底では小さな円弧で壁から離れます。フォームにはモデルで見つかった穴がサイズごとに表示され、穴に入る最も太いエンドミルが選ばれます。底のある穴は底まで、貫通穴は部品を貫通するまで加工します。工具径の2倍を超える穴では中央に芯が残り、貫通すると外れます。それでは困る場合は「ポケット」を使ってください。",
+    "manufacture.bore_note": "穴の壁に沿ってらせん状に下り、各レベルで一周します。工具径の2倍を超える穴では中央に芯が残ります。"
+  },
+  "vi": {
+    "cmd.cam_op_bore": "Phay lỗ xoắn ốc",
+    "help.cam.op.bore": "Cắt các lỗ tròn rộng hơn dao bằng dao phay ngón. Dao đi xuống theo đường xoắn ốc dọc thành lỗ tới từng mức rồi đi một vòng tại đó, và rời thành lỗ bằng một cung nhỏ ở đáy. Biểu mẫu đưa ra các lỗ tìm thấy trên mô hình, mỗi lần một cỡ, và chọn dao phay ngón rộng nhất lọt vào lỗ. Lỗ có đáy được cắt tới đáy; lỗ suốt được cắt xuyên qua chi tiết. Lỗ rộng hơn hai lần đường kính dao sẽ còn lõi ở giữa, lõi này rời ra khi cắt xuyên: hãy dùng Phay hốc nếu không muốn vậy.",
+    "manufacture.bore_note": "Đi xuống theo đường xoắn ốc dọc thành lỗ, rồi một vòng tại mỗi mức. Lỗ rộng hơn hai lần đường kính dao sẽ còn lõi ở giữa."
+  },
+  "zh": {
+    "cmd.cam_op_bore": "螺旋铣孔",
+    "help.cam.op.bore": "用立铣刀加工比刀具宽的圆孔。刀具沿孔壁螺旋下刀到每一层，在该层绕一整圈，并在底部以一小段圆弧离开孔壁。表单列出在模型上找到的孔，每次一种尺寸，并选用能进入孔内的最宽立铣刀。有底的孔加工到孔底；通孔加工到穿透零件。孔径超过刀具直径两倍时，中间会留下芯料，切穿后芯料会脱落：不能接受时请改用“型腔”。",
+    "manufacture.bore_note": "沿孔壁螺旋下刀，并在每一层绕一整圈。孔径超过刀具直径两倍时，中间会留下芯料。"
+  },
+  "de": {
+    "cmd.cam_op_bore": "Bohrung fräsen",
+    "help.cam.op.bore": "Fräst runde Bohrungen, die breiter sind als das Werkzeug, mit einem Schaftfräser. Das Werkzeug fährt in einer Helix an der Bohrungswand entlang auf jede Ebene hinab, umrundet sie dort einmal und verlässt die Wand am Grund mit einem kleinen Bogen. Das Formular bietet die am Modell gefundenen Bohrungen an, jeweils eine Größe, und wählt den breitesten Schaftfräser, der hineinpasst. Eine Bohrung mit Grund wird bis zum Grund gefräst, eine Durchgangsbohrung durch das Teil hindurch. Ist eine Bohrung mehr als doppelt so breit wie das Werkzeug, bleibt in der Mitte ein Kern stehen, der sich löst, sobald der Schnitt durchgeht: Wo das nicht geht, Tasche verwenden.",
+    "manufacture.bore_note": "In einer Helix an der Bohrungswand hinab und auf jeder Ebene einmal herum. Ist eine Bohrung mehr als doppelt so breit wie das Werkzeug, bleibt in der Mitte ein Kern stehen."
+  },
+  "ko": {
+    "cmd.cam_op_bore": "헬리컬 보링",
+    "help.cam.op.bore": "공구보다 넓은 둥근 구멍을 엔드밀로 가공합니다. 공구는 구멍 벽을 따라 나선으로 각 단까지 내려가 그 단에서 한 바퀴 돌고, 바닥에서는 작은 원호로 벽에서 떨어집니다. 양식에는 모델에서 찾은 구멍이 크기별로 표시되며, 구멍에 들어가는 가장 굵은 엔드밀이 선택됩니다. 바닥이 있는 구멍은 바닥까지, 관통 구멍은 부품을 관통할 때까지 가공합니다. 구멍이 공구 지름의 두 배보다 넓으면 가운데에 코어가 남고, 관통되면 떨어져 나옵니다. 그것이 곤란하면 포켓을 사용하세요.",
+    "manufacture.bore_note": "구멍 벽을 따라 나선으로 내려가고 각 단에서 한 바퀴 돕니다. 구멍이 공구 지름의 두 배보다 넓으면 가운데에 코어가 남습니다."
+  }
+}

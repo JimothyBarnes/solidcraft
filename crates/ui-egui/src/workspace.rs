@@ -443,7 +443,7 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "INSERT", panel: "LIBRARY", promoted: 3, ids: &["parts.fastener", "parts.library", "parts.resize", "parts.insert"] },
     Section { tab: "INSERT", panel: "LINKS", promoted: 2, ids: &["component.update_links", "component.break_link"] },
     Section { tab: "MANUFACTURE", panel: "SETUP", promoted: 1, ids: &["cam.setup.create"] },
-    Section { tab: "MANUFACTURE", panel: "MILLING", promoted: 4, ids: &["cam.op.face", "cam.op.contour", "cam.op.pocket", "cam.op.chamfer"] },
+    Section { tab: "MANUFACTURE", panel: "MILLING", promoted: 4, ids: crate::manufacture_workspace::MILLING },
     Section { tab: "MANUFACTURE", panel: "DRILLING", promoted: 1, ids: &["cam.op.drill"] },
     Section { tab: "MANUFACTURE", panel: "ACTIONS", promoted: 3, ids: &["cam.simulate", "cam.post", "cam.setup.sheet"] },
     Section { tab: "MANUFACTURE", panel: "MANAGE", promoted: 1, ids: &["cam.tool.create", "cam.library.import", "cam.library.export"] },

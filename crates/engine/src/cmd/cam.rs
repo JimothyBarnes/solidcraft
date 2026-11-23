@@ -6,7 +6,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferOp, ContourOp, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER,
+    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferOp, ContourOp, ContourSide, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER,
     MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, ProgramContext, SafeHeights, Setup, SetupKind, Stock,
     Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
@@ -71,7 +71,10 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
     CommandSpec::new("cam.op.contour", "Contour", crate::checked!("cam.op.contour", op_contour)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, lead?: mm (the arcs on to the wall and off it; 0 for none), tabs?: {count, width?, height?}, rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock"),
+        .params("setup: id, name?, tool: a flat or bull-nose end mill, contour?: {top?, bottom?, stepdown?, leave?, direction?: climb | conventional, clear?, lead?: mm (the arcs on to the wall and off it; 0 for none), tabs?: {count, width?, height?}, side?: outside | inside, openings?: [[x, y], …] (inside: a point in each opening to go round), ramp_angle?: radians (inside: default 3 degrees), rpm?, feed?} → id of the new operation: round the outside of the part at its outline (read from the model at the cut's bottom when the toolpath is worked out), the tool going down beside the stock; or, inside, round the inside of each opening's wall (a pocket's, a window's, a round hole's: read from the model where its point is, down to the floor under the point or through the part), the tool going down a ramp along the wall"),
+    CommandSpec::new("cam.op.bore", "Bore", crate::checked!("cam.op.bore", op_bore)).icon("edit").doc_only()
+        .contract(&TypedContract::<CamOpContourParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a flat or bull-nose end mill narrower than the holes, contour: {openings: [[x, y], …] (a point in each hole, in the WCS), bottom?: Z (default the hole's floor, or through the part), top?, stepdown?, leave?, direction?, lead?, ramp_angle?, rpm?, feed?} → id of the new operation, named Bore: an inside contour (as cam.op.contour with side inside) for round holes wider than the tool, cut down a helix along their wall and once round at each level"),
     CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("edit").doc_only()
         .contract(&TypedContract::<CamOpPocketParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring"),
@@ -576,6 +579,41 @@ fn pockets_of(
     .map_err(said)
 }
 
+/// The openings an inside contour goes round (decision 0021 of the CAM work), in the setup's WCS,
+/// one for each of `points` in their order, and the height their walls were read at: `bottom`
+/// when given (the part's own bottom when it is under that), else the floor under the points,
+/// or the part's bottom where they go through it. The openings of one operation are cut to one
+/// depth.
+fn openings_of(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    points: &[[f64; 2]],
+    bottom: Option<f64>,
+) -> std::result::Result<(f64, Vec<solidcore_record::Region2>), String> {
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    let found = with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
+        let mut found = Vec::with_capacity(points.len());
+        for at in points {
+            let at = solidcore_record::Vec2 { x: at[0], y: at[1] };
+            found.push(finder.opening_at(at, bottom, p.model.min.z).map_err(|e| bad(cmd, e))?);
+        }
+        Ok(found)
+    })
+    .map_err(said)?;
+    let Some(floor) = found.first().map(|opening| opening.floor) else { return Err("an inside contour needs an opening to go round".into()) };
+    if let Some(other) = found.iter().find(|opening| (opening.floor - floor).abs() > 1e-6) {
+        return Err(format!(
+            "the openings are cut to different depths (Z {floor} and Z {} mm): make an operation for each depth, or give the bottom",
+            other.floor
+        ));
+    }
+    Ok((floor, found.into_iter().map(|opening| opening.region).collect()))
+}
+
 /// About how wide a tool can be and still pass everywhere in `region`, whose widest circle is
 /// `widest` across: twice how far its walls can move in before it comes apart or an island's
 /// room meets a wall's or another island's. Looked for from the walls inwards (a part that
@@ -693,6 +731,10 @@ fn op_contour(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.contour", "Contour", p)
 }
 
+fn op_bore(s: &mut Session, p: &Value) -> Result<Value> {
+    add_operation(s, "cam.op.bore", "Bore", p)
+}
+
 fn op_pocket(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.pocket", "Pocket", p)
 }
@@ -726,6 +768,16 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             };
             Ok((p.setup, p.name, p.tool, OperationKind::Contour { contour }))
         }
+        "cam.op.bore" => {
+            // An inside contour by another name: whatever side it is given, it is cut inside.
+            let p: CamOpContourParams = parse(cmd, "parameters", p)?;
+            let mut contour: ContourOp = match &p.contour {
+                Some(v) => parse(cmd, "contour", v)?,
+                None => ContourOp::default(),
+            };
+            contour.side = ContourSide::Inside;
+            Ok((p.setup, p.name, p.tool, OperationKind::Contour { contour }))
+        }
         "cam.op.pocket" => {
             let p: CamOpPocketParams = parse(cmd, "parameters", p)?;
             let pocket: PocketOp = parse(cmd, "pocket", &p.pocket)?;
@@ -739,7 +791,7 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             };
             Ok((p.setup, p.name, p.tool, OperationKind::Chamfer { chamfer }))
         }
-        other => Err(bad(other, "not a command that adds a drill, face, contour, pocket or chamfer operation")),
+        other => Err(bad(other, "not a command that adds a drill, face, contour, bore, pocket or chamfer operation")),
     }
 }
 
@@ -831,8 +883,17 @@ fn work(
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
             // Its numbers and tool first: what is wrong with them is said before the model is cut.
             contour.validate(tool).map_err(failed)?;
-            let (_, outline) = outline_at(s, cmd, setup, &placement, contour.bottom).map_err(|e| bad(cmd, of(op, e)))?;
-            let done = contour.toolpath(start, tool, &placement, material, &outline).map_err(failed)?;
+            let done = if contour.side == ContourSide::Inside {
+                // Round the inside of its openings, each read from the model where its point is,
+                // down to the bottom it was given (as far as it says: a little under the part
+                // breaks through) or, given none, to the one found.
+                let (found, openings) = openings_of(s, cmd, setup, &placement, &contour.openings, contour.bottom).map_err(|e| bad(cmd, of(op, e)))?;
+                let bottom = Some(contour.bottom.unwrap_or(found));
+                ContourOp { bottom, ..contour.clone() }.toolpath_inside(start, tool, &placement, material, &openings).map_err(failed)?
+            } else {
+                let (_, outline) = outline_at(s, cmd, setup, &placement, contour.bottom).map_err(|e| bad(cmd, of(op, e)))?;
+                contour.toolpath(start, tool, &placement, material, &outline).map_err(failed)?
+            };
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "levels": done.levels,
                 "stepdown": done.stepdown, "offset": done.offset, "round": done.round, "entries": done.entries,
@@ -911,7 +972,7 @@ pub struct ToolChoice {
     pub pitch: Option<f64>,
 }
 
-/// The design's tools that can do `operation` (`face`, `drill`, `contour`, `pocket` or `chamfer`), for a form to offer; every
+/// The design's tools that can do `operation` (`face`, `drill`, `contour`, `bore`, `pocket` or `chamfer`), for a form to offer; every
 /// tool for any other word. The operations' own checks decide, so a form never offers a tool its
 /// command would refuse.
 pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec<ToolChoice> {
@@ -936,7 +997,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
     let can = |tool: &Tool| match operation {
         "face" => FaceOp::default().validate(tool).is_ok(),
         "drill" => drill.validate(tool).is_ok() || taps(tool),
-        "contour" => ContourOp::default().validate(tool).is_ok(),
+        "contour" | "bore" => ContourOp::default().validate(tool).is_ok(),
         "pocket" => PocketOp { pockets: vec![[0.0, 0.0]], ..PocketOp::default() }.validate(tool).is_ok(),
         "chamfer" => ChamferOp::default().validate(tool).is_ok(),
         _ => true,
@@ -1429,6 +1490,16 @@ fn origin_words(origin: &WcsOrigin) -> String {
     }
 }
 
+/// What an operation is, in a sheet's words: its kind, but a drilling that taps is a tap and a
+/// contour inside its openings says so.
+fn operation_words(operation: &OperationKind) -> String {
+    match operation {
+        OperationKind::Drill { drill } if matches!(drill.cycle, solidcraft_cam::DrillCycle::Tap { .. }) => "tap".into(),
+        OperationKind::Contour { contour } if contour.side == ContourSide::Inside => "inside contour".into(),
+        other => kind_words(other),
+    }
+}
+
 /// A kind as serde names it (`flat_end_mill`), in words.
 fn kind_words(kind: &impl serde::Serialize) -> String {
     let named = serde_json::to_value(kind).unwrap_or(Value::Null);
@@ -1468,7 +1539,7 @@ fn setup_sheet(s: &mut Session, p: &Value) -> Result<Value> {
         let named = solidcraft_cam::SheetOperation {
             name: op.name.clone(),
             tool: op.tool,
-            kind: kind_words(&op.operation),
+            kind: operation_words(&op.operation),
             rpm: None,
             feed: None,
             lowest_z: None,

@@ -499,7 +499,11 @@ fn a_form_previews_an_operation_before_it_is_made() {
         ("cam.op.face", json!({"setup": 5}), "parameters:"),
         ("cam.op.face", json!(null), "parameters:"),
         ("cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": {"holes": []}}), "drill:"),
-        ("cam.post", json!({"setup": "setup-1", "post": "rs274"}), "not a command that adds a drill, face, contour, pocket or chamfer operation"),
+        (
+            "cam.post",
+            json!({"setup": "setup-1", "post": "rs274"}),
+            "not a command that adds a drill, face, contour, bore, pocket or chamfer operation",
+        ),
     ] {
         let said = why(&s, command, params.clone());
         assert!(said.contains(expect), "{command} {params}: {said:?} does not say {expect:?}");
@@ -1534,6 +1538,9 @@ fn a_tap_cuts_its_holes_in_step_with_the_spindle_and_posts_as_g84() {
     let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1"}));
     let skipped = sim["operations"][0]["skipped"].as_str().unwrap_or_default();
     assert!(skipped.contains("cuts a thread") && sim["gouge_count"] == 0, "{sim:#}");
+    // The setup sheet calls it what it is: a drilling operation that taps is a tap.
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    assert!(sheet["html"].as_str().unwrap().contains("<td>Drill 1 <span class=\"note\">tap</span></td>"), "{}", sheet["html"]);
     // Drill's form is offered the tap with its pitch, beside the drill; Contour's is not.
     let offered: Vec<(u32, Option<f64>)> = crate::cmd::manufacture_tools(&s.doc, "drill").iter().map(|t| (t.number, t.pitch)).collect();
     assert_eq!(offered, vec![(3, None), (5, Some(1.0))]);
@@ -1850,4 +1857,131 @@ fn operations_are_moved_and_copied_within_their_setup() {
     assert!(refused(&mut s, "cam.op.move", json!({"id": "op-1", "to": -1})).contains("invalid"));
     assert!(refused(&mut s, "cam.op.move", json!({"id": "op-1"})).contains("to"));
     assert!(refused(&mut s, "cam.op.duplicate", json!({"id": "op-1", "copies": 2})).contains("copies"));
+}
+
+#[test]
+fn an_inside_contour_goes_round_an_opening_read_from_the_model() {
+    use std::f64::consts::PI;
+    // The plate (in the WCS X -50 to 50, Y -40 to 40, its top at Z -1 and its bottom at Z -21)
+    // with a window 40 x 30 through it about (-15, 0) and a round pocket of 24, 8 deep, about
+    // (30, 0). Tool 2 is the 10 mm end mill.
+    let mut s = plate();
+    boxed(&mut s, [15.0, 25.0, -5.0], [40.0, 30.0, 30.0], "cut");
+    run(&mut s, "solid.cylinder", json!({"diameter": 24, "height": 8, "base": [80, 40, 12], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    // Round the inside of the window, named by a point in it: nothing is under the point, so the
+    // cut goes through, to the plate's bottom. The tool's centre is 5 inside the wall, 30 x 20
+    // and 100 round; 21 mm from the stock's top in steps of at most 5 is five levels of 4.2. It
+    // comes down over the middle of the front side and leaves the wall by a quarter turn of 1.
+    assert_eq!(
+        run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2, "contour": {"side": "inside", "openings": [[-15, 0]]}}))["id"],
+        "op-1"
+    );
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert!(about(&n["round"], 100.0) && about(&n["offset"], 5.0), "{n}");
+    let levels = n["levels"].as_array().unwrap();
+    assert!(
+        levels.len() == 5 && levels.iter().zip([-4.2, -8.4, -12.6, -16.8, -21.0]).all(|(level, z)| about(level, z)) && n["leads"] == json!([1.0]),
+        "{n}"
+    );
+    assert!(about(&n["entries"][0][0], -15.0) && about(&n["entries"][0][1], -10.0), "{n}");
+    assert!(
+        t["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().is_some_and(|note| note.contains("a core about 10.0 mm across is left in its middle"))),
+        "{}",
+        t["notes"]
+    );
+    // The simulation: the band the tool passes over is the window with its corners left round
+    // (1200 less 4 (25 - 25 pi / 4)) less the middle 20 x 10, through the stock's 21 mm; nothing
+    // of the plate is cut into.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.2}));
+    assert_eq!(
+        (sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64(), sim["body_hit_count"].as_u64()),
+        (Some(0), Some(0), Some(0)),
+        "{sim:#}"
+    );
+    let band = (1200.0 - 4.0 * (25.0 - 25.0 * PI / 4.0) - 200.0) * 21.0;
+    let removed = sim["operations"][0]["removed"].as_f64().unwrap();
+    assert!((removed - band).abs() < 0.015 * band, "{removed} mm3, not {band}");
+
+    // The round pocket is bored by the same operation under its other name, Bore, which is
+    // inside whatever side it is given: its floor is under the point, so the cut goes down to
+    // it, Z -9, in two levels of 4.5; the path is a circle of radius 7 about the pocket's
+    // middle, every turn of the way down an arc about it.
+    assert_eq!(
+        run(&mut s, "cam.op.bore", json!({"setup": "setup-1", "tool": 2, "contour": {"side": "outside", "openings": [[30, 0]]}}))["id"],
+        "op-2"
+    );
+    let kept = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][1].clone();
+    assert_eq!(
+        (kept["name"].as_str(), kept["operation"]["kind"].as_str(), kept["operation"]["contour"]["side"].as_str()),
+        (Some("Bore 2"), Some("contour"), Some("inside"))
+    );
+    assert!(refused(&mut s, "cam.op.bore", json!({"setup": "setup-1", "tool": 2})).contains("1 to 1000 openings, not 0"));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    assert!(about(&t["numbers"]["round"], 14.0 * PI) && t["numbers"]["levels"] == json!([-4.5, -9.0]), "{}", t["numbers"]);
+    let arcs: Vec<&Value> = t["toolpath"]["moves"].as_array().unwrap().iter().filter(|m| m["kind"] == "arc").collect();
+    let about_the_middle = arcs.iter().filter(|m| about(&m["center"][0], 30.0) && m["center"][1].as_f64().is_some_and(|y| y.abs() < 1e-9)).count();
+    assert!(about_the_middle >= 12 && arcs.iter().all(|m| m["direction"] == "counter_clockwise"), "{about_the_middle} of {}", arcs.len());
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.2}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // The pocket is more than twice as wide as the tool, whose centre runs 7 from its middle:
+    // the tool passes over the ring from 2 to 12 and leaves a core 4 across, which the
+    // operation says. 9 mm of that ring from the stock's top, as nearly as the cells can tell.
+    assert!(
+        t["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().is_some_and(|note| note.contains("a core about 4.0 mm across is left in its middle"))),
+        "{}",
+        t["notes"]
+    );
+    let bored = sim["operations"][1]["removed"].as_f64().unwrap();
+    assert!((bored - 140.0 * PI * 9.0).abs() < 0.02 * 140.0 * PI * 9.0, "{bored} mm3");
+    // The setup sheet says which side each goes round, in the words its name does not have.
+    let sheet = run(&mut s, "cam.setup.sheet", json!({"setup": "setup-1"}));
+    let html = sheet["html"].as_str().unwrap();
+    assert!(
+        html.contains("<td>Contour 1 <span class=\"note\">inside</span></td>")
+            && html.contains("<td>Bore 2 <span class=\"note\">inside contour</span></td>"),
+        "{html}"
+    );
+    // It posts, the helix as arcs with Z on them.
+    let text = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}))["text"].as_str().unwrap().to_string();
+    assert!(text.lines().any(|line| line.starts_with("G3 ") && line.contains(" Z-")), "{text}");
+
+    // A bottom a little under the part breaks through: the wall is read at the part's own
+    // bottom, and the cut goes as far as it was told (21.5 mm in five levels of 4.3).
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "openings": [[-15, 0]], "bottom": -21.5}}));
+    let through = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["levels"].clone();
+    assert!(through.as_array().is_some_and(|levels| levels.len() == 5) && about(&through[0], -4.3) && about(&through[4], -21.5), "{through}");
+    // Under the pocket's floor there is no opening: a bottom there is refused, not cut.
+    run(&mut s, "cam.op.edit", json!({"id": "op-2", "contour": {"side": "inside", "openings": [[30, 0]], "bottom": -12}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    assert!(why.contains("X 30 Y 0 is not in an opening of the part at Z -12 mm"), "{why}");
+    // Given its bottom, the window is cut that far and no further.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "openings": [[-15, 0]], "bottom": -10}}));
+    assert_eq!(run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["levels"], json!([-5.0, -10.0]));
+    // What it keeps is what it was given.
+    let kept = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["operation"]["contour"].clone();
+    assert_eq!((kept["side"].clone(), kept["openings"].clone(), kept["bottom"].clone()), (json!("inside"), json!([[-15.0, 0.0]]), json!(-10.0)));
+
+    // Openings of different depths are an operation each; a point on the part or beside it is
+    // in no opening; an inside contour needs its openings, and an outside one takes none.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "openings": [[-15, 0], [30, 0]]}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("the openings are cut to different depths (Z -21 and Z -9 mm)"), "{why}");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "openings": [[45, 35]]}}));
+    assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"})).contains("X 45 Y 35 is on top of the part, not in an opening"));
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "openings": [[70, 0]]}}));
+    assert!(refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"})).contains("X 70 Y 0 is not in an opening of the part at Z -21 mm"));
+    // (Those two are refused as the operation is changed: nothing of the model is needed to say so.)
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside"}})).contains("1 to 1000 openings, not 0"));
+    assert!(
+        refused(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"openings": [[-15, 0]]}})).contains("openings are for an inside contour")
+    );
 }
