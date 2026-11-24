@@ -542,6 +542,7 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
         ("cam.op.pocket", "MILLING"),
         ("cam.op.chamfer", "MILLING"),
         ("cam.op.drill", "DRILLING"),
+        ("cam.op.bore", "DRILLING"),
         ("cam.simulate", "ACTIONS"),
         ("cam.post", "ACTIONS"),
         ("cam.setup.sheet", "ACTIONS"),
@@ -551,12 +552,15 @@ fn the_ribbon_has_each_form_and_a_form_belongs_to_manufacture() {
         assert_eq!(crate::workspace::destination(solidcraft_engine::find_command(id).unwrap()), Some(("MANUFACTURE", panel)), "{id}");
         assert!(crate::scenario::handle_at(&format!("toolbar:{id}")).is_some(), "{id} is on the ribbon");
     }
-    // Bore is a milling operation too, the panel's fifth: a panel has four buttons, so it is in
-    // the panel's menu.
-    let bore = solidcraft_engine::find_command("cam.op.bore").unwrap();
-    assert_eq!(crate::workspace::destination(bore), Some(("MANUFACTURE", "MILLING")));
-    assert!(crate::scenario::handle_at("toolbar:cam.op.bore").is_none(), "no button of its own");
-    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    // Slot is Milling's fifth: a panel has four buttons, so it is in the panel's menu. Bore has
+    // a button of its own, in Drilling, and Thread Mill is in Drilling's menu.
+    let slot = solidcraft_engine::find_command("cam.op.slot").unwrap();
+    assert_eq!(crate::workspace::destination(slot), Some(("MANUFACTURE", "MILLING")));
+    assert!(crate::scenario::handle_at("toolbar:cam.op.slot").is_none(), "no button of its own");
+    panel_menu(&mut h, "MILLING", "cam.op.slot");
+    assert_eq!(open(&h), "slot");
+    h.app.manufacture_workspace.dialog = None;
+    ribbon(&mut h, "cam.op.bore");
     assert_eq!(open(&h), "bore");
     h.app.manufacture_workspace.dialog = None;
     // Other commands have no form here, and run as before.
@@ -1661,7 +1665,7 @@ fn bore_offers_the_holes_and_the_widest_end_mill_that_leaves_room_for_its_helix(
     add_tool(&mut h, "flat_end_mill", 10.0);
     add_tool(&mut h, "flat_end_mill", 6.0);
     h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
-    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    ribbon(&mut h, "cam.op.bore");
     assert_eq!(open(&h), "bore");
     h.frames(3);
     // The holes Drill offers, and for the first group the widest tool that is no more than nine
@@ -1693,7 +1697,7 @@ fn bore_offers_the_holes_and_the_widest_end_mill_that_leaves_room_for_its_helix(
     );
     assert_eq!((contour["rpm"].clone(), contour["feed"].clone(), contour["direction"].clone()), (json!(null), json!(null), json!("climb")));
     // The hole through the block next: bored through, with the 20 mm tool.
-    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    ribbon(&mut h, "cam.op.bore");
     h.frames(3);
     bore_form(&mut h).group = through;
     h.frames(3);
@@ -2140,7 +2144,7 @@ fn bore_goes_to_the_bottom_typed_to_break_through() {
     h.app.run("solid.cylinder", json!({"diameter": 24, "height": 30, "base": [18, 20, -5], "operation": "cut"})).unwrap();
     add_tool(&mut h, "flat_end_mill", 20.0);
     h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
-    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    ribbon(&mut h, "cam.op.bore");
     h.frames(3);
     // The form shows where the hole ends, and leaves it to the command until it is typed.
     let form = bore_form(&mut h);
@@ -2595,7 +2599,7 @@ fn bore_takes_the_holes_clicked_on_the_model() {
     let distance = h.call("ui.camera", json!({}))["result"]["distance"].as_f64().unwrap();
     h.step(&json!({"call": "ui.camera", "params": {"distance": 2.2 * distance}})).unwrap();
     h.frames(3);
-    panel_menu(&mut h, "MILLING", "cam.op.bore");
+    ribbon(&mut h, "cam.op.bore");
     h.frames(3);
     let form = bore_form(&mut h);
     let sizes: Vec<(f64, usize)> = form.groups().iter().map(|group| (group.diameter, group.holes.len())).collect();
