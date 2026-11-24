@@ -59,6 +59,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Bore(_)) => "bore",
         Some(Dialog::Slot(_)) => "slot",
         Some(Dialog::Engrave(_)) => "engrave",
+        Some(Dialog::Thread(_)) => "thread",
         Some(Dialog::Simulate(_)) => "simulate",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
@@ -3012,4 +3013,95 @@ fn pocket_cuts_only_what_a_wider_tool_left_when_told_of_one() {
     press(&mut h, "OK");
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["rest"], json!(null));
+}
+
+fn thread_form(h: &mut Harness) -> &mut ThreadForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Thread(form)) => form,
+        _ => panic!("Thread Mill is not open"),
+    }
+}
+
+#[test]
+fn thread_mill_offers_the_holes_and_suggests_the_thread_they_are_drilled_for() {
+    let mut h = harness();
+    // The block (60 x 40 x 20) with two holes of 8.4 through it, as drilled for M10 x 1.5.
+    block(&mut h);
+    for x in [15, 45] {
+        h.app.run("solid.cylinder", json!({"diameter": 8.4, "height": 30, "base": [x, 20, -5], "operation": "cut"})).unwrap();
+    }
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    // Thread Mill is in the Drilling panel's menu. No thread mill yet: the form says what to add.
+    panel_menu(&mut h, "DRILLING", "cam.op.thread");
+    h.frames(3);
+    assert_eq!(open(&h), "thread");
+    assert!(h.widget(tr("manufacture.no_tool_for_thread")).is_some());
+    press(&mut h, "Cancel");
+    // Add Tool makes one: 7 mm across, teeth 1.5 apart along 22 mm (T1).
+    let mut tool = ToolForm::new(&h.app);
+    tool.kind = KINDS.iter().position(|k| k.0 == "thread_mill").unwrap();
+    (tool.diameter, tool.pitch, tool.flute_length, tool.overall_length) = (7.0, 1.5, 22.0, 60.0);
+    (tool.flutes, tool.tip_angle) = (tool.usual_flutes(), tool.usual_tip_angle());
+    tool.material = "aluminium".into();
+    assert!(tool.accept(&mut h.app).is_none(), "{:?}", h.app.status);
+    let made = data(&mut h)["tools"][0].clone();
+    assert_eq!((made["kind"].clone(), made["geometry"]["thread_pitch"].clone()), (json!("thread_mill"), json!(1.5)));
+    // The form opens on the two holes and suggests the thread they are drilled for: 8.4 and
+    // 1.0825 pitches is 10.02, M10; all the way through; two passes, right-hand.
+    panel_menu(&mut h, "DRILLING", "cam.op.thread");
+    h.frames(3);
+    let form = thread_form(&mut h);
+    assert_eq!((form.groups().len(), form.diameter, form.depth, form.passes, form.hand), (1, 10.0, 20.0, 2, 0));
+    let numbers = |h: &mut Harness| thread_form(h).worked.get().map(|(_, preview)| preview.numbers.clone()).unwrap();
+    let n = numbers(&mut h);
+    // Drilled to 8.376; the tool's teeth are longer than the thread, so one turn a pass.
+    assert!(
+        (n["minor"].as_f64().unwrap() - 8.376).abs() < 1e-3 && n["turns"].as_u64() == Some(1) && n["passes"].as_array().map(Vec::len) == Some(2),
+        "{n}"
+    );
+    assert!(h.widget(tr("manufacture.thread_drill")).is_some() && h.widget(tr("manufacture.thread_note")).is_some());
+    let thread = thread_form(&mut h).params()["thread"].clone();
+    assert_eq!(
+        (thread["holes"].as_array().map(Vec::len), thread["diameter"].clone(), thread["depth"].clone(), thread.get("hand"), thread.get("passes")),
+        (Some(2), json!(10.0), json!(20.0), None, None)
+    );
+    // A depth typed is the depth; a thread the tool does not go into is refused in the form.
+    let form = thread_form(&mut h);
+    (form.depth, form.typed_depth) = (12.0, true);
+    h.frames(3);
+    assert_eq!(numbers(&mut h)["bottom"].as_f64().map(|z| (z * 1e6).round() / 1e6), Some(-13.0));
+    let form = thread_form(&mut h);
+    (form.diameter, form.typed_diameter) = (8.0, true);
+    h.frames(3);
+    assert!(thread_form(&mut h).worked.trouble().is_some_and(|why| why.contains("does not go into a hole drilled for this thread")));
+    let form = thread_form(&mut h);
+    (form.diameter, form.typed_diameter) = (10.0, true);
+    h.frames(3);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["name"].clone(), kept["operation"]["kind"].clone()), (json!("Thread Mill 1"), json!("thread")));
+    let thread = kept["operation"]["thread"].clone();
+    assert_eq!(
+        (thread["diameter"].clone(), thread["depth"].clone(), thread["holes"].as_array().map(Vec::len), thread["hand"].clone()),
+        (json!(10.0), json!(12.0), Some(2), json!("right"))
+    );
+    // The simulation cannot show a thread: the operation is left out of it, and it says why.
+    let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
+    assert!(sim["operations"][0]["skipped"].as_str().is_some_and(|why| why.contains("cuts a thread")), "{sim:#}");
+    // Changed from its row it keeps its holes; left-hand in three passes is the change.
+    row_menu(&mut h, "Thread Mill 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "thread");
+    let form = thread_form(&mut h);
+    assert_eq!((form.diameter, form.depth, form.passes, form.hand), (10.0, 12.0, 2, 0));
+    (form.hand, form.passes) = (1, 3);
+    h.frames(3);
+    assert_eq!(thread_form(&mut h).worked.trouble(), None);
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let after = data(&mut h)["setups"][0]["operations"][0]["operation"]["thread"].clone();
+    assert_eq!(
+        (after["hand"].clone(), after["passes"].clone(), after["holes"].clone(), after["depth"].clone()),
+        (json!("left"), json!(3), thread["holes"].clone(), json!(12.0))
+    );
 }

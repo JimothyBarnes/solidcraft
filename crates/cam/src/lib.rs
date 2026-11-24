@@ -31,6 +31,7 @@ mod post;
 mod sheet;
 mod sim;
 mod slot;
+mod thread;
 mod tool;
 mod toolpath;
 mod units;
@@ -64,6 +65,7 @@ pub use post::{
 pub use sheet::{MAX_SHEET_PIECES, MAX_SHEET_ROWS, SetupSheet, SheetOperation, SheetTool};
 pub use sim::{BodyHit, BodyPart, CutReport, Gouge, HeightField, MAX_FIELD_CELLS, MAX_LISTED, MIN_CELL, RapidHit, Simulation, ToolShape};
 pub use slot::{DEFAULT_SLOT_STEPDOWN, MAX_SLOT_LEVELS, MAX_SLOTS, SlotLine, SlotOp, SlotShape, Slotted, slot_line};
+pub use thread::{DEFAULT_THREAD_PASSES, MAX_THREAD_PASSES, MAX_THREADS, THREAD_DEPTH, ThreadHand, ThreadOp, Threaded};
 pub use tool::{
     CuttingData, Engagement, FeedWarning, Holder, HolderSegment, MAX_CUTTING_DATA, MAX_HOLDER_SEGMENTS, MAX_TOOLS, Overrides, SpeedsFeeds,
     TOOL_LIBRARY_FORMAT, Tool, ToolGeometry, ToolKind, ToolLibrary,

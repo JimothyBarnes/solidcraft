@@ -150,6 +150,7 @@ fn operation_icon(operation: &impl serde::Serialize) -> &'static str {
         ("pocket", _) => "cam_pocket",
         ("slot", _) => "cam_slot",
         ("engrave", _) => "cam_engrave",
+        ("thread", _) => "cam_thread",
         ("chamfer", _) => "cam_chamfer",
         ("drill", _) => "cam_drill",
         _ => "edit",

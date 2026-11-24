@@ -20,6 +20,7 @@ use crate::engrave::EngraveOp;
 use crate::face::FaceOp;
 use crate::pocket::PocketOp;
 use crate::slot::SlotOp;
+use crate::thread::ThreadOp;
 use crate::tool::Tool;
 use crate::toolpath::Toolpath;
 use crate::units::MAX_COORDINATE;
@@ -149,6 +150,8 @@ pub enum OperationKind {
     /// The curves of a sketch followed by the tool's centre, a little below the face they are
     /// drawn on (decision 0032).
     Engrave { engrave: EngraveOp },
+    /// Internal threads milled by going round drilled holes with a thread mill (decision 0034).
+    Thread { thread: ThreadOp },
 }
 
 /// One operation of a setup.
@@ -355,6 +358,7 @@ impl ManufactureData {
                 OperationKind::Chamfer { chamfer } => chamfer.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Slot { slot } => slot.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Engrave { engrave } => engrave.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Thread { thread } => thread.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())

@@ -461,6 +461,9 @@ pub struct CamOpEditParams {
     /// An engraving's parameters, whole, as `cam.op.engrave` takes them.
     #[serde(default)]
     pub engrave: Option<Value>,
+    /// A thread mill operation's parameters, whole, as `cam.op.thread` takes them.
+    #[serde(default)]
+    pub thread: Option<Value>,
     /// A chamfer's parameters, whole, as `cam.op.chamfer` takes them.
     #[serde(default)]
     pub chamfer: Option<Value>,
@@ -584,6 +587,24 @@ pub struct CamOpEngraveParams {
     /// mm below the surface (default 0.2), top?: Z of the surface in the WCS (default the
     /// sketch's own plane), rpm?, feed?}`.
     pub engrave: Value,
+}
+
+/// Add a thread mill operation to a setup (decision 0034 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpThreadParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: a thread mill narrower than the drilled holes.
+    pub tool: u32,
+    /// `{holes: [[x, y], …] the middle of each hole in the WCS, diameter: mm, the thread's major
+    /// diameter (10 for M10), depth: mm of thread down from the top, pitch?: mm (default the
+    /// tool's), top?: Z of the holes' top (default the model's top), hand?: right (default) |
+    /// left, passes?: how many passes its depth is taken in (default 2), rpm?, feed?: mm/min
+    /// at the cutting edge}`.
+    pub thread: Value,
 }
 
 /// A sketch an engraving can follow in a setup: one whose plane faces the tool.

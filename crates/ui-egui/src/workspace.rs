@@ -444,7 +444,7 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "INSERT", panel: "LINKS", promoted: 2, ids: &["component.update_links", "component.break_link"] },
     Section { tab: "MANUFACTURE", panel: "SETUP", promoted: 1, ids: &["cam.setup.create"] },
     Section { tab: "MANUFACTURE", panel: "MILLING", promoted: 4, ids: crate::manufacture_workspace::MILLING },
-    Section { tab: "MANUFACTURE", panel: "DRILLING", promoted: 1, ids: &["cam.op.drill"] },
+    Section { tab: "MANUFACTURE", panel: "DRILLING", promoted: 1, ids: &["cam.op.drill", "cam.op.thread"] },
     Section { tab: "MANUFACTURE", panel: "ACTIONS", promoted: 3, ids: &["cam.simulate", "cam.post", "cam.setup.sheet"] },
     Section {
         tab: "MANUFACTURE",

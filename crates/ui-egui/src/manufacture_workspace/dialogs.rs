@@ -34,6 +34,7 @@ mod library;
 mod pocket;
 mod simulate;
 mod slot;
+mod thread;
 pub(crate) use bore::BoreForm;
 pub(crate) use chamfer::ChamferForm;
 pub(crate) use contour::ContourForm;
@@ -42,6 +43,7 @@ pub(crate) use library::LibraryForm;
 pub(crate) use pocket::PocketForm;
 pub(crate) use simulate::SimForm;
 pub(crate) use slot::SlotForm;
+pub(crate) use thread::ThreadForm;
 
 /// The open form.
 pub(crate) enum Dialog {
@@ -57,6 +59,7 @@ pub(crate) enum Dialog {
     Bore(BoreForm),
     Slot(SlotForm),
     Engrave(EngraveForm),
+    Thread(ThreadForm),
     Simulate(SimForm),
     Post(PostForm),
     Posted(Posted),
@@ -99,6 +102,7 @@ impl Dialog {
             Dialog::Slot(form) => form.editing.is_none(),
             Dialog::Contour(form) => form.editing.is_none() && form.inside(),
             Dialog::Chamfer(form) => form.editing.is_none(),
+            Dialog::Thread(form) => form.editing.is_none(),
             _ => false,
         }
     }
@@ -113,6 +117,7 @@ impl Dialog {
             | Dialog::Chamfer(ChamferForm { editing: Some(edited), .. })
             | Dialog::Slot(SlotForm { editing: Some(edited), .. })
             | Dialog::Engrave(EngraveForm { editing: Some(edited), .. })
+            | Dialog::Thread(ThreadForm { editing: Some(edited), .. })
             | Dialog::Drill(DrillForm { editing: Some(edited), .. }) => edited.id.as_str(),
             _ => None,
         }
@@ -130,6 +135,7 @@ impl Dialog {
             Dialog::Bore(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Slot(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Engrave(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
+            Dialog::Thread(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Simulate(form) => form.worked.get().map(|(key, shown)| (key, Shown::Stock(&shown.0, shown.1.as_ref()))),
             _ => None,
         }
@@ -137,7 +143,7 @@ impl Dialog {
 }
 
 /// The tool kinds Add Tool offers: the command's word and the label.
-const KINDS: [(&str, &str); 9] = [
+const KINDS: [(&str, &str); 10] = [
     ("flat_end_mill", "manufacture.kind_flat_end_mill"),
     ("face_mill", "manufacture.kind_face_mill"),
     ("bull_nose_end_mill", "manufacture.kind_bull_nose_end_mill"),
@@ -146,6 +152,7 @@ const KINDS: [(&str, &str); 9] = [
     ("spot_drill", "manufacture.kind_spot_drill"),
     ("reamer", "manufacture.kind_reamer"),
     ("tap", "manufacture.kind_tap"),
+    ("thread_mill", "manufacture.kind_thread_mill"),
     ("chamfer_mill", "manufacture.kind_chamfer_mill"),
 ];
 const COOLANTS: [(&str, &str); 3] =
@@ -481,7 +488,7 @@ impl ToolForm {
                     "overall_length": self.overall_length, "shank_diameter": self.diameter,
                     "tip_angle": if self.pointed() { self.tip_angle.to_radians() } else { 0.0 },
                     "tip_diameter": if kind == "chamfer_mill" { self.tip_flat } else { 0.0 },
-                    "thread_pitch": if kind == "tap" { self.pitch } else { 0.0 }
+                    "thread_pitch": if matches!(kind, "tap" | "thread_mill") { self.pitch } else { 0.0 }
                 },
                 "flutes": self.flutes,
                 "holder": {"stick_out": self.overall_length.min(self.flute_length + 10.0), "segments": []},
@@ -522,7 +529,7 @@ impl ToolForm {
             _ => json!(0.0),
         };
         geometry["thread_pitch"] = match kind {
-            "tap" => json!(self.pitch),
+            "tap" | "thread_mill" => json!(self.pitch),
             _ if same_kind => was["thread_pitch"].clone(),
             _ => json!(0.0),
         };
@@ -596,7 +603,7 @@ impl ToolForm {
                 if word(&KINDS, self.kind) == "chamfer_mill" {
                     ui_kit::row(ui, tr("manufacture.tool_tip_flat"), |ui| ui_kit::length_field(ui, &mut self.tip_flat, units, decimals));
                 }
-                if word(&KINDS, self.kind) == "tap" {
+                if matches!(word(&KINDS, self.kind), "tap" | "thread_mill") {
                     ui_kit::row(ui, tr("manufacture.tool_thread_pitch"), |ui| ui_kit::length_field(ui, &mut self.pitch, units, decimals));
                 }
                 if ui_kit::row(ui, tr("manufacture.tool_flutes"), |ui| ui_kit::whole_number_field(ui, &mut self.flutes, 1..=1000, "")).changed() {
@@ -1870,6 +1877,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
             | "cam.op.bore"
             | "cam.op.slot"
             | "cam.op.engrave"
+            | "cam.op.thread"
             | "cam.simulate"
             | "cam.setup.sheet"
             | "cam.post"
@@ -1908,6 +1916,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         "cam.op.bore" => Dialog::Bore(BoreForm::new(app)),
         "cam.op.slot" => Dialog::Slot(SlotForm::new(app)),
         "cam.op.engrave" => Dialog::Engrave(EngraveForm::new(app)),
+        "cam.op.thread" => Dialog::Thread(ThreadForm::new(app)),
         "cam.simulate" => Dialog::Simulate(SimForm::new(app)),
         _ => Dialog::Post(PostForm::new(app)),
     });
@@ -1931,6 +1940,7 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
             "chamfer" => ChamferForm::edit(app, id).map(Dialog::Chamfer),
             "slot" => SlotForm::edit(app, id).map(Dialog::Slot),
             "engrave" => EngraveForm::edit(app, id).map(Dialog::Engrave),
+            "thread" => ThreadForm::edit(app, id).map(Dialog::Thread),
             "drill" => DrillForm::edit(app, id).map(Dialog::Drill),
             _ => Err(tr("manufacture.edit_unsupported_operation").to_string()),
         }),
@@ -1968,6 +1978,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Bore(form) => form.show(app, ctx, &units, decimals).map(Dialog::Bore),
         Dialog::Slot(form) => form.show(app, ctx, &units, decimals).map(Dialog::Slot),
         Dialog::Engrave(form) => form.show(app, ctx, &units, decimals).map(Dialog::Engrave),
+        Dialog::Thread(form) => form.show(app, ctx, &units, decimals).map(Dialog::Thread),
         Dialog::Simulate(form) => form.show(app, ctx, &units, decimals).map(Dialog::Simulate),
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),

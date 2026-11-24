@@ -93,6 +93,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.engrave", "Engrave", crate::checked!("cam.op.engrave", op_engrave)).icon("cam_engrave").doc_only()
         .contract(&TypedContract::<crate::schema::cam::CamOpEngraveParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: an engraving tool, a chamfer mill, a spot drill or an end mill, engrave: {sketch: the sketch's name, depth?: mm below the surface (default 0.2), top?: Z of the surface (default the sketch's own plane), rpm?, feed?} → id of the new operation: the tool's centre along every drawn curve of the sketch, its text too (read from the sketch when the toolpath is worked out), curves that meet cut in one go; the sketch's plane has to face the tool"),
+    CommandSpec::new("cam.op.thread", "Thread Mill", crate::checked!("cam.op.thread", op_thread)).icon("cam_thread").doc_only()
+        .contract(&TypedContract::<crate::schema::cam::CamOpThreadParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: a thread mill narrower than the drilled holes, thread: {holes: [[x, y]] the middle of each hole, diameter: the thread's major diameter, depth: mm of thread from the top, pitch?: mm (default the tool's), top?: Z, hand?: right | left, passes?: (default 2), rpm?, feed?: at the cutting edge} → id of the new operation: in each hole the tool goes down its middle, on to a circle round it by a half turn, round counter-clockwise rising a pitch a turn (a right-hand thread from the bottom up, a left-hand one from the top down), and off by a half turn; the holes have to be drilled to the thread's minor diameter first, a quarter of a pitch deeper than the thread"),
     CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("cam_chamfer").doc_only()
         .contract(&TypedContract::<CamOpChamferParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), edges?: outside | all | picked (with outside?: true and openings?: [[x, y]] a point in each opening), direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge; with edges all, round the inside of every opening in the part's top and round what stands in it as well, but for an opening too narrow for the tool or not open as far down as its point, which is left sharp and said; with edges picked, the outside edge only when asked and the rims of the openings named"),
@@ -1288,6 +1291,10 @@ fn op_engrave(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.engrave", "Engrave", p)
 }
 
+fn op_thread(s: &mut Session, p: &Value) -> Result<Value> {
+    add_operation(s, "cam.op.thread", "Thread Mill", p)
+}
+
 fn op_chamfer(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.chamfer", "Chamfer", p)
 }
@@ -1342,6 +1349,11 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             let engrave: solidcraft_cam::EngraveOp = parse(cmd, "engrave", &p.engrave)?;
             Ok((p.setup, p.name, p.tool, OperationKind::Engrave { engrave }))
         }
+        "cam.op.thread" => {
+            let p: crate::schema::cam::CamOpThreadParams = parse(cmd, "parameters", p)?;
+            let thread: solidcraft_cam::ThreadOp = parse(cmd, "thread", &p.thread)?;
+            Ok((p.setup, p.name, p.tool, OperationKind::Thread { thread }))
+        }
         "cam.op.chamfer" => {
             let p: CamOpChamferParams = parse(cmd, "parameters", p)?;
             let chamfer: ChamferOp = match &p.chamfer {
@@ -1350,7 +1362,7 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             };
             Ok((p.setup, p.name, p.tool, OperationKind::Chamfer { chamfer }))
         }
-        other => Err(bad(other, "not a command that adds a drill, face, contour, bore, pocket, slot, engrave or chamfer operation")),
+        other => Err(bad(other, "not a command that adds a drill, face, contour, bore, pocket, slot, engrave, thread or chamfer operation")),
     }
 }
 
@@ -1502,6 +1514,15 @@ fn work(
             // The model has no groove: a cut this deep along the curves is the engraving.
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: done.depth })
         }
+        OperationKind::Thread { thread } => {
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            let done = thread.toolpath(start, tool, &placement, material).map_err(failed)?;
+            let numbers = serde_json::json!({
+                "rpm": done.rpm, "feed": done.feed, "centre_feed": done.centre_feed, "plunge_feed": done.plunge_feed, "top": done.top,
+                "bottom": done.bottom, "pitch": done.pitch, "minor": done.minor, "passes": done.passes, "turns": done.turns
+            });
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
+        }
         OperationKind::Chamfer { chamfer } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
             // The wall is read a hair below the chamfer's lower edge, where the model has it
@@ -1606,7 +1627,8 @@ pub struct ToolChoice {
     pub name: String,
     /// Its cutting diameter, mm.
     pub diameter: f64,
-    /// Its thread's pitch, mm, when it is a tap: it cuts holes with the tap cycle at this pitch.
+    /// Its thread's pitch, mm, when it is a tap (it cuts holes with the tap cycle at this pitch)
+    /// or a thread mill.
     pub pitch: Option<f64>,
     /// Whether it is a reamer: its holes are fed in and fed back out unless told otherwise.
     pub reams: bool,
@@ -1642,6 +1664,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
         "slot" => solidcraft_cam::SlotOp { slots: vec![[0.0, 0.0]], ..Default::default() }.validate(tool).is_ok(),
         "chamfer" => ChamferOp::default().validate(tool).is_ok(),
         "engrave" => solidcraft_cam::EngraveOp { sketch: "any".into(), ..Default::default() }.validate(tool).is_ok(),
+        "thread" => tool.kind == solidcraft_cam::ToolKind::ThreadMill,
         _ => true,
     };
     data.tools
@@ -1651,7 +1674,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
             number: t.number,
             name: t.name.clone(),
             diameter: t.geometry.diameter,
-            pitch: pitch(t),
+            pitch: pitch(t).or((t.kind == solidcraft_cam::ToolKind::ThreadMill).then_some(t.geometry.thread_pitch)),
             reams: t.kind == solidcraft_cam::ToolKind::Reamer,
         })
         .collect()
@@ -2103,6 +2126,7 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Chamfer { .. } => ("a chamfer", "chamfer"),
         OperationKind::Slot { .. } => ("a slot operation", "slot"),
         OperationKind::Engrave { .. } => ("an engraving", "engrave"),
+        OperationKind::Thread { .. } => ("a thread mill operation", "thread"),
     };
     let given = [
         (&p.toolpath, "toolpath"),
@@ -2113,6 +2137,7 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         (&p.chamfer, "chamfer"),
         (&p.slot, "slot"),
         (&p.engrave, "engrave"),
+        (&p.thread, "thread"),
     ];
     for (given, name) in given {
         if given.is_some() && name != takes {
@@ -2158,6 +2183,11 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Engrave { engrave } => {
             if let Some(v) = &p.engrave {
                 *engrave = parse(CMD, "engrave", v)?;
+            }
+        }
+        OperationKind::Thread { thread } => {
+            if let Some(v) = &p.thread {
+                *thread = parse(CMD, "thread", v)?;
             }
         }
     }

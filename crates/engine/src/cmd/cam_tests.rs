@@ -502,7 +502,7 @@ fn a_form_previews_an_operation_before_it_is_made() {
         (
             "cam.post",
             json!({"setup": "setup-1", "post": "rs274"}),
-            "not a command that adds a drill, face, contour, bore, pocket, slot, engrave or chamfer operation",
+            "not a command that adds a drill, face, contour, bore, pocket, slot, engrave, thread or chamfer operation",
         ),
     ] {
         let said = why(&s, command, params.clone());
@@ -2947,4 +2947,81 @@ fn a_pocket_is_rest_machined_after_a_wider_tool() {
     let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     let text = posted["text"].as_str().unwrap();
     assert!(text.contains("(POCKET 1)") && text.contains("(POCKET 2)") && text.contains("T2 M6"), "{text}");
+}
+
+/// Tool 8: a 7 mm thread mill with one row of teeth for a pitch of 1.5, on a neck 20 long.
+fn thread_mill() -> Value {
+    json!({
+        "number": 8, "name": "7 mm thread mill, pitch 1.5", "kind": "thread_mill",
+        "geometry": {"diameter": 7.0, "corner_radius": 0.0, "flute_length": 1.5, "shoulder_length": 20.0, "overall_length": 60.0,
+                     "shank_diameter": 8.0, "tip_angle": 0.0, "tip_diameter": 0.0, "thread_pitch": 1.5},
+        "flutes": 3, "holder": {"stick_out": 30.0, "segments": []}, "length_offset": 8, "diameter_offset": 8, "coolant": "flood",
+        "cutting_data": [{"material": "aluminium", "surface_speed": 120.0, "chip_load": 0.03, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+        "overrides": {"rpm": null, "feed": null}
+    })
+}
+
+#[test]
+fn a_thread_is_milled_round_drilled_holes_and_posts_as_helical_arcs() {
+    // The plate with two holes through it, drilled to 8.376 for M10 x 1.5, about (-20, 0) and
+    // (10, 10) in the WCS; a thread 6 deep in each, with tool 8.
+    let mut s = plate();
+    for base in [[30.0, 40.0, -5.0], [60.0, 50.0, -5.0]] {
+        run(&mut s, "solid.cylinder", json!({"diameter": 8.376, "height": 30, "base": base, "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    }
+    run(&mut s, "cam.tool.create", json!({"tool": thread_mill()}));
+    let thread = json!({"holes": [[-20, 0], [10, 10]], "diameter": 10, "depth": 6});
+    assert_eq!(run(&mut s, "cam.op.thread", json!({"setup": "setup-1", "tool": 8, "thread": thread}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    // Drilled to 8.376; two passes, the tool's centre 1.262 and 1.5 from the hole's middle;
+    // four turns a pass (one row of teeth, four pitches); the centre fed at 3/10 of the edge.
+    assert!(about(&n["minor"], 10.0 - 1.082_531_754_730_548 * 1.5) && n["turns"].as_u64() == Some(4), "{n}");
+    assert!(about(&n["passes"][1], 1.5) && (n["passes"][0].as_f64().unwrap() - 1.2622).abs() < 1e-4, "{n}");
+    assert!(
+        about(&n["centre_feed"], 0.3 * n["feed"].as_f64().unwrap()) && (n["top"].as_f64(), n["bottom"].as_f64()) == (Some(-1.0), Some(-7.0)),
+        "{n}"
+    );
+    // From a quarter of a pitch below the thread's bottom to a quarter above the plate's top, no
+    // further out than 1.5 from each hole's middle.
+    assert!(near(&t["min"], [-21.5, -1.5, -7.375]) && near(&t["max"], [11.5, 11.5, 25.0]), "{t}");
+    // The program: counter-clockwise arcs that rise as they go (G3 with a Z), named, and the
+    // note about the holes kept with it.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = posted["text"].as_str().unwrap();
+    let helical = text.lines().filter(|line| line.starts_with("G3 ") && line.contains(" Z")).count();
+    assert!(text.contains("(THREAD MILL 1)") && helical >= 2 && !text.contains("G2 "), "{text}");
+    assert!(
+        posted["notes"].as_array().unwrap().iter().any(|note| note.as_str().is_some_and(|note| note.contains("drilled to 8.376 mm"))),
+        "{}",
+        posted["notes"]
+    );
+    for post in ["fanuc_mill", "rs274"] {
+        assert!(
+            run(&mut s, "cam.post", json!({"setup": "setup-1", "post": post}))["text"].as_str().is_some_and(|text| text.contains("G3")),
+            "{post}"
+        );
+    }
+    // The simulation cannot show a thread: the operation is left out of it, and it says why.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.5}));
+    let skipped = sim["operations"][0]["skipped"].as_str().unwrap_or_default();
+    assert!(skipped.contains("cuts a thread, which a field of heights can't show"), "{sim:#}");
+    // Changed like any operation: left-hand, three passes; and kept as given.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "thread": {"holes": [[-20, 0]], "diameter": 10, "depth": 6, "hand": "left", "passes": 3}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(t["numbers"]["passes"].as_array().is_some_and(|p| p.len() == 3) && near(&t["min"], [-21.5, -1.5, -7.375]), "{t}");
+    let kept = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["operation"].clone();
+    assert_eq!((kept["kind"].clone(), kept["thread"]["hand"].clone(), kept["thread"]["passes"].clone()), (json!("thread"), json!("left"), json!(3)));
+    // Refused, with why: a tool that is no thread mill, a thread too small for the tool, no depth.
+    let why =
+        |s: &mut Session, thread: Value, tool: u32| match s.execute("cam.op.thread", &json!({"setup": "setup-1", "tool": tool, "thread": thread})) {
+            Err(e) => e.to_string(),
+            Ok(made) => refused(s, "cam.op.toolpath", json!({"id": made["id"]})),
+        };
+    assert!(why(&mut s, json!({"holes": [[0, 0]], "diameter": 10, "depth": 6}), 2).contains("does not mill a thread"));
+    assert!(
+        why(&mut s, json!({"holes": [[0, 0]], "diameter": 8, "depth": 6, "pitch": 1.25}), 8)
+            .contains("does not go into a hole drilled for this thread")
+    );
+    assert!(why(&mut s, json!({"holes": [[0, 0]], "diameter": 10}), 8).contains("depth"));
 }

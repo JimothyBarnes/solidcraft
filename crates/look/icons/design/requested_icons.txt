@@ -55,6 +55,7 @@ cam_setup	false
 cam_setup_sheet	false
 cam_simulate	false
 cam_slot	false
+cam_thread	false
 cam_tool_new	false
 camera	false
 canvas	false
