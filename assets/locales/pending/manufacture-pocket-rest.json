@@ -1,0 +1,34 @@
+{
+  "en": {
+    "manufacture.pocket_rest": "Rest: after a tool of",
+    "manufacture.pocket_rest_note": "Rest machining: only what a tool that wide could not reach is cut."
+  },
+  "ar": {
+    "manufacture.pocket_rest": "المتبقي: بعد أداة بقطر",
+    "manufacture.pocket_rest_note": "تشغيل المتبقي: يُقطع فقط ما لم تصل إليه أداة بهذا العرض."
+  },
+  "he": {
+    "manufacture.pocket_rest": "שארית: אחרי כלי בקוטר",
+    "manufacture.pocket_rest_note": "עיבוד שארית: נחתך רק מה שכלי ברוחב הזה לא הגיע אליו."
+  },
+  "ja": {
+    "manufacture.pocket_rest": "残し取り: 前の工具径",
+    "manufacture.pocket_rest_note": "残し取り加工: その径の工具が届かなかった部分だけを加工します。"
+  },
+  "vi": {
+    "manufacture.pocket_rest": "Phần còn lại: sau dao đường kính",
+    "manufacture.pocket_rest_note": "Gia công phần còn lại: chỉ cắt những chỗ mà dao rộng như vậy không tới được."
+  },
+  "zh": {
+    "manufacture.pocket_rest": "残料：前一把刀直径",
+    "manufacture.pocket_rest_note": "残料加工：只切削该直径刀具够不到的部分。"
+  },
+  "de": {
+    "manufacture.pocket_rest": "Rest: nach Werkzeug mit",
+    "manufacture.pocket_rest_note": "Restbearbeitung: Geschnitten wird nur, was ein so breites Werkzeug nicht erreicht hat."
+  },
+  "ko": {
+    "manufacture.pocket_rest": "잔삭: 이전 공구 지름",
+    "manufacture.pocket_rest_note": "잔삭 가공: 그 지름의 공구가 닿지 못한 부분만 가공합니다."
+  }
+}

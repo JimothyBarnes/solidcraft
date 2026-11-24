@@ -2901,3 +2901,50 @@ fn an_engraving_follows_the_curves_of_a_sketch_on_the_face_they_are_drawn_on() {
     assert!(why(&mut s, json!({"sketch": mark, "depth": 0}), 7).contains("the depth must be"));
     assert!(why(&mut s, json!({"depth": 0.2}), 7).contains("sketch"));
 }
+
+#[test]
+fn a_pocket_is_rest_machined_after_a_wider_tool() {
+    // The plate's pocket 60 x 40, 6 deep (its floor at Z -7 in the WCS), cut with a 20 mm end
+    // mill (tool 5) and then, where that one did not reach, with the 10 mm one (tool 2).
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    let mut wide = mill10();
+    (wide["number"], wide["name"], wide["geometry"]["diameter"], wide["geometry"]["shank_diameter"]) =
+        (json!(5), json!("20 mm flat end mill"), json!(20.0), json!(20.0));
+    (wide["length_offset"], wide["diameter_offset"]) = (json!(5), json!(5));
+    run(&mut s, "cam.tool.create", json!({"tool": wide}));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 5, "pocket": {"pockets": [[0, 0]]}}));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]], "rest": 20}}));
+    // Four cuts at a level, one in each corner, and the tool nowhere else: its centre comes to
+    // 5 from the walls there (X -25 to 25, Y -15 to 15).
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    assert_eq!(t["numbers"]["rest"], json!([4]), "{}", t["numbers"]);
+    assert!(near(&t["min"], [-25.0, -15.0, -7.0]) && near(&t["max"], [25.0, 15.0, 25.0]), "{t}");
+    let whole = {
+        let mut other = plate();
+        boxed(&mut other, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+        run(&mut other, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}}));
+        run(&mut other, "cam.op.toolpath", json!({"id": "op-1"}))["feed_length"].as_f64().unwrap()
+    };
+    assert!(t["feed_length"].as_f64().unwrap() < 0.2 * whole, "{} {whole}", t["feed_length"]);
+    // Simulated one after the other: nothing is cut into. The 20 mm tool takes the pocket but
+    // for its corners, round to 10; the 10 mm tool takes those down to its own 5: in each corner
+    // (1 - pi / 4) x (10^2 - 5^2), 7 deep, 450.7 mm3 together.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.2}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let quarter = 1.0 - std::f64::consts::FRAC_PI_4;
+    let (first, second) = (sim["operations"][0]["removed"].as_f64().unwrap(), sim["operations"][1]["removed"].as_f64().unwrap());
+    let (pocket, corners) = (60.0 * 40.0 * 7.0 - 4.0 * quarter * 100.0 * 7.0, 4.0 * quarter * 75.0 * 7.0);
+    assert!((first - pocket).abs() < 0.01 * pocket && (second - corners).abs() < 0.06 * corners, "{first} {pocket}; {second} {corners}");
+    // Kept as given; a tool that is not the wider one is refused, with why.
+    let kept = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][1]["operation"]["pocket"]["rest"].clone();
+    assert_eq!(kept, json!(20.0));
+    for narrow in [json!(10), json!(4), json!(-20), json!("wide")] {
+        let why = refused(&mut s, "cam.op.edit", json!({"id": "op-2", "pocket": {"pockets": [[0, 0]], "rest": narrow}}));
+        assert!(why.contains("rest machining is after a wider tool") || why.contains("pocket"), "{narrow}: {why}");
+    }
+    // The program of both posts, the second after its own tool change.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = posted["text"].as_str().unwrap();
+    assert!(text.contains("(POCKET 1)") && text.contains("(POCKET 2)") && text.contains("T2 M6"), "{text}");
+}

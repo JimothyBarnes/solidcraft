@@ -571,7 +571,7 @@ fn hostile_numbers_never_panic() {
     let wall = rect(-30.0, -20.0, 30.0, 20.0);
     let shape = pocket(&wall, &[]);
     for &v in &bad {
-        for field in 0..9 {
+        for field in 0..10 {
             let mut op = one([0.0, 0.0]);
             match field {
                 0 => op.top = Some(v),
@@ -582,11 +582,13 @@ fn hostile_numbers_never_panic() {
                 5 => op.rpm = Some(v),
                 6 => op.feed = Some(v),
                 7 => op.finish = Some(v),
+                8 => op.rest = Some(v),
                 _ => op.pockets = vec![[v, v]],
             }
             let _ = pocketed(&op, std::slice::from_ref(&shape));
-            // And each with a finishing pass asked for.
-            let _ = pocketed(&PocketOp { finish: op.finish.or(Some(0.3)), ..op }, std::slice::from_ref(&shape));
+            // And each with a finishing pass asked for, and after a wider tool.
+            let _ = pocketed(&PocketOp { finish: op.finish.or(Some(0.3)), ..op.clone() }, std::slice::from_ref(&shape));
+            let _ = pocketed(&PocketOp { rest: op.rest.or(Some(16.0)), ..op }, std::slice::from_ref(&shape));
         }
         // Shapes of hostile numbers: a floor, a point, a spike, a broken loop, a hostile island.
         let shapes = [
@@ -602,6 +604,7 @@ fn hostile_numbers_never_panic() {
         ];
         for odd in shapes {
             let _ = pocketed(&one([0.0, 0.0]), std::slice::from_ref(&odd));
+            let _ = pocketed(&PocketOp { rest: Some(16.0), ..one([0.0, 0.0]) }, std::slice::from_ref(&odd));
             let _ = pocketed(&PocketOp { finish: Some(0.3), ..one([0.0, 0.0]) }, &[odd]);
         }
         // A tool of hostile sizes: never a path outside the region.
@@ -1049,4 +1052,303 @@ fn random_pockets_are_finished_without_touching_a_wall_or_cutting_wide_at_full_d
         cut >= 90 && levelled >= 3 && looked_at > 400_000,
         "{cut} cut, {refused} refused, {levelled} level by level, {straight} straight, {looked_at} places"
     );
+}
+
+/// A flat end mill like tool 2, `diameter` across.
+fn mill(diameter: f64) -> Tool {
+    let mut tool = mill10();
+    (tool.geometry.diameter, tool.geometry.shank_diameter) = (diameter, diameter);
+    tool
+}
+
+/// Checks a pocket cut by two tools against its shape, by measuring, as [`check_with`] does for
+/// one: `first` (of radius `wide`, when it cut at all) and then `rest` (of `radius`). The
+/// second tool's centre is never nearer a wall or an island than its radius, and at the floor
+/// every place it can reach is cut by one of them. Returns how many places were reachable.
+fn check_after(
+    first: Option<&Pocketed>,
+    wide: f64,
+    rest: &Pocketed,
+    wall: &[(f64, f64)],
+    islands: &[Vec<(f64, f64)>],
+    floor: f64,
+    radius: f64,
+) -> usize {
+    let points = fed_points(&rest.toolpath);
+    let tightest = points.iter().map(|at| room(q(at.x, at.y), wall, islands)).fold(f64::INFINITY, f64::min);
+    assert!(tightest >= radius - 1e-4, "the tool's centre comes within {tightest} mm of a wall, not {radius}");
+    let (x0, x1) = wall.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), w| (lo.min(w.0), hi.max(w.0)));
+    let (y0, y1) = wall.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), w| (lo.min(w.1), hi.max(w.1)));
+    let h = 0.5;
+    let (nx, ny) = (((x1 - x0) / h).ceil() as usize + 1, ((y1 - y0) / h).ceil() as usize + 1);
+    let cell = |i: usize, j: usize| q(x0 + i as f64 * h, y0 + j as f64 * h);
+    let stamp = |grid: &mut Vec<bool>, at: Vec2, radius: f64| {
+        let reach = (radius / h).ceil() as isize;
+        let (ci, cj) = (((at.x - x0) / h).round() as isize, ((at.y - y0) / h).round() as isize);
+        for i in (ci - reach).max(0)..=(ci + reach).min(nx as isize - 1) {
+            for j in (cj - reach).max(0)..=(cj + reach).min(ny as isize - 1) {
+                let c = cell(i as usize, j as usize);
+                if (c.x - at.x).hypot(c.y - at.y) <= radius {
+                    grid[i as usize * ny + j as usize] = true;
+                }
+            }
+        }
+    };
+    let (mut reachable, mut cut) = (vec![false; nx * ny], vec![false; nx * ny]);
+    for i in 0..nx {
+        for j in 0..ny {
+            if room(cell(i, j), wall, islands) >= radius + 0.01 {
+                stamp(&mut reachable, cell(i, j), radius - h);
+            }
+        }
+    }
+    for at in points.iter().filter(|at| (at.z - floor).abs() <= 1e-9) {
+        stamp(&mut cut, q(at.x, at.y), radius);
+    }
+    for at in first.map(|first| fed_points(&first.toolpath)).unwrap_or_default().iter().filter(|at| (at.z - floor).abs() <= 1e-9) {
+        stamp(&mut cut, q(at.x, at.y), wide);
+    }
+    let left: Vec<Vec2> = (0..nx * ny).filter(|&k| reachable[k] && !cut[k]).map(|k| cell(k / ny, k % ny)).collect();
+    assert!(left.is_empty(), "{} places the tool can reach are left uncut at the floor, the first at {:?}", left.len(), left.first());
+    reachable.iter().filter(|&&r| r).count()
+}
+
+#[test]
+fn rest_machining_cuts_only_what_the_wider_tool_left() {
+    // The pocket 60 x 40 about the origin, cut first with a 20 mm tool: its centre went where
+    // it had 10 to every wall, the rectangle X -20 to 20, Y -10 to 10, and it left the four
+    // corners round to a radius of 10.
+    let wall = rect(-30.0, -20.0, 30.0, 20.0);
+    let first = one([0.0, 0.0]).toolpath(None, &mill(20.0), &placed(), Some("aluminium"), &[pocket(&wall, &[])]).unwrap();
+    // After it the 10 mm tool. Of its four rings (5, 9, 13 and 17 from the walls) only the
+    // outermost comes where there is anything left: within 5 of the wider tool's rectangle the
+    // 10 mm tool is wholly inside what was cleared. Along the front, 5 from the wall, that is
+    // up to X 20; what is thinner than 0.02 stays, so the tool cuts from where it would take
+    // that much, sqrt(5.02^2 - 5^2) = 0.4477 further on, to the corner at X 25 and as far up
+    // the side: 9.105 in each corner, and a millimetre more at each end, back in what was
+    // cleared, where it goes down and comes up.
+    let whole = pocketed(&one([0.0, 0.0]), &[pocket(&wall, &[])]).unwrap();
+    let done = pocketed(&PocketOp { rest: Some(20.0), ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap();
+    let corner = 2.0 * (5.0 - (5.02_f64.powi(2) - 25.0).sqrt()) + 2.0;
+    assert!(
+        done.rest.len() == 1 && done.rest[0].len() == 4 && done.rest[0].iter().all(|&cut| (cut - corner).abs() <= 5e-3),
+        "{:?} {corner}",
+        done.rest
+    );
+    assert!(done.rings == whole.rings && done.levels == whole.levels && whole.rest.is_empty() && done.notes.is_empty(), "{:?}", done.notes);
+    // What is fed: at each of the two levels the four corners, and down to each from the
+    // retract height in air (8.5 and 12): nothing along the walls between the corners, and a
+    // small part of what the whole pocket takes.
+    let s = done.toolpath.stats().unwrap();
+    assert!((s.feed_length - (8.0 * corner + 4.0 * (8.5 + 12.0))).abs() <= 0.05, "{}", s.feed_length);
+    assert!(s.feed_length < 0.2 * whole.toolpath.stats().unwrap().feed_length);
+    for at in fed_points(&done.toolpath) {
+        assert!(at.x.abs() >= 19.44 && at.y.abs() >= 9.44, "{at:?} is not in a corner");
+    }
+    // The tool goes down only where it is wholly inside what the wider tool cleared: no
+    // further than 5 from that tool's rectangle.
+    let mut plunges = 0;
+    let mut at = done.toolpath.start;
+    for m in &done.toolpath.moves {
+        let to = m.end(at);
+        if let Move::Linear { feed, .. } = *m
+            && to.z < at.z
+        {
+            assert!(close(feed, done.plunge_feed), "{m:?}");
+            let far = (to.x.abs() - 20.0).max(0.0).hypot((to.y.abs() - 10.0).max(0.0));
+            assert!(far <= 5.0 + 1e-6, "the tool goes down at {to:?}, {far} mm from where the wider tool's centre went");
+            plunges += 1;
+        }
+        at = to;
+    }
+    assert_eq!(plunges, 8);
+    // Measured: the centre is never nearer a wall than its radius, and with what the wider
+    // tool cut, everything the 10 mm tool can reach is cut at the floor.
+    let looked_at = check_after(Some(&first), 10.0, &done, &wall, &[], -7.0, 5.0);
+    assert!(looked_at > 100);
+    // A finishing pass after it is the whole pocket's: the walls all round, once.
+    let finished = pocketed(&PocketOp { rest: Some(20.0), finish: Some(0.3), ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap();
+    assert!(
+        finished.rest[0].len() == 4 && close(finished.finishing[0][0], 160.0) && finished.finish_levels == vec![vec![-7.0]],
+        "{:?}",
+        finished.rest
+    );
+    // The wider tool is given by its diameter, and has to be the wider one.
+    for narrow in [10.0, 6.0, 0.0, -20.0, f64::NAN, f64::INFINITY] {
+        let e = pocketed(&PocketOp { rest: Some(narrow), ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap_err().to_string();
+        assert!(e.contains("rest machining is after a wider tool"), "{narrow}: {e}");
+    }
+    let op: PocketOp = serde_json::from_str(r#"{"pockets": [[0, 0]], "rest": 20}"#).unwrap();
+    assert_eq!(op, PocketOp { rest: Some(20.0), ..one([0.0, 0.0]) });
+}
+
+#[test]
+fn rest_machining_cuts_whole_what_the_wider_tool_never_came_to() {
+    // The pocket with a finger 10.4 wide and 20 long off one side. A 20 mm tool cuts the
+    // pocket and stays out of the finger. The 10 mm tool after it cuts the four corners and
+    // the finger: from the side of its mouth (where the pocket's own corners are, round the
+    // finger's first corner), down it, across its end and back, in one go, started and left in
+    // what was cleared.
+    let fingered = vec![(-30.0, -20.0), (30.0, -20.0), (30.0, -5.2), (50.0, -5.2), (50.0, 5.2), (30.0, 5.2), (30.0, 20.0), (-30.0, 20.0)];
+    let first = one([0.0, 0.0]).toolpath(None, &mill(20.0), &placed(), Some("aluminium"), &[pocket(&fingered, &[])]).unwrap();
+    let done = pocketed(&PocketOp { rest: Some(20.0), ..one([0.0, 0.0]) }, &[pocket(&fingered, &[])]).unwrap();
+    assert_eq!(done.rest[0].len(), 5, "{:?}", done.rest);
+    // Round each corner of the mouth the centre turns a quarter circle of 5. The wider tool's
+    // centre went towards the mouth too, round the same corners 10 from them, as far as where
+    // those two arcs meet in the mouth's middle: 31.3 degrees round from the wall. Up to there
+    // the 10 mm tool, 5 from the corner, is 5 from where the wider one went: nothing to cut. Past
+    // it the nearest place the wider tool went is that meeting point, and the tool takes 0.02
+    // when it is 5.02 from it: 3.63 degrees further, by the triangle with sides 5 and 10. So the
+    // finger's cut is two arcs of 90 less 34.96 degrees, twice 15, 0.4 across, and its two
+    // millimetres more: 42.006.
+    let met = (5.2_f64 / (100.0_f64 - 5.2 * 5.2).sqrt()).atan();
+    let takes = ((125.0 - 5.02_f64.powi(2)) / 100.0).acos();
+    let arc = 5.0 * (0.5 * PI - met - takes);
+    let finger = 2.0 * arc + 30.4 + 2.0;
+    assert!((finger - 42.006).abs() <= 1e-3, "{finger}");
+    let longest = done.rest[0].iter().copied().fold(0.0, f64::max);
+    assert!((longest - finger).abs() <= 0.01, "{longest} {finger}");
+    let furthest = |z: f64| fed_points(&done.toolpath).iter().filter(|at| (at.z - z).abs() <= 1e-9).map(|at| at.x).fold(f64::NEG_INFINITY, f64::max);
+    assert!((furthest(-3.5) - 45.0).abs() <= 1e-4 && (furthest(-7.0) - 45.0).abs() <= 1e-4);
+    check_after(Some(&first), 10.0, &done, &fingered, &[], -7.0, 5.0);
+    // A pocket 60 x 16 the 20 mm tool does not go into at all: after it the 10 mm tool cuts
+    // the whole pocket, move for move as with no word about another tool.
+    let narrow = rect(-30.0, -8.0, 30.0, 8.0);
+    assert!(one([0.0, 0.0]).toolpath(None, &mill(20.0), &placed(), Some("aluminium"), &[pocket(&narrow, &[])]).is_err());
+    let whole = pocketed(&one([0.0, 0.0]), &[pocket(&narrow, &[])]).unwrap();
+    let after = pocketed(&PocketOp { rest: Some(20.0), ..one([0.0, 0.0]) }, &[pocket(&narrow, &[])]).unwrap();
+    assert_eq!(after.toolpath, whole.toolpath);
+    assert_eq!(after.rest, whole.rings);
+    // A round pocket of radius 30: the 20 mm tool leaves nothing the 10 mm one can reach, and
+    // an operation with nothing to cut is refused, with why. With a finishing pass asked for
+    // there is that to cut, and the operation says the rest is nothing.
+    let circle = PocketShape {
+        floor: -7.0,
+        region: Region2 {
+            outer: Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 30.0, start: 0.0, sweep: 2.0 * PI }] },
+            holes: Vec::new(),
+        },
+    };
+    let e = pocketed(&PocketOp { rest: Some(20.0), ..one([0.0, 0.0]) }, std::slice::from_ref(&circle)).unwrap_err().to_string();
+    assert!(e.contains("a 20 mm tool leaves nothing for tool 2 to cut here"), "{e}");
+    let finished = pocketed(&PocketOp { rest: Some(20.0), finish: Some(0.3), ..one([0.0, 0.0]) }, &[circle]).unwrap();
+    assert!(finished.rest == vec![Vec::<f64>::new()] && close(finished.finishing[0][0], 50.0 * PI), "{:?} {:?}", finished.rest, finished.finishing);
+    assert!(
+        finished.notes.iter().any(|n| n.contains("a 20 mm tool leaves nothing in the pocket at X 0 Y 0 for tool 2 to cut")),
+        "{:?}",
+        finished.notes
+    );
+}
+
+#[test]
+fn random_pockets_are_rest_machined_in_air_where_cleared_and_wholly_where_not() {
+    // The random pockets once more (a rectangle with up to three islands), each cut first with
+    // a tool and then with one of half to two thirds its width. Measured: the second tool's
+    // centre is never nearer a wall or an island than its radius; with what the first tool
+    // cut, everything the second can reach is cut at the floor; and wherever the second tool
+    // goes straight down, it is wholly inside what the first one cut (every place on its edge
+    // is within the first tool's radius of a place that tool's centre fed through).
+    let mut seed = 0x1234_5678_9abc_def1_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (mut cut, mut refused, mut nothing, mut whole, mut parts, mut looked_at, mut unmeasured) = (0, 0, 0, 0, 0, 0, 0);
+    for case in 0..80 {
+        let (half_x, half_y) = (14.0 + (next() * 30.0).round(), 12.0 + (next() * 22.0).round());
+        let wall = rect(-half_x, -half_y, half_x, half_y);
+        let mut islands: Vec<Vec<(f64, f64)>> = Vec::new();
+        for _ in 0..(next() * 4.0) as usize {
+            let (w, h) = (2.0 + (next() * 14.0).round(), 2.0 + (next() * 12.0).round());
+            let (x, y) = (((next() * 2.0 - 1.0) * (half_x - w - 1.0)).round(), ((next() * 2.0 - 1.0) * (half_y - h - 1.0)).round());
+            let island = rect(x - 0.5 * w, y - 0.5 * h, x + 0.5 * w, y + 0.5 * h);
+            let apart = |a: &Vec<(f64, f64)>, b: &Vec<(f64, f64)>| {
+                a[0].0 > b[2].0 + 0.5 || b[0].0 > a[2].0 + 0.5 || a[0].1 > b[2].1 + 0.5 || b[0].1 > a[2].1 + 0.5
+            };
+            let inside_wall = island[0].0 > -half_x + 0.5 && island[2].0 < half_x - 0.5 && island[0].1 > -half_y + 0.5 && island[2].1 < half_y - 0.5;
+            if inside_wall && islands.iter().all(|other| apart(other, &island)) {
+                islands.push(island);
+            }
+        }
+        let before: f64 = [8.0, 10.0, 12.0, 16.0][(next() * 4.0) as usize % 4];
+        let diameter = if next() < 0.5 { 0.5 * before } else { (before * 2.0 / 3.0).round() };
+        let shape = pocket(&wall, &islands);
+        let op = PocketOp {
+            stepdown: Some(7.0),
+            direction: if next() < 0.5 { CutDirection::Climb } else { CutDirection::Conventional },
+            ..one([0.0, 0.0])
+        };
+        let said = format!("case {case} ({wall:?}, {islands:?}, a {diameter} mm tool after a {before} mm one, {op:?})");
+        let first = op.toolpath(None, &mill(before), &placed(), Some("aluminium"), std::slice::from_ref(&shape)).ok();
+        let done = match (PocketOp { rest: Some(before), ..op.clone() }).toolpath(None, &mill(diameter), &placed(), Some("aluminium"), &[shape]) {
+            Ok(done) => done,
+            Err(e) => {
+                let why = e.to_string();
+                refused += usize::from(!why.contains("leaves nothing"));
+                nothing += usize::from(why.contains("leaves nothing"));
+                assert!(why.contains("does not fit") || why.contains("turns") || why.contains("leaves nothing"), "{said}: {why}");
+                continue;
+            }
+        };
+        cut += 1;
+        // The first tool's own pocket may have been refused though the tool fits somewhere (its
+        // ramp has no room): what it would have cleared cannot be measured then. The second
+        // tool's centre still keeps its radius from every wall.
+        if first.is_none() {
+            let tightest = fed_points(&done.toolpath).iter().map(|at| room(q(at.x, at.y), &wall, &islands)).fold(f64::INFINITY, f64::min);
+            assert!(tightest >= 0.5 * diameter - 1e-4, "{said}: the tool's centre comes within {tightest} mm of a wall");
+            unmeasured += 1;
+            continue;
+        }
+        looked_at += check_after(first.as_ref(), 0.5 * before, &done, &wall, &islands, -7.0, 0.5 * diameter);
+        // Where the first tool's centre fed through at the floor, in cells of a millimetre.
+        let (nx, ny) = (2 * half_x as usize + 1, 2 * half_y as usize + 1);
+        let cell = |at: Vec2| (((at.x + half_x).floor() as usize).min(nx - 1), ((at.y + half_y).floor() as usize).min(ny - 1));
+        let mut ran: Vec<Vec<Vec2>> = vec![Vec::new(); nx * ny];
+        for at in first.iter().flat_map(|first| fed_points(&first.toolpath)).filter(|at| (at.z + 7.0).abs() <= 1e-9) {
+            let (i, j) = cell(q(at.x, at.y));
+            ran[i * ny + j].push(q(at.x, at.y));
+        }
+        let span = (0.5 * before + 1.0).ceil() as usize;
+        let from_first = |at: Vec2| {
+            let (i, j) = cell(at);
+            (i.saturating_sub(span)..=(i + span).min(nx - 1))
+                .flat_map(|i| (j.saturating_sub(span)..=(j + span).min(ny - 1)).map(move |j| i * ny + j))
+                .flat_map(|k| ran[k].iter())
+                .map(|ring| (ring.x - at.x).hypot(ring.y - at.y))
+                .fold(f64::INFINITY, f64::min)
+        };
+        // Each cut of the level: a whole ring (down a ramp or from the ring before), or a part
+        // of one, which is where the tool goes straight down from the retract height.
+        let mut at = done.toolpath.start;
+        let mut down = 0;
+        for m in &done.toolpath.moves {
+            let to = m.end(at);
+            if let Move::Linear { .. } = *m
+                && at.z == 5.0
+                && to.z == -7.0
+            {
+                down += 1;
+                for k in 0..16 {
+                    let a = f64::from(k) * PI / 8.0;
+                    let edge = q(to.x + (0.5 * diameter - 0.05) * a.cos(), to.y + (0.5 * diameter - 0.05) * a.sin());
+                    let far = from_first(edge);
+                    assert!(
+                        far <= 0.5 * before + 0.2,
+                        "{said}: down at {to:?}, where its edge at {edge:?} is {far} mm from where the first tool's centre went"
+                    );
+                }
+            }
+            at = to;
+        }
+        parts += down;
+        whole += usize::from(down == 0);
+    }
+    let counts = format!(
+        "{cut} cut ({unmeasured} after a first tool whose own pocket was refused), {refused} refused, {nothing} with nothing left, {whole} cut with whole rings alone, {parts} parts gone down to in air, {looked_at} places"
+    );
+    eprintln!("{counts}");
+    assert!(cut >= 40 && parts >= 100 && looked_at > 200_000, "{counts}");
 }

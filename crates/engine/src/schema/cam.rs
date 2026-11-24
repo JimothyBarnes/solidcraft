@@ -546,8 +546,9 @@ pub struct CamOpPocketParams {
     /// half the tool's diameter), stepover?: mm (default 40% of the tool's diameter, at most
     /// half), leave?: mm of stock left on the walls (default 0), finish?: mm the rings leave on
     /// the walls for one last pass along them to take, after the last level (default 0: no
-    /// finishing pass), direction?: climb | conventional, ramp_angle?: radians (default 3 degrees), rpm?,
-    /// feed?}`.
+    /// finishing pass), rest?: mm, the diameter of a wider tool that cut the pocket before (only
+    /// what it could not reach is cut), direction?: climb | conventional, ramp_angle?: radians
+    /// (default 3 degrees), rpm?, feed?}`.
     pub pocket: Value,
 }
 

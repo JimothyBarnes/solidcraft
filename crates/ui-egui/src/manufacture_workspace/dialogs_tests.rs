@@ -2969,3 +2969,47 @@ fn engrave_follows_a_sketch_and_keeps_only_what_is_typed() {
     assert!(form.sketch_name != name && form.sketch == 1);
     assert!((numbers(&mut h)["length"].as_f64().unwrap() - 20.0).abs() < 1e-9);
 }
+
+#[test]
+fn pocket_cuts_only_what_a_wider_tool_left_when_told_of_one() {
+    let mut h = harness();
+    // The plate's big pocket alone (60 x 40), with the 10 mm end mill (T1).
+    pocketed_plate(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.pocket");
+    pocket_form(&mut h).pocket = 1;
+    h.frames(3);
+    // The whole pocket unless told of a tool before: nothing is said of one to the command.
+    let form = pocket_form(&mut h);
+    assert_eq!((form.rest, form.params()["pocket"].get("rest")), (0.0, None));
+    let whole = form.worked.get().map(|(_, preview)| preview.cut_minutes).unwrap();
+    assert!(h.widget(tr("manufacture.pocket_rest")).is_some() && h.widget(tr("manufacture.pocket_rest_note")).is_none());
+    // After a 20 mm tool: four cuts at a level, one in each corner, in a small part of the time.
+    pocket_form(&mut h).rest = 20.0;
+    h.frames(3);
+    let form = pocket_form(&mut h);
+    assert_eq!(form.params()["pocket"]["rest"], json!(20.0));
+    let (minutes, numbers) = form.worked.get().map(|(_, preview)| (preview.cut_minutes, preview.numbers.clone())).unwrap();
+    assert_eq!(numbers["rest"], json!([4]), "{numbers}");
+    assert!(minutes < 0.3 * whole, "{minutes} {whole}");
+    assert!(h.widget(tr("manufacture.pocket_rest_note")).is_some());
+    // A tool that is not the wider one is refused in the form, with why, and nothing is made.
+    pocket_form(&mut h).rest = 8.0;
+    h.frames(3);
+    assert!(pocket_form(&mut h).worked.trouble().is_some_and(|why| why.contains("rest machining is after a wider tool")));
+    pocket_form(&mut h).rest = 20.0;
+    h.frames(3);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["rest"], json!(20.0));
+    // The form that changes it opens on it, and taking it away is the whole pocket again.
+    row_menu(&mut h, "Pocket 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "pocket");
+    assert_eq!(pocket_form(&mut h).rest, 20.0);
+    pocket_form(&mut h).rest = 0.0;
+    h.frames(3);
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["rest"], json!(null));
+}
