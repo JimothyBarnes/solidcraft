@@ -2663,3 +2663,50 @@ fn a_point_picked_on_the_model_is_of_the_opening_or_the_slot_it_is_in() {
     assert!(crate::cmd::manufacture_opening_at(&s, "setup-9", point(0.0, 0.0, 0.0)).err().is_some_and(|why| why.contains("no setup 'setup-9'")));
     assert!(crate::cmd::manufacture_slot_at(&s, "setup-9", point(0.0, 0.0, 0.0)).err().is_some_and(|why| why.contains("no setup 'setup-9'")));
 }
+
+#[test]
+fn a_pocket_is_finished_with_a_pass_along_its_walls_when_asked() {
+    // The plate's pocket 60 x 40, 6 deep (its floor at Z -7 in the WCS), cut with the 10 mm
+    // end mill (tool 2) and 0.3 left on its walls for a finishing pass.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]], "finish": 0.3}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    // The rings keep 5.3 from the walls; the pass goes once round at the floor, met and left
+    // by quarter turns of 1 mm, at the rings' feed.
+    assert_eq!(
+        (n["finish"].as_f64(), n["offset"].as_f64(), n["finishing"].clone(), n["finish_levels"].clone()),
+        (Some(0.3), Some(5.3), json!([1]), json!([[-7.0]])),
+        "{n}"
+    );
+    assert_eq!((n["finish_leads"].clone(), n.get("finish_feed")), (json!([[1.0]]), None), "{n}");
+    // The tool's centre comes to 5 from the walls, as without one: X -25 to 25, Y -15 to 15.
+    assert!(near(&t["min"], [-25.0, -15.0, -7.0]) && near(&t["max"], [25.0, 15.0, 25.0]), "{t}");
+    // Simulated: nothing is cut into, and what is taken out is the pocket less what the tool
+    // leaves in its four corners, as a pocket without a finishing pass takes.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.2}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let pocket = 60.0 * 40.0 * 7.0 - 4.0 * (1.0 - std::f64::consts::FRAC_PI_4) * 25.0 * 7.0;
+    let removed = sim["operations"][0]["removed"].as_f64().unwrap();
+    assert!((removed - pocket).abs() < 0.01 * pocket, "{removed} {pocket}");
+    // The operation keeps it, a pocket without one keeps none, and it is changed like any parameter.
+    let kept = |s: &mut Session| run(s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["operation"]["pocket"]["finish"].clone();
+    assert_eq!(kept(&mut s), json!(0.3));
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"pockets": [[0, 0]]}}));
+    assert_eq!(kept(&mut s), json!(null));
+    let plain = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!(
+        (plain["numbers"]["finish"].as_f64(), plain["numbers"]["offset"].as_f64(), plain["numbers"]["finishing"].clone()),
+        (Some(0.0), Some(5.0), json!([0]))
+    );
+    assert_eq!(plain["numbers"]["finish_leads"], json!([[]]));
+    // What is no finishing stock is refused, and the program of a finished pocket posts.
+    for hostile in [json!(-0.1), json!("light"), json!(1e12)] {
+        let why = refused(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"pockets": [[0, 0]], "finish": hostile}}));
+        assert!(why.contains("finishing pass must take") || why.contains("pocket"), "{hostile}: {why}");
+    }
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"pockets": [[0, 0]], "finish": 0.3}}));
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    assert!(posted["notes"].as_array().unwrap().is_empty() && posted["text"].as_str().unwrap().contains("(POCKET 1)"), "{posted}");
+}

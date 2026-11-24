@@ -1,0 +1,26 @@
+{
+  "en": {
+    "manufacture.pocket_finish": "Finishing pass"
+  },
+  "ar": {
+    "manufacture.pocket_finish": "تمريرة التشطيب"
+  },
+  "he": {
+    "manufacture.pocket_finish": "מעבר גימור"
+  },
+  "ja": {
+    "manufacture.pocket_finish": "仕上げパス"
+  },
+  "vi": {
+    "manufacture.pocket_finish": "Lượt cắt tinh"
+  },
+  "zh": {
+    "manufacture.pocket_finish": "精加工走刀"
+  },
+  "de": {
+    "manufacture.pocket_finish": "Schlichtgang"
+  },
+  "ko": {
+    "manufacture.pocket_finish": "정삭 패스"
+  }
+}

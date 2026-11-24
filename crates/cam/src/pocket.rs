@@ -10,12 +10,24 @@
 //! the shortest way, one stepover long, which lies in the region because every point of a ring
 //! is one stepover from the ring outside it. The innermost rings are entered down a ramp along
 //! themselves, so the tool never plunges into stock and never needs room it doesn't have.
+//!
+//! When a finishing pass is asked for (decision 0031), the rings keep that much more from the
+//! walls, and after the last level the tool goes along the pocket's wall and round each island,
+//! taking it off: down in air the rings cut, on to the wall by a quarter turn and off it by
+//! another, at the rings' feed, and at half of it for the last stretch into each corner. It
+//! goes down the walls in as few steps as the flutes allow, and so that no moment of it is a
+//! bigger cut than a ring's; where the rings did not go (too narrow with that stock on the
+//! walls) it is a cut as wide as the tool, and it is taken level by level as they are.
+
+use std::f64::consts::{FRAC_PI_2, PI};
 
 use serde::{Deserialize, Serialize};
 use solidcore_record::{Loop2, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::{Loop2Geom, Region2Geom, Seg2Geom};
 
-use crate::contour::{CutDirection, MAX_LEAVE, MIN_STEP, SAME_HEIGHT, apart, bad, cut, moved_at_least, way_is_clear};
+use crate::contour::{
+    CutDirection, DEFAULT_LEAD_RADIUS, MAX_LEAVE, MIN_STEP, Round, SAME_HEIGHT, apart, bad, cut, moved_at_least, round_within, way_is_clear,
+};
 use crate::feeds::op_feeds;
 use crate::offset::JOINT_TOLERANCE;
 use crate::placement::Placement;
@@ -46,6 +58,31 @@ pub(crate) const RAMP_ANGLES: (f64, f64) = (0.5 * std::f64::consts::PI / 180.0, 
 pub(crate) const MAX_RAMP_TURNS: f64 = 500.0;
 /// How far short of the next ring a move between rings is checked: it ends on that ring.
 const LINK_SLACK: f64 = 1e-5;
+/// How far apart at most the places along a finishing pass are where its distance from what
+/// the rings cleared is measured, mm (and no further apart than half the stock it takes): what
+/// lies between two of them is at most half of that further.
+const FINISH_STEP: f64 = 0.5;
+/// The most such places along one loop of a finishing pass: a longer loop has them further apart.
+const FINISH_PLACES_MOST: f64 = 20_000.0;
+/// How far from what the rings cleared a finishing pass may be in a corner, as a multiple of
+/// the stock it takes: 1.41 of it in a right-angled corner, four times it in one as sharp as
+/// 29 degrees. Further, the pass is taken to be a cut as wide as the tool.
+const FINISH_REACH: f64 = 4.0;
+/// How far from what the rings cleared a finishing pass may be anywhere else, as a multiple of
+/// the stock it takes: along a wall it is that stock from them. More than this away from a
+/// corner is a place the rings did not go (a gap too narrow for them with the stock on both
+/// sides), where the pass is a cut as wide as the tool.
+const FINISH_PLAIN: f64 = 1.1;
+/// The least turn at a joint of a finishing pass that is a corner the pass slows into, radians
+/// (15 degrees).
+const FINISH_CORNER_TURN: f64 = 15.0 * std::f64::consts::PI / 180.0;
+/// The share of its feed a finishing pass keeps for the last stretch into a corner, where the
+/// tool cuts ahead of itself as well as beside: a tool maker asks for 30 to 50% less there
+/// (`research/pocket-milling.md`).
+const FINISH_CORNER_FEED: f64 = 0.5;
+/// The deepest one step of a finishing pass is, as a multiple of the tool's diameter: deeper,
+/// the tool maker asks for half the feed.
+const FINISH_DEEPEST: f64 = 3.0;
 /// How much further than the stepover a ring may be from the ring outside it, mm: the
 /// offsetter's own tolerance each way, the micron more a ring is moved in by when exactly its
 /// distance can't be verified, and rounding.
@@ -79,6 +116,10 @@ pub struct PocketOp {
     /// Stock left on the walls, mm; `None` for none.
     #[serde(default)]
     pub leave: Option<f64>,
+    /// Stock the rings leave on the walls for one last pass along them to take, mm; `None` or 0
+    /// for no finishing pass.
+    #[serde(default)]
+    pub finish: Option<f64>,
     #[serde(default)]
     pub direction: CutDirection,
     /// The angle the tool goes down the innermost ring at, radians; `None` for 3 degrees.
@@ -107,10 +148,20 @@ pub struct Pocketed {
     /// The stepdown and the stepover used, mm.
     pub stepdown: f64,
     pub stepover: f64,
-    /// How far the tool's centre stays from the walls, mm: its radius and the stock left.
+    /// How far the rings keep the tool's centre from the walls, mm: its radius, the stock left
+    /// and the stock a finishing pass takes.
     pub offset: f64,
     /// The rings each pocket is cleared in at a level: the length of each, in the order cut.
     pub rings: Vec<Vec<f64>>,
+    /// The stock the rings left on the walls for the finishing pass, mm: 0 when there is none.
+    pub finish: f64,
+    /// The Z of each step of each pocket's finishing pass, top down: none without one.
+    pub finish_levels: Vec<Vec<f64>>,
+    /// The loops each pocket's finishing pass goes round: the length of each, in the order cut.
+    pub finishing: Vec<Vec<f64>>,
+    /// The radius of the quarter turns on to each of those loops and off it, mm: 0 where the
+    /// loop is met straight across the stock.
+    pub finish_leads: Vec<Vec<f64>>,
     /// Things worth showing beside the toolpath (a capped spindle speed).
     pub notes: Vec<String>,
 }
@@ -132,6 +183,24 @@ impl Ring {
     fn round(&self) -> f64 {
         self.segs.iter().map(Seg2Geom::length).sum()
     }
+}
+
+/// A pocket's finishing pass.
+struct Finishing {
+    /// One round along the pocket's wall and one round each island, in the order cut. A round's
+    /// entry is in air the rings cut; with quarter turns it is where the first begins, without
+    /// them a point of the outermost ring, straight across the stock from the round's start.
+    rounds: Vec<Round>,
+    /// How wide the widest cut of the pass is for a moment, mm, counted as a cut at the whole
+    /// feed: the stock it takes along a wall, more where the wall curves round the tool, and
+    /// in a corner the width the tool is buried to there, halved as the feed is.
+    moment: f64,
+    /// Whether the pass is somewhere a cut as wide as the tool: out of reach of where the
+    /// rings went, or further from it than a wall or a corner accounts for.
+    wide: bool,
+    /// Whether the pass goes everywhere: where the tool's centre may be along the walls is one
+    /// piece, with a way round every island.
+    everywhere: bool,
 }
 
 impl PocketOp {
@@ -159,6 +228,9 @@ impl PocketOp {
         }
         if !self.leave.is_none_or(|v| (0.0..=MAX_LEAVE).contains(&v)) {
             return bad(format!("the stock to leave must be 0 to {MAX_LEAVE} mm"));
+        }
+        if !self.finish.is_none_or(|v| (0.0..=MAX_LEAVE).contains(&v)) {
+            return bad(format!("the finishing pass must take 0 to {MAX_LEAVE} mm"));
         }
         if !self.ramp_angle.is_none_or(|v| (RAMP_ANGLES.0..=RAMP_ANGLES.1).contains(&v)) {
             return bad("the ramp angle must be 0.5 to 30 degrees".into());
@@ -201,15 +273,23 @@ impl PocketOp {
             return bad(format!("the retract height ({retract} mm) must be above the pocket's top ({top} mm)"));
         }
         let radius = 0.5 * g.diameter;
-        let offset = radius + self.leave.unwrap_or(0.0);
+        // Along the walls the tool's centre ends up its radius and the stock to leave from them;
+        // the rings keep the stock of the finishing pass further off.
+        let finish = self.finish.unwrap_or(0.0);
+        let wall = radius + self.leave.unwrap_or(0.0);
+        let offset = wall + finish;
         let stepover = self.stepover.unwrap_or(DEFAULT_POCKET_STEPOVER * g.diameter);
         let stepdown = self.stepdown.unwrap_or(DEFAULT_POCKET_STEPDOWN * g.diameter);
+        // The quarter turns on to a finished wall and off it: as a contour's, and wide enough
+        // to begin in air the rings cut.
+        let lead = (DEFAULT_LEAD_RADIUS * g.diameter).max(2.0 * finish);
         let reach = if g.shoulder_length > 0.0 { g.shoulder_length } else { g.flute_length };
         let angle = self.ramp_angle.unwrap_or(DEFAULT_RAMP_ANGLE);
 
-        // Each pocket's levels and rings, before any move is written.
+        // Each pocket's levels and rings, and its finishing pass, before any move is written.
         let mut plans: Vec<(Vec<f64>, Vec<Ring>)> = Vec::with_capacity(shapes.len());
-        let mut narrow: Vec<String> = Vec::new();
+        let mut finishes: Vec<(Vec<f64>, Vec<Round>)> = Vec::with_capacity(shapes.len());
+        let mut said: Vec<String> = Vec::new();
         let mut deepest = 0.0_f64;
         for (shape, at) in shapes.iter().zip(&self.pockets) {
             let what = format!("the pocket at X {} Y {}", at[0], at[1]);
@@ -240,17 +320,48 @@ impl PocketOp {
             // Where the tool's centre may be is the region less the tool's radius and the stock
             // to leave; the rings are that and what is left of it a stepover in at a time.
             let (rings, everywhere) = rings(&shape.region, offset, stepover, self.direction).map_err(|e| Error::BadValue(format!("{what}: {e}")))?;
-            if !everywhere && !rings.is_empty() {
-                narrow.push(format!(
-                    "tool {} does not pass everywhere in {what}: where it is too narrow for the tool the material stays (a narrower tool clears it)",
-                    tool.number
-                ));
-            }
             if rings.is_empty() {
                 let widest = 2.0 * shape.region.inradius(1e-4);
+                let with = if finish > 0.0 { format!(" with {finish} mm left on its walls for the finishing pass") } else { String::new() };
                 return bad(format!(
-                    "tool {} ({} mm across) does not fit in {what}, which is about {widest:.2} mm across at its widest: use a narrower tool",
+                    "tool {} ({} mm across) does not fit in {what}{with}, which is about {widest:.2} mm across at its widest: use a narrower tool",
                     tool.number, g.diameter
+                ));
+            }
+            // The finishing pass goes down the walls in as few steps as three things allow.
+            // The flutes: no step is deeper than they are long. The tool maker: none deeper
+            // than three diameters. And the rings: no moment of the pass is a bigger cut than a
+            // ring's, which is as wide as the tool and one level deep. Along a wall the pass is
+            // as wide as the stock it takes; in a corner the tool is buried far wider for a
+            // moment (at half its feed); where the rings did not go it is as wide as the tool,
+            // and then its steps are the rings' levels.
+            let everywhere = if finish > 0.0 {
+                let pass =
+                    finishing(&shape.region, radius, wall, finish, lead, self.direction).map_err(|e| Error::BadValue(format!("{what}: {e}")))?;
+                let width = if pass.wide { g.diameter } else { pass.moment.min(g.diameter) };
+                let by_load = depth * width / (g.diameter * per_level);
+                let steps = (depth / g.flute_length - 1e-9)
+                    .ceil()
+                    .max((depth / (FINISH_DEEPEST * g.diameter) - 1e-9).ceil())
+                    .max((by_load - 1e-9).ceil())
+                    .clamp(1.0, count as f64) as usize;
+                if pass.wide {
+                    said.push(format!(
+                        "the rings do not go everywhere in {what} with {finish} mm left on its walls: there the finishing pass is a cut as wide as tool {}, so it goes down level by level as they do",
+                        tool.number
+                    ));
+                }
+                let heights: Vec<f64> = (1..=steps).map(|k| if k == steps { shape.floor } else { top - depth * k as f64 / steps as f64 }).collect();
+                finishes.push((heights, pass.rounds));
+                pass.everywhere
+            } else {
+                finishes.push((Vec::new(), Vec::new()));
+                everywhere
+            };
+            if !everywhere {
+                said.push(format!(
+                    "tool {} does not pass everywhere in {what}: where it is too narrow for the tool the material stays (a narrower tool clears it)",
+                    tool.number
                 ));
             }
             // The ramp down the innermost rings: whole turns, no steeper than the angle asked.
@@ -265,7 +376,17 @@ impl PocketOp {
             }
             plans.push((levels, rings));
         }
+        // The feed of a cut as wide as the tool, which the ramp and the first ring are. The
+        // finishing pass is fed the same, and half of it into each corner: along a wall it is
+        // a far lighter cut, but in a corner of the pocket the tool for a moment cuts ahead of
+        // itself as well as beside, and a feed worked out for the light cut would be several
+        // times too much there.
         let f = op_feeds(tool, Engagement { axial: deepest.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        if finishes.iter().any(|(_, rounds)| rounds.iter().any(|r| r.leads.is_none())) {
+            said.push(
+                "there is no room for the quarter turns on to a wall and off it: the finishing pass meets it straight across the stock there".into(),
+            );
+        }
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
 
         let Some(first) = plans.first().and_then(|(_, rings)| rings.first()).map(|ring| ring.start) else {
@@ -277,7 +398,7 @@ impl PocketOp {
         }
         moves.push(Move::Rapid { to: at(first, clearance) });
         let mut last = first;
-        for (levels, rings) in &plans {
+        for ((levels, rings), (heights, passes)) in plans.iter().zip(&finishes) {
             let mut above = top;
             for &z in levels {
                 // The rings come innermost first, each before the ring outside it.
@@ -305,6 +426,31 @@ impl PocketOp {
                 }
                 above = z;
             }
+            // The finishing pass, once the pocket is cleared to its floor. Each round: down in
+            // air the rings cut (they have been there at every level), on to the wall by a
+            // quarter turn, round (slower into each corner), and off by another before the tool
+            // lifts; straight across the stock and back where there is no room for the turns.
+            for &z in heights {
+                for r in passes {
+                    moves.push(Move::Rapid { to: at(r.entry, retract) });
+                    moves.push(Move::Linear { to: at(r.entry, z), feed: f.plunge_feed });
+                    last = match &r.leads {
+                        Some((on, off)) => {
+                            cut(&mut moves, on, r.entry, r.start, (z, z), f.feed);
+                            finish_round(&mut moves, r, z, finish, f.feed);
+                            cut(&mut moves, off, r.start, off.end(), (z, z), f.feed);
+                            off.end()
+                        }
+                        None => {
+                            moves.push(Move::Linear { to: at(r.start, z), feed: f.feed });
+                            finish_round(&mut moves, r, z, finish, f.feed);
+                            moves.push(Move::Linear { to: at(r.entry, z), feed: f.feed });
+                            r.entry
+                        }
+                    };
+                    moves.push(Move::Rapid { to: at(last, retract) });
+                }
+            }
         }
         moves.push(Move::Rapid { to: at(last, clearance) });
         if tool.coolant != Coolant::Off {
@@ -325,7 +471,11 @@ impl PocketOp {
             stepover,
             offset,
             rings: plans.iter().map(|(_, rings)| rings.iter().map(Ring::round).collect()).collect(),
-            notes: f.notes.into_iter().chain(narrow).collect(),
+            finish,
+            finish_levels: finishes.iter().map(|(heights, _)| heights.clone()).collect(),
+            finishing: finishes.iter().map(|(_, rounds)| rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum()).collect()).collect(),
+            finish_leads: finishes.iter().map(|(_, rounds)| rounds.iter().map(Round::lead).collect()).collect(),
+            notes: f.notes.into_iter().chain(said).collect(),
         })
     }
 }
@@ -379,6 +529,148 @@ fn started_at(lp: &Loop2, index: usize, t: f64) -> Vec<Seg2> {
     segs.extend(lp.segs.iter().skip(index + 1).chain(lp.segs.iter().take(index)).copied());
     segs.push(before);
     segs
+}
+
+/// How far the way a path goes turns from the end of `seg` to the start of `next`, radians: 0
+/// (straight on) to pi.
+fn turn_between(seg: &Seg2, next: &Seg2) -> f64 {
+    let (a, b) = (seg.end_tangent(), next.start_tangent());
+    (a.x * b.y - a.y * b.x).abs().atan2(a.x * b.x + a.y * b.y)
+}
+
+/// How long the stretch of a finishing pass of `finish` mm is, either side of a corner it turns
+/// by `turn` at, that the corner accounts for, mm: four times the stock at most. Up to a right
+/// angle it is where the tool is in the stock of the wall ahead as well, `finish / sin(turn)`:
+/// the stock itself at a right angle, more for a shallower turn. Past a right angle it is where
+/// the pass is beyond the corner the rings turned at, `finish * tan(turn / 2)`: the sharper the
+/// corner, the sooner they turned.
+fn corner_stretch(finish: f64, turn: f64) -> f64 {
+    finish * if turn <= FRAC_PI_2 { 1.0 / turn.sin().max(0.25) } else { (0.5 * turn).tan().clamp(1.0, 4.0) }
+}
+
+/// How wide a cut a finishing pass of `finish` mm is where the wall curves round the tool, mm:
+/// the centre of the tool (of `radius`) on an arc of radius `bend`, the wall that much outside
+/// it. The tool's edge meets the stock's face where it is `bend + radius - finish` from the
+/// arc's centre; the triangle of that point, the arc's centre and the tool's centre gives the
+/// angle the edge is in the stock over, and the width is that of the angle across the feed.
+/// (A straight wall is the limit: there the width is `finish`.)
+fn round_a_bend(radius: f64, finish: f64, bend: f64) -> f64 {
+    if !(bend > 1e-9) {
+        return 2.0 * radius;
+    }
+    let cos = (((bend + radius - finish).powi(2) - bend * bend - radius * radius) / (2.0 * bend * radius)).clamp(-1.0, 1.0);
+    radius * (1.0 - cos)
+}
+
+/// The cutting moves once round `r`, a round of a finishing pass of `finish` mm, at the height
+/// `z` from its start back to it: at `feed`, but for the last stretch into each corner
+/// ([`corner_stretch`]), which has [`FINISH_CORNER_FEED`] of it.
+fn finish_round(moves: &mut Vec<Move>, r: &Round, z: f64, finish: f64, feed: f64) {
+    let mut from = r.start;
+    for (k, seg) in r.segs.iter().enumerate() {
+        let to = if k + 1 == r.segs.len() { r.start } else { seg.end() };
+        let turn = r.segs.get((k + 1) % r.segs.len()).map_or(0.0, |next| turn_between(seg, next));
+        let (length, slow) = (seg.length(), if turn >= FINISH_CORNER_TURN { corner_stretch(finish, turn) } else { 0.0 });
+        if slow > 0.0 && length > slow + JOINT_TOLERANCE {
+            let (fast, last) = seg.split_at(1.0 - slow / length);
+            cut(moves, &fast, from, fast.end(), (z, z), feed);
+            cut(moves, &last, fast.end(), to, (z, z), FINISH_CORNER_FEED * feed);
+        } else {
+            cut(moves, seg, from, to, (z, z), if slow > 0.0 { FINISH_CORNER_FEED * feed } else { feed });
+        }
+        from = to;
+    }
+}
+
+/// The finishing pass of the pocket `region` for a tool of `radius` whose centre ends up
+/// `wall` from its walls, after rings that kept `finish` more: one round along the pocket's
+/// wall and one round each island.
+///
+/// A round starts at the middle of its longest straight side, met by a quarter turn of `lead`
+/// (or a half or a quarter of it, where that is what fits) and left by another, when the first
+/// begins in air the rings cut. Else it starts where it is nearest the outermost ring and is
+/// met straight across the stock from there.
+///
+/// How wide a cut the pass is, is worked out along it. Along a wall it is as wide as the stock
+/// it takes. Where the wall curves round the tool it is wider ([`round_a_bend`]). In a corner
+/// it turns by `turn` at, the tool's edge is in the stock over that angle more than along a
+/// wall, for the moment before it turns. And its distance from where the rings went is
+/// measured at places no further apart than [`FINISH_STEP`]: where that is more than a wall
+/// or a corner accounts for, the rings did not go (too narrow with the finishing stock on the
+/// walls, or a corner sharper than 29 degrees), and the pass is a cut as wide as the tool there.
+fn finishing(region: &Region2, radius: f64, wall: f64, finish: f64, lead: f64, direction: CutDirection) -> Result<Finishing> {
+    let along = moved_at_least(std::slice::from_ref(region), wall)?;
+    let cleared = moved_at_least(std::slice::from_ref(region), wall + finish)?;
+    let outermost: Vec<&Loop2> = cleared.iter().flat_map(|r| std::iter::once(&r.outer).chain(&r.holes)).collect();
+    let (reach, plain) = (FINISH_REACH * finish + RING_SLACK, FINISH_PLAIN * finish + RING_SLACK);
+    // The angle the tool's edge is in the stock over along a straight wall.
+    let straight = (1.0 - finish / radius).clamp(-1.0, 1.0).acos();
+    let everywhere = along.len() == 1 && along.first().is_some_and(|whole| whole.holes.len() == region.holes.len());
+    let mut rounds = Vec::new();
+    let (mut moment, mut wide) = (finish.min(2.0 * radius), false);
+    for part in &along {
+        for hole in std::iter::once(None).chain((0..part.holes.len()).map(Some)) {
+            let lp = hole.and_then(|k| part.holes.get(k)).unwrap_or(&part.outer);
+            let sides = lp.segs.len();
+            let step = FINISH_STEP.min(0.5 * finish).max(lp.segs.iter().map(Seg2Geom::length).sum::<f64>() / FINISH_PLACES_MOST);
+            // The place of the loop nearest the outermost ring: which side, where along it, the
+            // point, the ring's point and how far apart they are.
+            let mut place: Option<(usize, f64, Vec2, Vec2, f64)> = None;
+            for (index, seg) in lp.segs.iter().enumerate() {
+                // How far the loop turns at this side's two ends.
+                let before = lp.segs.get((index + sides - 1) % sides).map_or(0.0, |last| turn_between(last, seg));
+                let after = lp.segs.get((index + 1) % sides).map_or(0.0, |next| turn_between(seg, next));
+                // The cut for the moment before the turn at its end (a corner has half the feed).
+                let buried = radius * (1.0 - (after + straight).min(PI).cos());
+                moment = moment.max(if after >= FINISH_CORNER_TURN { FINISH_CORNER_FEED * buried } else { buried });
+                // The cut where the wall curves round the tool: an arc the loop turns left on,
+                // its air being on its left.
+                if let Seg2::Arc { radius: bend, sweep, .. } = *seg
+                    && sweep > 0.0
+                {
+                    moment = moment.max(round_a_bend(radius, finish, bend));
+                }
+                let length = seg.length();
+                let places = (length / step).ceil().clamp(1.0, FINISH_PLACES_MOST);
+                for k in 0..places as usize {
+                    let t = k as f64 / places;
+                    let p = seg.point_at(t);
+                    let Some((_, _, q, far)) = outermost.iter().filter_map(|ring| nearest(ring, p)).min_by(|a, b| a.3.total_cmp(&b.3)) else {
+                        return bad("there is no ring to reach the finishing pass from".into());
+                    };
+                    // Further from where the rings went than along a wall: a corner's doing
+                    // within the corner's stretch (to a limit), and elsewhere a place the
+                    // rings did not go.
+                    let cornered = (before >= FINISH_CORNER_TURN && t * length <= corner_stretch(finish, before) + JOINT_TOLERANCE)
+                        || (after >= FINISH_CORNER_TURN && (1.0 - t) * length <= corner_stretch(finish, after) + JOINT_TOLERANCE);
+                    wide |= !(far <= if cornered { reach } else { plain });
+                    if place.is_none_or(|(.., least)| far < least) {
+                        place = Some((index, t, p, q, far));
+                    }
+                }
+            }
+            let round = round_within(part, hole, direction, lead, true);
+            if round.leads.is_some() && cleared.iter().any(|c| c.contains(round.entry)) {
+                rounds.push(round);
+                continue;
+            }
+            let Some((index, t, start, from, far)) = place else { continue };
+            if !(far <= reach) {
+                return bad(format!(
+                    "with {finish} mm left on the walls for the finishing pass the rings do not go into a part of it that the tool fits in, and the pass has nowhere to start there: leave the finishing pass out, or use a narrower tool"
+                ));
+            }
+            let way = Vec2 { x: (start.x - from.x) / far.max(1e-300), y: (start.y - from.y) / far.max(1e-300) };
+            if !way_is_clear(from, way, far - LINK_SLACK, &along) {
+                return bad("the way onto the finishing pass would leave the pocket: this shape is not cut reliably yet".into());
+            }
+            let segs = started_at(lp, index, t);
+            // Climb is the way the offsetter returns them, as for the rings.
+            let segs = if direction == CutDirection::Conventional { Loop2 { segs }.reversed().segs } else { segs };
+            rounds.push(Round { entry: from, start, segs, leads: None });
+        }
+    }
+    Ok(Finishing { rounds, moment, wide, everywhere })
 }
 
 /// The rings the pocket `region` is cleared in by a tool whose centre keeps `offset` from its

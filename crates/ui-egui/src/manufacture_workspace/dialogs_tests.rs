@@ -2771,3 +2771,41 @@ fn contour_takes_the_openings_clicked_on_the_model() {
     assert_eq!((made["side"].clone(), made["openings"].as_array().map(Vec::len)), (json!("inside"), Some(1)), "{made}");
     assert!(h.app.dialog.is_none());
 }
+
+#[test]
+fn pocket_takes_a_finishing_pass_when_one_is_asked_for() {
+    let mut h = harness();
+    // The plate's big pocket alone, with the 10 mm end mill (T1).
+    pocketed_plate(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.pocket");
+    pocket_form(&mut h).pocket = 1;
+    h.frames(3);
+    // None unless asked for: nothing is said of one to the command, and the rings end on the wall.
+    let form = pocket_form(&mut h);
+    assert_eq!((form.finish, form.params()["pocket"].get("finish")), (0.0, None));
+    let (plain, offset) = form.worked.get().map(|(_, preview)| (preview.cut_minutes, preview.numbers["offset"].as_f64())).unwrap();
+    assert_eq!(offset, Some(5.0));
+    assert!(h.widget(tr("manufacture.pocket_finish")).is_some());
+    // 0.3 mm for a finishing pass: the rings keep it from the walls, the pass goes once round
+    // at the floor, and the cut takes a little longer.
+    pocket_form(&mut h).finish = 0.3;
+    h.frames(3);
+    let form = pocket_form(&mut h);
+    assert_eq!(form.params()["pocket"]["finish"], json!(0.3));
+    let (finished, numbers) = form.worked.get().map(|(_, preview)| (preview.cut_minutes, preview.numbers.clone())).unwrap();
+    assert_eq!((numbers["offset"].as_f64(), numbers["finish"].as_f64(), numbers["finishing"].clone()), (Some(5.3), Some(0.3), json!([1])));
+    assert!(finished > plain, "{finished} {plain}");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["finish"], json!(0.3));
+    // The form that changes it opens on it, and taking it away takes the pass away.
+    row_menu(&mut h, "Pocket 1 (T1)", "manufacture.edit");
+    assert_eq!((open(&h), pocket_form(&mut h).finish), ("pocket", 0.3));
+    pocket_form(&mut h).finish = 0.0;
+    h.frames(3);
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["finish"], json!(null));
+}

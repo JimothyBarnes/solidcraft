@@ -56,6 +56,8 @@ pub(crate) struct PocketForm {
     pub typed_stepdown: bool,
     /// Stock left on the walls, mm.
     pub leave: f64,
+    /// Stock the rings leave on the walls for a finishing pass along them, mm: 0 for none.
+    pub finish: f64,
     /// Spindle speed, rev/min, and cutting feed, mm/min: what the tool's cutting data gives for
     /// the setup's stock material, until typed.
     pub rpm: f64,
@@ -93,6 +95,7 @@ impl PocketForm {
             stepdown: 0.0,
             typed_stepdown: false,
             leave: 0.0,
+            finish: 0.0,
             rpm: 0.0,
             feed: 0.0,
             typed_rpm: false,
@@ -120,6 +123,7 @@ impl PocketForm {
         (form.stepover, form.typed_stepover) = number("stepover").map_or((0.0, false), |v| (v, true));
         (form.stepdown, form.typed_stepdown) = number("stepdown").map_or((0.0, false), |v| (v, true));
         form.leave = number("leave").unwrap_or(0.0);
+        form.finish = number("finish").unwrap_or(0.0);
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
         form.editing = Some(Edited { id: json!(id), title: name, base });
@@ -200,6 +204,7 @@ impl PocketForm {
         set_or_clear(&mut pocket, "stepover", self.typed_stepover.then_some(self.stepover));
         set_or_clear(&mut pocket, "stepdown", self.typed_stepdown.then_some(self.stepdown));
         set_or_clear(&mut pocket, "leave", (self.leave > 0.0).then_some(self.leave));
+        set_or_clear(&mut pocket, "finish", (self.finish > 0.0).then_some(self.finish));
         set_or_clear(&mut pocket, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut pocket, "feed", self.typed_feed.then_some(self.feed));
         json!({
@@ -236,6 +241,7 @@ impl PocketForm {
             self.stepdown = diameter.map_or(self.stepdown, |d| STEPDOWN_SHARE * d);
         }
         self.leave = self.leave.max(0.0);
+        self.finish = self.finish.max(0.0);
         let params = self.params();
         if !self.worked.refresh(app, &params, || manufacture_preview(&app.session, "cam.op.pocket", &params)) {
             return;
@@ -396,6 +402,7 @@ impl PocketForm {
                     self.typed_stepdown = true;
                 }
                 ui_kit::row(ui, tr("manufacture.contour_leave"), |ui| ui_kit::length_field(ui, &mut self.leave, units, decimals));
+                ui_kit::row(ui, tr("manufacture.pocket_finish"), |ui| ui_kit::length_field(ui, &mut self.finish, units, decimals));
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

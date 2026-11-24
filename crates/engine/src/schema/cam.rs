@@ -541,8 +541,10 @@ pub struct CamOpPocketParams {
     /// `{pockets: [[x, y], …] a point on the floor of each pocket, in the WCS (as
     /// `cam.setup.pockets` gives them), top?: Z (default the stock top), stepdown?: mm (default
     /// half the tool's diameter), stepover?: mm (default 40% of the tool's diameter, at most
-    /// half), leave?: mm of stock left on the walls (default 0), direction?: climb | conventional,
-    /// ramp_angle?: radians (default 3 degrees), rpm?, feed?}`.
+    /// half), leave?: mm of stock left on the walls (default 0), finish?: mm the rings leave on
+    /// the walls for one last pass along them to take, after the last level (default 0: no
+    /// finishing pass), direction?: climb | conventional, ramp_angle?: radians (default 3 degrees), rpm?,
+    /// feed?}`.
     pub pocket: Value,
 }
 

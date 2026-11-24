@@ -523,6 +523,9 @@ fn what_cannot_be_pocketed_is_refused_with_the_reason() {
         (PocketOp { stepdown: Some(0.0), ..one([0.0, 0.0]) }, mill10(), "stepdown"),
         (PocketOp { stepdown: Some(0.001), ..one([0.0, 0.0]) }, mill10(), "more than 1000 levels"),
         (PocketOp { leave: Some(-0.1), ..one([0.0, 0.0]) }, mill10(), "stock to leave"),
+        (PocketOp { finish: Some(-0.1), ..one([0.0, 0.0]) }, mill10(), "finishing pass must take"),
+        (PocketOp { finish: Some(f64::NAN), ..one([0.0, 0.0]) }, mill10(), "finishing pass must take"),
+        (PocketOp { finish: Some(f64::INFINITY), ..one([0.0, 0.0]) }, mill10(), "finishing pass must take"),
         (PocketOp { ramp_angle: Some(1.0), ..one([0.0, 0.0]) }, mill10(), "ramp angle"),
         (PocketOp { top: Some(-7.0), ..one([0.0, 0.0]) }, mill10(), "is not below the top"),
         (PocketOp { top: Some(10.0), ..one([0.0, 0.0]) }, mill10(), "retract height"),
@@ -568,7 +571,7 @@ fn hostile_numbers_never_panic() {
     let wall = rect(-30.0, -20.0, 30.0, 20.0);
     let shape = pocket(&wall, &[]);
     for &v in &bad {
-        for field in 0..8 {
+        for field in 0..9 {
             let mut op = one([0.0, 0.0]);
             match field {
                 0 => op.top = Some(v),
@@ -578,9 +581,12 @@ fn hostile_numbers_never_panic() {
                 4 => op.ramp_angle = Some(v),
                 5 => op.rpm = Some(v),
                 6 => op.feed = Some(v),
+                7 => op.finish = Some(v),
                 _ => op.pockets = vec![[v, v]],
             }
             let _ = pocketed(&op, std::slice::from_ref(&shape));
+            // And each with a finishing pass asked for.
+            let _ = pocketed(&PocketOp { finish: op.finish.or(Some(0.3)), ..op }, std::slice::from_ref(&shape));
         }
         // Shapes of hostile numbers: a floor, a point, a spike, a broken loop, a hostile island.
         let shapes = [
@@ -595,7 +601,8 @@ fn hostile_numbers_never_panic() {
             },
         ];
         for odd in shapes {
-            let _ = pocketed(&one([0.0, 0.0]), &[odd]);
+            let _ = pocketed(&one([0.0, 0.0]), std::slice::from_ref(&odd));
+            let _ = pocketed(&PocketOp { finish: Some(0.3), ..one([0.0, 0.0]) }, &[odd]);
         }
         // A tool of hostile sizes: never a path outside the region.
         for size in 0..3 {
@@ -605,8 +612,12 @@ fn hostile_numbers_never_panic() {
                 1 => odd.geometry.flute_length = v,
                 _ => odd.geometry.shoulder_length = v,
             }
-            if let Ok(done) = one([0.0, 0.0]).toolpath(None, &odd, &placed(), Some("aluminium"), std::slice::from_ref(&shape)) {
-                assert!(done.offset > 0.0 && done.offset.is_finite(), "{v}: {}", done.offset);
+            for finish in [None, Some(0.3)] {
+                if let Ok(done) =
+                    (PocketOp { finish, ..one([0.0, 0.0]) }).toolpath(None, &odd, &placed(), Some("aluminium"), std::slice::from_ref(&shape))
+                {
+                    assert!(done.offset > 0.0 && done.offset.is_finite(), "{v}: {}", done.offset);
+                }
             }
         }
     }
@@ -620,10 +631,422 @@ fn a_pocket_operation_is_plain_json() {
         serde_json::from_str(r#"{"pockets": [[1, 2], [3, 4]], "direction": "conventional", "stepover": 3, "leave": 0.2, "ramp_angle": 0.1}"#)
             .unwrap();
     assert_eq!(
-        (op.pockets.len(), op.direction, op.stepover, op.leave, op.ramp_angle),
-        (2, CutDirection::Conventional, Some(3.0), Some(0.2), Some(0.1))
+        (op.pockets.len(), op.direction, op.stepover, op.leave, op.ramp_angle, op.finish),
+        (2, CutDirection::Conventional, Some(3.0), Some(0.2), Some(0.1), None)
     );
+    let finished: PocketOp = serde_json::from_str(r#"{"pockets": [[1, 2]], "finish": 0.3}"#).unwrap();
+    assert_eq!(finished, PocketOp { finish: Some(0.3), ..one([1.0, 2.0]) });
     assert!(serde_json::from_str::<PocketOp>(r#"{"pockets": [[1, 2]], "helix": 4}"#).is_err());
     assert!(serde_json::from_str::<PocketOp>("{}").is_err(), "a pocket operation names its pockets");
     assert_eq!(serde_json::from_value::<PocketOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
+}
+
+/// The distance from `at` to the side of the polygon through `points` that starts at its
+/// corner `side`.
+fn off_side(at: Vec2, points: &[(f64, f64)], side: usize) -> f64 {
+    let n = points.len();
+    distance(at, &[points[side % n], points[(side + 1) % n], points[side % n]])
+}
+
+/// Where the tool goes at rapid at the retract height (Z 5), in order.
+fn rapids_at_retract(path: &Toolpath) -> Vec<Vec2> {
+    path.moves
+        .iter()
+        .filter_map(|m| if let Move::Rapid { to } = *m { Some(to) } else { None })
+        .filter(|to| to.z == 5.0)
+        .map(|to| q(to.x, to.y))
+        .collect()
+}
+
+#[test]
+fn a_finishing_pass_takes_what_the_rings_left_on_the_walls() {
+    // The pocket 60 x 40 about the origin, its floor at Z -7. Without a finishing pass nothing
+    // is other than it was.
+    let wall = rect(-30.0, -20.0, 30.0, 20.0);
+    let plain = pocketed(&one([0.0, 0.0]), &[pocket(&wall, &[])]).unwrap();
+    assert_eq!((plain.finish, plain.offset, plain.finishing.clone(), plain.finish_levels.clone()), (0.0, 5.0, vec![vec![]], vec![vec![]]));
+    assert_eq!(plain.finish_leads, vec![Vec::<f64>::new()]);
+    // With 0.3 left for one: the rings keep 5.3 from the walls, 49.4 x 29.4 and, 4 apart,
+    // 41.4 x 21.4, 33.4 x 13.4 and 25.4 x 5.4; the pass runs 5 from the walls, the 50 x 30
+    // rectangle a pocket without one ends on, once, at the floor, met and left by quarter
+    // turns of 1 mm (a tenth of the tool's diameter, as a contour's).
+    let done = pocketed(&PocketOp { finish: Some(0.3), ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap();
+    assert_eq!((done.finish, done.offset, done.finish_levels.clone(), done.finish_leads.clone()), (0.3, 5.3, vec![vec![-7.0]], vec![vec![1.0]]));
+    assert!(done.rings.len() == 1 && done.rings[0].iter().zip([61.6, 93.6, 125.6, 157.6]).all(|(&a, b)| close(a, b)), "{:?}", done.rings);
+    assert!(done.finishing.len() == 1 && done.finishing[0].len() == 1 && close(done.finishing[0][0], 160.0), "{:?}", done.finishing);
+    assert!(done.notes.is_empty(), "{:?}", done.notes);
+    // Measured: everything the tool can reach is cut at the floor, and its centre is never
+    // nearer a wall than its radius.
+    check(&done, &wall, &[], -7.0);
+    // At the first level only the rings cut, and they keep the finishing stock more from every
+    // wall; at the floor the pass comes to 5 from each of the four.
+    let points = fed_points(&done.toolpath);
+    let at_level = |z: f64| points.iter().filter(move |at| (at.z - z).abs() <= 1e-9).map(|at| q(at.x, at.y));
+    let tightest = at_level(-3.5).map(|at| room(at, &wall, &[])).fold(f64::INFINITY, f64::min);
+    assert!((tightest - 5.3).abs() <= 1e-4, "the rings come within {tightest} mm of a wall");
+    for side in 0..4 {
+        let nearest = at_level(-7.0).map(|at| off_side(at, &wall, side)).fold(f64::INFINITY, f64::min);
+        assert!((nearest - 5.0).abs() <= 1e-6, "side {side}: the pass comes within {nearest} mm");
+    }
+    // The pass starts at the middle of the front side, going left to right (climb, the wall
+    // on the tool's right). The tool comes down 1 mm behind and 1 mm in from there, in air the
+    // rings cut (0.7 inside where the outermost ring ran), and goes up 1 mm ahead and 1 mm in.
+    let rapids = rapids_at_retract(&done.toolpath);
+    let (down, up) = (rapids[rapids.len() - 2], rapids[rapids.len() - 1]);
+    assert!(close(down.x, -1.0) && close(down.y, -14.0) && close(up.x, 1.0) && close(up.y, -14.0), "{down:?} {up:?}");
+    // What is fed: at each level down the innermost ring (61.6 round) in two turns, once round
+    // it, and out to each ring in turn, 4 mm at a time; the plunges of 5 and 8.5 before the two
+    // ramps; and the pass: 12 down from the retract height in air the rings cut, a quarter
+    // turn of 1 mm on to the wall, 160 round, and a quarter turn off it.
+    let s = done.toolpath.stats().unwrap();
+    let level = 123.2_f64.hypot(3.5) + 61.6 + 3.0 * 4.0 + 93.6 + 125.6 + 157.6;
+    assert!(close(s.feed_length, 2.0 * level + 13.5 + 12.0 + PI + 160.0), "{} {}", s.feed_length, 2.0 * level + 185.5 + PI);
+    // The pass is fed as the rings are: along a wall it is a far lighter cut, but in a corner
+    // of the pocket it is not, and there it has half the feed. Every move at the floor has the
+    // one cutting feed, but for the last 0.3 mm into each of the pass's four corners (where
+    // the tool is in the stock of the wall ahead too); the 160 mm along the walls are among
+    // them.
+    let corners = [(25.0, -15.0), (25.0, 15.0), (-25.0, 15.0), (-25.0, -15.0)];
+    let mut at = done.toolpath.start;
+    let (mut along_wall, mut slowed) = (0.0, 0.0);
+    for m in &done.toolpath.moves {
+        let to = m.end(at);
+        if let Move::Linear { feed, .. } | Move::Arc { feed, .. } = *m
+            && to.z == -7.0
+            && at.z == -7.0
+        {
+            let length = (to.x - at.x).hypot(to.y - at.y);
+            if feed != done.feed {
+                assert!(
+                    close(feed, 0.5 * done.feed) && close(length, 0.3) && corners.iter().any(|&(x, y)| close(to.x, x) && close(to.y, y)),
+                    "{m:?} from {at:?}"
+                );
+                slowed += length;
+            }
+            if (room(q(at.x, at.y), &wall, &[]) - 5.0).abs() <= 1e-6 && (room(q(to.x, to.y), &wall, &[]) - 5.0).abs() <= 1e-6 {
+                along_wall += length;
+            }
+        }
+        at = to;
+    }
+    assert!(close(along_wall, 160.0) && close(slowed, 1.2), "{along_wall} {slowed}");
+    // The other way round on request: the same lengths, down where the other went up.
+    let other = pocketed(&PocketOp { finish: Some(0.3), direction: CutDirection::Conventional, ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap();
+    check(&other, &wall, &[], -7.0);
+    assert!(close(other.toolpath.stats().unwrap().feed_length, s.feed_length));
+    let rapids = rapids_at_retract(&other.toolpath);
+    let (down, up) = (rapids[rapids.len() - 2], rapids[rapids.len() - 1]);
+    assert!(close(down.x, 1.0) && close(down.y, -14.0) && close(up.x, -1.0) && close(up.y, -14.0), "{down:?} {up:?}");
+    // With stock left on the walls for another operation too, the pass stops that much short.
+    let left = pocketed(&PocketOp { finish: Some(0.3), leave: Some(0.5), ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap();
+    assert!(close(left.offset, 5.8) && close(left.finishing[0][0], 2.0 * (49.0 + 29.0)), "{} {:?}", left.offset, left.finishing);
+    let tightest = fed_points(&left.toolpath).iter().map(|at| room(q(at.x, at.y), &wall, &[])).fold(f64::INFINITY, f64::min);
+    assert!((tightest - 5.5).abs() <= 1e-4, "{tightest}");
+    // A pass that takes more than the quarter turns are wide has wider ones, so that they
+    // still begin in air: 1 mm of stock, turns of 2.
+    let heavy = pocketed(&PocketOp { finish: Some(1.0), ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap();
+    assert_eq!((heavy.offset, heavy.finish_leads.clone(), heavy.finish_levels.clone()), (6.0, vec![vec![2.0]], vec![vec![-7.0]]));
+    check(&heavy, &wall, &[], -7.0);
+}
+
+#[test]
+fn a_finishing_pass_goes_round_islands_and_down_in_steps_where_the_flutes_are_short() {
+    // The pocket 80 x 60 with an island 20 x 20 in its middle: the pass goes along the wall and
+    // round the island, each once, and neither is cut into.
+    let wall = rect(-40.0, -30.0, 40.0, 30.0);
+    let island = rect(-10.0, -10.0, 10.0, 10.0);
+    let done = pocketed(&PocketOp { finish: Some(0.25), ..one([-25.0, 0.0]) }, &[pocket(&wall, std::slice::from_ref(&island))]).unwrap();
+    check(&done, &wall, std::slice::from_ref(&island), -7.0);
+    // Along the wall: 70 x 50. Round the island the centre is 5 off its sides and turns round
+    // its corners: 80 and a circle of radius 5. Both by quarter turns of 1 mm.
+    assert!(close(done.finishing[0][0], 240.0) && close(done.finishing[0][1], 80.0 + 10.0 * PI), "{:?}", done.finishing);
+    assert_eq!(done.finish_leads, vec![vec![1.0, 1.0]]);
+    let at_floor: Vec<Vec2> = fed_points(&done.toolpath).iter().filter(|at| (at.z + 7.0).abs() <= 1e-9).map(|at| q(at.x, at.y)).collect();
+    let (to_wall, to_island) =
+        at_floor.iter().fold((f64::INFINITY, f64::INFINITY), |(w, i), at| (w.min(distance(*at, &wall)), i.min(distance(*at, &island))));
+    assert!((to_wall - 5.0).abs() <= 1e-6 && (to_island - 5.0).abs() <= 1e-6, "{to_wall} {to_island}");
+    // Along the wall as before: down at X -1 Y -24, up at X 1 Y -24. Round the island the
+    // other way (the island on the tool's right): it starts under the island's front side,
+    // going right to left, down at X 1 Y -16 and up at X -1 Y -16, 1 mm further from the
+    // island than the pass.
+    let rapids = rapids_at_retract(&done.toolpath);
+    let n = rapids.len();
+    let expected = [(-1.0, -24.0), (1.0, -24.0), (1.0, -16.0), (-1.0, -16.0)];
+    assert!(rapids[n - 4..].iter().zip(expected).all(|(at, (x, y))| close(at.x, x) && close(at.y, y)), "{:?}", &rapids[n - 4..]);
+    // A tool that reaches 30 down a wall on 12 mm of flutes, in a pocket 20 deep: the pass is
+    // cut in two steps of 10, top down, each as high as the flutes can cut.
+    let mut long = mill10();
+    (long.geometry.flute_length, long.geometry.shoulder_length, long.geometry.overall_length) = (12.0, 30.0, 80.0);
+    long.holder.stick_out = 40.0;
+    let deep = PocketShape { floor: -20.0, ..pocket(&rect(-30.0, -20.0, 30.0, 20.0), &[]) };
+    let op = PocketOp { finish: Some(0.3), ..one([0.0, 0.0]) };
+    let done = op.toolpath(None, &long, &placed(), Some("aluminium"), std::slice::from_ref(&deep)).unwrap();
+    assert_eq!((done.levels.clone(), done.finish_levels.clone()), (vec![vec![-5.0, -10.0, -15.0, -20.0]], vec![vec![-10.0, -20.0]]));
+    let s = done.toolpath.stats().unwrap();
+    let plain =
+        PocketOp { leave: Some(0.3), ..one([0.0, 0.0]) }.toolpath(None, &long, &placed(), Some("aluminium"), std::slice::from_ref(&deep)).unwrap();
+    // The same rings as a pocket that leaves 0.3 for another operation, and the two steps of
+    // the pass more: down 15 and 25 from the retract height, and twice the two quarter turns
+    // and the 160 round.
+    assert!(close(s.feed_length - plain.toolpath.stats().unwrap().feed_length, 15.0 + 25.0 + 2.0 * (PI + 160.0)), "{}", s.feed_length);
+    // No moment of the pass is a bigger cut than a ring's, which is 10 wide and 5 deep here
+    // (50 mm2). In each corner the tool's edge is in the stock over 90 degrees more than along
+    // a wall (where it is 19.9 degrees, for 0.3 of stock): the tool is buried
+    // 5 x (1 - cos 109.9) = 6.71 mm wide for a moment, at half the feed, which counts as 3.35 mm
+    // at the whole feed. With flutes for the whole depth one step of 20 would be 67 mm2, so
+    // the pass takes two steps here too; a pocket 10 deep goes in one (33.5 mm2).
+    let mut whole = long.clone();
+    whole.geometry.flute_length = 30.0;
+    let stepped = op.toolpath(None, &whole, &placed(), Some("aluminium"), std::slice::from_ref(&deep)).unwrap();
+    assert_eq!(stepped.finish_levels, vec![vec![-10.0, -20.0]]);
+    let ten = PocketShape { floor: -10.0, ..deep.clone() };
+    let one_step = op.toolpath(None, &whole, &placed(), Some("aluminium"), &[ten]).unwrap();
+    assert_eq!((one_step.levels.clone(), one_step.finish_levels.clone()), (vec![vec![-5.0, -10.0]], vec![vec![-10.0]]));
+    // 3 mm of stock (4.24 from where the rings went in a corner): the tool is buried
+    // 5 x (1 - cos 156.4) = 9.58 mm there, as 4.79: two steps of 10 (47.9 mm2 each).
+    let thick =
+        PocketOp { finish: Some(3.0), ..one([0.0, 0.0]) }.toolpath(None, &whole, &placed(), Some("aluminium"), std::slice::from_ref(&deep)).unwrap();
+    assert_eq!((thick.finish_levels.clone(), thick.finish_leads.clone()), (vec![vec![-10.0, -20.0]], vec![vec![6.0]]));
+    // A round pocket has no corners. Along its wall (radius 25, the tool's centre on a circle
+    // of 20) the cut is 0.37 mm wide, hardly more than the 0.3 along a straight wall, and 20
+    // deep goes in one step (7.5 mm2), the tool never further out than that circle.
+    let circle = |floor: f64| PocketShape {
+        floor,
+        region: Region2 {
+            outer: Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 25.0, start: 0.0, sweep: 2.0 * PI }] },
+            holes: Vec::new(),
+        },
+    };
+    let round = op.toolpath(None, &whole, &placed(), Some("aluminium"), &[circle(-20.0)]).unwrap();
+    assert_eq!((round.finish_levels.clone(), round.finish_leads.clone()), (vec![vec![-20.0]], vec![vec![1.0]]));
+    let furthest = fed_points(&round.toolpath).iter().map(|at| at.x.hypot(at.y)).fold(0.0, f64::max);
+    assert!(close(round.finishing[0][0], 40.0 * PI) && (furthest - 20.0).abs() <= 1e-6, "{:?} {furthest}", round.finishing);
+    // 35 deep, with flutes for it, it takes two steps: none is deeper than three diameters.
+    let mut longer = whole.clone();
+    (longer.geometry.flute_length, longer.geometry.shoulder_length, longer.geometry.overall_length) = (40.0, 0.0, 100.0);
+    longer.holder.stick_out = 50.0;
+    let deeper = op.toolpath(None, &longer, &placed(), Some("aluminium"), &[circle(-35.0)]).unwrap();
+    assert_eq!(deeper.finish_levels, vec![vec![-17.5, -35.0]]);
+}
+
+/// The length fed at the floor (Z -7) at half of `done`'s cutting feed, and how many such moves
+/// end at none of `corners`.
+fn slowed_into(done: &Pocketed, corners: &[(f64, f64)]) -> (f64, usize) {
+    let mut at = done.toolpath.start;
+    let (mut slowed, mut elsewhere) = (0.0, 0);
+    for m in &done.toolpath.moves {
+        let to = m.end(at);
+        if let Move::Linear { feed, .. } | Move::Arc { feed, .. } = *m
+            && to.z == -7.0
+            && at.z == -7.0
+            && close(feed, 0.5 * done.feed)
+        {
+            slowed += (to.x - at.x).hypot(to.y - at.y);
+            elsewhere += usize::from(!corners.iter().any(|&(x, y)| (to.x - x).abs() <= 1e-6 && (to.y - y).abs() <= 1e-6));
+        }
+        at = to;
+    }
+    (slowed, elsewhere)
+}
+
+#[test]
+fn a_finishing_pass_slows_sooner_into_a_sharper_corner() {
+    // A pocket that is half a square of 60: a right angle and two corners of 45 degrees. The
+    // tool's centre goes round the triangle 5 inside it, whose sharp corners are 5 / tan 22.5
+    // = 12.07 short of the pocket's.
+    let half = vec![(-30.0, -20.0), (30.0, -20.0), (-30.0, 40.0)];
+    let sharp = 30.0 - 5.0 / (PI / 8.0).tan();
+    let corners = [(-25.0, -15.0), (sharp, -15.0), (-25.0, sharp + 10.0)];
+    let done = pocketed(&PocketOp { finish: Some(0.3), ..one([-10.0, 0.0]) }, &[pocket(&half, &[])]).unwrap();
+    check(&done, &half, &[], -7.0);
+    // In a corner of 45 degrees the rings turned 0.3 / sin 22.5 = 0.78 mm short of where the
+    // pass turns (2.6 times the stock, of the four a corner may account for), and the pass is
+    // beyond their corner for its last 0.3 x tan 67.5 = 0.72 mm: that far it has half the
+    // feed. Into the right angle, the last 0.3. One step all the same: buried
+    // 5 x (1 - cos 154.9) = 9.53 mm in a sharp corner, as 4.76 at the whole feed, and 7 deep
+    // that is 33.3 mm2 of the 35 a ring is.
+    assert!(
+        done.finish_levels == vec![vec![-7.0]] && done.finish_leads == vec![vec![1.0]] && done.notes.is_empty(),
+        "{:?} {:?}",
+        done.finish_levels,
+        done.notes
+    );
+    let (slowed, elsewhere) = slowed_into(&done, &corners);
+    assert!(close(slowed, 0.3 + 2.0 * 0.3 * (3.0 * PI / 8.0).tan()) && elsewhere == 0, "{slowed} {elsewhere}");
+    // A corner of 20 degrees is sharper than a corner may be: the rings turned 0.3 / sin 10 =
+    // 1.73 mm short of the pass's corner, 5.8 times the stock. The pass is taken to be a cut as
+    // wide as the tool there and goes down in the rings' levels, and the operation says so.
+    let sliver = vec![(-30.0, -10.0), (30.0, -10.0), (-30.0, -10.0 + 60.0 * (PI / 9.0).tan())];
+    let done = pocketed(&PocketOp { finish: Some(0.3), ..one([-20.0, -3.0]) }, &[pocket(&sliver, &[])]).unwrap();
+    check(&done, &sliver, &[], -7.0);
+    assert!(done.finish_levels == done.levels && done.levels == vec![vec![-3.5, -7.0]], "{:?} {:?}", done.finish_levels, done.levels);
+    assert!(done.notes.iter().any(|n| n.contains("level by level")), "{:?}", done.notes);
+}
+
+#[test]
+fn a_finishing_pass_is_cut_level_by_level_where_the_rings_did_not_go() {
+    // A pocket 60 x 40 with a finger 10.4 wide and 20 long off one side. The 10 mm tool goes
+    // into the finger with 0.4 to spare, and a pocket without a finishing pass is cut there.
+    let fingered = vec![(-30.0, -20.0), (30.0, -20.0), (30.0, -5.2), (50.0, -5.2), (50.0, 5.2), (30.0, 5.2), (30.0, 20.0), (-30.0, 20.0)];
+    let plain = pocketed(&one([0.0, 0.0]), &[pocket(&fingered, &[])]).unwrap();
+    let furthest = |done: &Pocketed, z: f64| {
+        fed_points(&done.toolpath).iter().filter(|at| (at.z - z).abs() <= 1e-9).map(|at| at.x).fold(f64::NEG_INFINITY, f64::max)
+    };
+    assert!((furthest(&plain, -3.5) - 45.0).abs() <= 1e-4 && (furthest(&plain, -7.0) - 45.0).abs() <= 1e-4);
+    // With 0.3 for a finishing pass the rings stay out of the finger, which they would need
+    // 10.6 for: they turn back at its mouth. The pass goes into it, and down it that is a cut
+    // as wide as the tool, as a ring is: so the pass is cut at the rings' two levels, not in
+    // one step 7 deep, and the operation says so.
+    let done = pocketed(&PocketOp { finish: Some(0.3), ..one([0.0, 0.0]) }, &[pocket(&fingered, &[])]).unwrap();
+    assert_eq!((done.levels.clone(), done.finish_levels.clone()), (vec![vec![-3.5, -7.0]], vec![vec![-3.5, -7.0]]));
+    assert!(
+        done.notes.len() == 1
+            && done.notes[0].contains("the pocket at X 0 Y 0 with 0.3 mm left on its walls")
+            && done.notes[0].contains("a cut as wide as tool 2"),
+        "{:?}",
+        done.notes
+    );
+    check(&done, &fingered, &[], -7.0);
+    assert!((furthest(&done, -3.5) - 45.0).abs() <= 1e-4 && (furthest(&done, -7.0) - 45.0).abs() <= 1e-4);
+    // (The rings alone, 5.3 from the two corners of its mouth, get as far as between them.)
+    let rough = pocketed(&PocketOp { leave: Some(0.3), ..one([0.0, 0.0]) }, &[pocket(&fingered, &[])]).unwrap();
+    let mouth = 30.0 - (5.3_f64.powi(2) - 5.2_f64.powi(2)).sqrt();
+    assert!((furthest(&rough, -7.0) - mouth).abs() <= 1e-4, "the rings alone go to X {}, not {mouth}", furthest(&rough, -7.0));
+    // A lighter pass that the finger has room for is cut in one step: 0.1 a side leaves the
+    // rings 0.2, and they go down the finger first.
+    let light = pocketed(&PocketOp { finish: Some(0.1), ..one([0.0, 0.0]) }, &[pocket(&fingered, &[])]).unwrap();
+    check(&light, &fingered, &[], -7.0);
+    assert!(light.finish_levels == vec![vec![-7.0]] && light.notes.is_empty(), "{:?} {:?}", light.finish_levels, light.notes);
+    assert!((furthest(&light, -3.5) - 44.9).abs() <= 1e-4, "{}", furthest(&light, -3.5));
+    // A pocket the tool fits only without the finishing stock says so.
+    let tight = rect(-30.0, -5.2, 30.0, 5.2);
+    assert!(pocketed(&one([0.0, 0.0]), &[pocket(&tight, &[])]).is_ok());
+    let e = pocketed(&PocketOp { finish: Some(0.3), ..one([0.0, 0.0]) }, &[pocket(&tight, &[])]).unwrap_err().to_string();
+    assert!(e.contains("does not fit") && e.contains("with 0.3 mm left on its walls for the finishing pass"), "{e}");
+    // No finishing pass of nothing: 0 is none.
+    let none = pocketed(&PocketOp { finish: Some(0.0), ..one([0.0, 0.0]) }, &[pocket(&tight, &[])]).unwrap();
+    assert_eq!((none.finish, none.finishing.clone(), none.finish_leads.clone()), (0.0, vec![vec![]], vec![vec![]]));
+    // A room off the pocket that the tool cannot get to from it (through a neck 4 wide), and
+    // fits in only without the finishing stock: without a finishing pass it is cut on its own,
+    // entered down a ramp. With one the rings do not go into it and the pass, which is not
+    // made to start in uncut stock, has nowhere to begin there: refused, with why.
+    let roomed = vec![
+        (-30.0, -20.0),
+        (30.0, -20.0),
+        (30.0, -2.0),
+        (34.0, -2.0),
+        (34.0, -5.2),
+        (64.0, -5.2),
+        (64.0, 5.2),
+        (34.0, 5.2),
+        (34.0, 2.0),
+        (30.0, 2.0),
+        (30.0, 20.0),
+        (-30.0, 20.0),
+    ];
+    let plain = pocketed(&one([0.0, 0.0]), &[pocket(&roomed, &[])]).unwrap();
+    assert!((furthest(&plain, -7.0) - 59.0).abs() <= 1e-4 && plain.notes.iter().any(|n| n.contains("does not pass everywhere")), "{:?}", plain.notes);
+    let e = pocketed(&PocketOp { finish: Some(0.3), ..one([0.0, 0.0]) }, &[pocket(&roomed, &[])]).unwrap_err().to_string();
+    assert!(e.contains("the pocket at X 0 Y 0") && e.contains("has nowhere to start there") && e.contains("0.3 mm"), "{e}");
+}
+
+#[test]
+fn random_pockets_are_finished_without_touching_a_wall_or_cutting_wide_at_full_depth() {
+    // The random pockets again (a rectangle with up to three islands, a tool and a stepover
+    // picked at random, both ways round), two levels deep, with a finishing pass of 0.1 to
+    // 0.6 mm. Each is refused for a reason of its own or measured: never nearer a wall or an
+    // island than the tool's radius, nothing reachable left uncut at the floor, and one of
+    // two things about how the pass goes down. Either it is cut level by level, and the
+    // operation says that the rings did not go everywhere. Or it is cut in one step, and then
+    // no place of it is further from where the rings ran than four times its stock, which is
+    // what a corner may account for (and the quarter of a millimetre at most between two places
+    // the operation measures at): the rings here are those of the same pocket cut with that
+    // stock left on and no finishing pass.
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (mut cut, mut refused, mut levelled, mut straight, mut looked_at) = (0, 0, 0, 0, 0);
+    for case in 0..120 {
+        let (half_x, half_y) = (12.0 + (next() * 30.0).round(), 10.0 + (next() * 22.0).round());
+        let wall = rect(-half_x, -half_y, half_x, half_y);
+        let mut islands: Vec<Vec<(f64, f64)>> = Vec::new();
+        for _ in 0..(next() * 4.0) as usize {
+            let (w, h) = (2.0 + (next() * 14.0).round(), 2.0 + (next() * 12.0).round());
+            let (x, y) = (((next() * 2.0 - 1.0) * (half_x - w - 1.0)).round(), ((next() * 2.0 - 1.0) * (half_y - h - 1.0)).round());
+            let island = rect(x - 0.5 * w, y - 0.5 * h, x + 0.5 * w, y + 0.5 * h);
+            let apart = |a: &Vec<(f64, f64)>, b: &Vec<(f64, f64)>| {
+                a[0].0 > b[2].0 + 0.5 || b[0].0 > a[2].0 + 0.5 || a[0].1 > b[2].1 + 0.5 || b[0].1 > a[2].1 + 0.5
+            };
+            let inside_wall = island[0].0 > -half_x + 0.5 && island[2].0 < half_x - 0.5 && island[0].1 > -half_y + 0.5 && island[2].1 < half_y - 0.5;
+            if inside_wall && islands.iter().all(|other| apart(other, &island)) {
+                islands.push(island);
+            }
+        }
+        let diameter = [4.0, 6.0, 8.0, 10.0, 12.0][(next() * 5.0) as usize % 5];
+        let mut tool = mill10();
+        tool.geometry.diameter = diameter;
+        tool.geometry.shank_diameter = diameter;
+        let finish = (1.0 + (next() * 5.0).round()) / 10.0;
+        let op = PocketOp {
+            stepover: Some(((0.15 + 0.35 * next()) * diameter * 100.0).round() / 100.0),
+            direction: if next() < 0.5 { CutDirection::Climb } else { CutDirection::Conventional },
+            stepdown: Some(3.5),
+            finish: Some(finish),
+            ..one([0.0, 0.0])
+        };
+        let said = format!("case {case} ({wall:?}, {islands:?}, a {diameter} mm tool, {op:?})");
+        let shape = pocket(&wall, &islands);
+        let done = match op.toolpath(None, &tool, &placed(), Some("aluminium"), std::slice::from_ref(&shape)) {
+            Ok(done) => done,
+            Err(e) => {
+                refused += 1;
+                let why = e.to_string();
+                assert!(why.contains("does not fit") || why.contains("turns") || why.contains("has nowhere to start there"), "{said}: {why}");
+                continue;
+            }
+        };
+        cut += 1;
+        looked_at += check_with(&done, &wall, &islands, -7.0, 0.5 * diameter);
+        straight += done.finish_leads[0].iter().filter(|&&lead| lead == 0.0).count();
+        if done.notes.iter().any(|n| n.contains("level by level")) {
+            levelled += 1;
+            assert_eq!(done.finish_levels, vec![vec![-3.5, -7.0]], "{said}");
+            continue;
+        }
+        assert_eq!(done.finish_levels, vec![vec![-7.0]], "{said}");
+        // Where the rings ran at the floor, in cells of a millimetre.
+        let rough =
+            PocketOp { finish: None, leave: Some(finish), ..op.clone() }.toolpath(None, &tool, &placed(), Some("aluminium"), &[shape]).unwrap();
+        let (nx, ny) = (2 * half_x as usize + 1, 2 * half_y as usize + 1);
+        let cell = |at: Vec2| (((at.x + half_x).floor() as usize).min(nx - 1), ((at.y + half_y).floor() as usize).min(ny - 1));
+        let mut ran: Vec<Vec<Vec2>> = vec![Vec::new(); nx * ny];
+        for at in fed_points(&rough.toolpath).iter().filter(|at| (at.z + 7.0).abs() <= 1e-9) {
+            let (i, j) = cell(q(at.x, at.y));
+            ran[i * ny + j].push(q(at.x, at.y));
+        }
+        // Each place of the pass that is nearer a wall than the rings go.
+        let reach = 4.0 * finish + 0.25 + 0.15;
+        let span = reach.ceil() as usize;
+        for at in fed_points(&done.toolpath).iter().filter(|at| (at.z + 7.0).abs() <= 1e-9).map(|at| q(at.x, at.y)) {
+            if room(at, &wall, &islands) >= 0.5 * diameter + finish - 1e-3 {
+                continue;
+            }
+            let (i, j) = cell(at);
+            let near = (i.saturating_sub(span)..=(i + span).min(nx - 1))
+                .flat_map(|i| (j.saturating_sub(span)..=(j + span).min(ny - 1)).map(move |j| i * ny + j))
+                .flat_map(|k| ran[k].iter())
+                .map(|ring| (ring.x - at.x).hypot(ring.y - at.y))
+                .fold(f64::INFINITY, f64::min);
+            assert!(near <= reach, "{said}: at {at:?} the pass is {near} mm from where the rings ran, in one step");
+        }
+    }
+    eprintln!("{cut} cut, {refused} refused, {levelled} level by level, {straight} loops met straight on, {looked_at} places looked at");
+    assert!(
+        cut >= 90 && levelled >= 3 && looked_at > 400_000,
+        "{cut} cut, {refused} refused, {levelled} level by level, {straight} straight, {looked_at} places"
+    );
 }
