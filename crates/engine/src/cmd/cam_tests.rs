@@ -3025,3 +3025,28 @@ fn a_thread_is_milled_round_drilled_holes_and_posts_as_helical_arcs() {
     );
     assert!(why(&mut s, json!({"holes": [[0, 0]], "diameter": 10}), 8).contains("depth"));
 }
+
+#[test]
+fn a_setup_on_the_haas_vf4ss_runs_its_tools_up_to_twelve_thousand() {
+    // The plate's 10 mm end mill (tool 2) wants 150 000 / (10 pi) = 4775 rev/min: under both
+    // machines' tops. A 3 mm one wants 15 915: 10 000 on the generic mill, 12 000 on the Haas.
+    let mut s = plate();
+    let mut small = mill10();
+    small["number"] = json!(3);
+    small["geometry"]["diameter"] = json!(3.0);
+    small["geometry"]["shank_diameter"] = json!(3.0);
+    run(&mut s, "cam.tool.create", json!({"tool": small}));
+    run(&mut s, "cam.op.face", json!({"setup": "setup-1", "tool": 3}));
+    let rpm = |s: &mut Session| run(s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"]["rpm"].as_f64().unwrap();
+    assert_eq!(rpm(&mut s), 10_000.0);
+    run(&mut s, "cam.setup.edit", json!({"id": "setup-1", "machine": "haas_vf4ss"}));
+    assert_eq!(rpm(&mut s), 12_000.0);
+    assert_eq!(run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["machine"], json!("haas_vf4ss"));
+    // A machine this version does not know is refused, and the setup stays on its own.
+    let why = refused(&mut s, "cam.setup.edit", json!({"id": "setup-1", "machine": "mazak"}));
+    assert!(why.contains("no machine 'mazak'") && why.contains("generic_mill, haas_vf4ss"), "{why}");
+    assert_eq!(rpm(&mut s), 12_000.0);
+    // The program says the speed.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    assert!(posted["text"].as_str().unwrap().contains("S12000 M3"), "{posted}");
+}

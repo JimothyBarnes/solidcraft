@@ -211,7 +211,14 @@ impl ThreadOp {
         let turns = (self.depth / shape.span - 1e-9).ceil().max(1.0) as usize;
         // The tool's own chip load, at the edge; the centre goes round a smaller circle than the
         // edge at the thread's root, and its feed is that much less.
-        let f = op_feeds(tool, Engagement { axial: shape.span.min(self.depth).max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let f = op_feeds(
+            tool,
+            Engagement { axial: shape.span.min(self.depth).max(1e-4), radial: g.diameter },
+            material,
+            placement.max_rpm,
+            self.rpm,
+            self.feed,
+        )?;
         let centre_feed = f.feed * (self.diameter - g.diameter) / self.diameter;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
         let Some(first) = self.holes.first().map(|h| Vec2 { x: h[0], y: h[1] }) else { return bad("there are no holes to thread".into()) };

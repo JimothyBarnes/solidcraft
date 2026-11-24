@@ -165,7 +165,7 @@ impl EngraveOp {
         let runs = ordered(joined(pieces), start.map(|at| Vec2 { x: at.x, y: at.y }));
         // The tool's own chip load, as a chamfer's: the cut is narrow and made near the tip.
         let g = tool.geometry;
-        let f = op_feeds(tool, Engagement { axial: depth.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: depth.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
         let Some(first) = runs.first().and_then(|run| run.first()).map(Seg2Geom::start) else {
             return bad(format!("sketch '{}' has no curves to follow", self.sketch));

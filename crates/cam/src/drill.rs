@@ -205,7 +205,7 @@ impl DrillOp {
         // A plunging end mill engages its whole diameter and feeds at its plunge feed; a drill's
         // radial engagement does not apply. A feed the operation gives is the feed down the hole.
         let radial = if tool.kind.is_axial() { 0.0 } else { g.diameter };
-        let f = op_feeds(tool, Engagement { axial: deep.max(1e-3), radial }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: deep.max(1e-3), radial }, material, placement.max_rpm, self.rpm, self.feed)?;
         let (rpm, notes) = (f.rpm, f.notes);
         let feed = if self.feed.is_some() || tool.kind.is_axial() { f.feed } else { f.plunge_feed };
         // A tap turns a whole number of times a minute, so that the speed and the feed a program

@@ -175,7 +175,7 @@ impl FaceOp {
         let clear = self.clear.unwrap_or(DEFAULT_FACE_CLEAR);
         let (x_in, x_out) = (stock.min.x - radius - clear, stock.max.x + radius + clear);
         let first_y = passes.first().copied().unwrap_or(0.5 * (y_lo + y_hi));
-        let f = op_feeds(tool, Engagement { axial: per_level.max(1e-4), radial: stepover }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: per_level.max(1e-4), radial: stepover }, material, placement.max_rpm, self.rpm, self.feed)?;
         let at = |x: f64, y: f64, z: f64| Vec3 { x, y, z };
 
         let mut moves = vec![Move::ToolChange { tool: tool.number }, Move::Spindle { rpm: f.rpm, direction: SpindleDirection::Clockwise }];

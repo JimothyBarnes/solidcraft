@@ -96,7 +96,8 @@ pub struct CamToolList {
 pub struct CamSetupCreateParams {
     #[serde(default)]
     pub name: Option<String>,
-    /// A machine definition's id; none for a generic machine.
+    /// The machine it is on: generic_mill (the default: speeds to 10 000 rev/min) or haas_vf4ss (to
+    /// 12 000).
     #[serde(default)]
     pub machine: Option<String>,
     /// The stock's material, as the tools' cutting data names it (`aluminium`); feeds come from

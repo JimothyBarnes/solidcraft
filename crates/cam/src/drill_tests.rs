@@ -182,6 +182,13 @@ fn feeds_given_or_derived_and_capped_are_said_so() {
     assert_eq!(d.rpm, GENERIC_MAX_RPM);
     assert!(close(d.feed, 0.04 * GENERIC_MAX_RPM), "{}", d.feed);
     assert!(d.notes.iter().any(|n| n.contains("capped at 10000 rpm")), "{:?}", d.notes);
+    // The same drill in a setup on the Haas VF-4SS (decision 0036): its spindle's 12 000, and
+    // the feed keeps the chip.
+    let mut haas = placed();
+    haas.max_rpm = crate::machine::machine(Some("haas_vf4ss")).unwrap().max_rpm;
+    let d = op(vec![[0.0, 0.0]], 5.0).toolpath(None, &small, &haas, Some("aluminium")).unwrap();
+    assert_eq!(d.rpm, 12_000.0);
+    assert!(close(d.feed, 0.04 * 12_000.0) && d.notes.iter().any(|n| n.contains("capped at 12000 rpm")), "{} {:?}", d.feed, d.notes);
     // A plunging end mill feeds at its plunge feed: 3 flutes at 0.05, half of it.
     let mut mill = drill10();
     mill.kind = ToolKind::FlatEndMill;

@@ -381,7 +381,7 @@ impl ContourOp {
             }
             None => rounds.iter().map(|_| Vec::new()).collect(),
         };
-        let f = op_feeds(tool, Engagement { axial: per_level.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: per_level.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
 
         let Some(first) = rounds.first().map(|r| r.entry) else { return bad("the outline left nothing to cut round".into()) };
@@ -627,7 +627,7 @@ impl ContourOp {
                 rounds.push(r);
             }
         }
-        let f = op_feeds(tool, Engagement { axial: d.per_level.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: d.per_level.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
         let Some(first) = rounds.first().map(|r| r.start) else { return bad("the openings left nothing to cut round".into()) };
         let bottom = d.bottom;

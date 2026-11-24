@@ -5,7 +5,8 @@ use crate::tool::{Engagement, FeedWarning, Tool};
 use crate::toolpath::MAX_FEED;
 use crate::{Error, Result};
 
-/// The top spindle speed used while there are no machine definitions, rev/min (decision 0009).
+/// The generic mill's top spindle speed, rev/min (decisions 0009 and 0036): the speed a setup on
+/// no machine of its own is kept to.
 pub const GENERIC_MAX_RPM: f64 = 10_000.0;
 /// The share of a cutting feed used to plunge when the operation gives both its numbers, so the
 /// tool's data is never asked.
@@ -25,14 +26,21 @@ pub(crate) struct OpFeeds {
     pub notes: Vec<String>,
 }
 
-/// Speed and feeds for `tool` at `engagement` in the setup's `material`, with the operation's own
-/// `rpm` and `feed` used where given (both checked by the operation). A speed given alone keeps
-/// the tool's chip: the feeds scale with it.
-pub(crate) fn op_feeds(tool: &Tool, engagement: Engagement, material: Option<&str>, rpm: Option<f64>, feed: Option<f64>) -> Result<OpFeeds> {
+/// Speed and feeds for `tool` at `engagement` in the setup's `material` on a machine whose top
+/// speed is `max_rpm`, with the operation's own `rpm` and `feed` used where given (both checked
+/// by the operation). A speed given alone keeps the tool's chip: the feeds scale with it.
+pub(crate) fn op_feeds(
+    tool: &Tool,
+    engagement: Engagement,
+    material: Option<&str>,
+    max_rpm: f64,
+    rpm: Option<f64>,
+    feed: Option<f64>,
+) -> Result<OpFeeds> {
     if let (Some(rpm), Some(feed)) = (rpm, feed) {
         return Ok(OpFeeds { rpm, feed, plunge_feed: feed * TYPED_PLUNGE_FACTOR, ramp_feed: feed * TYPED_PLUNGE_FACTOR, notes: Vec::new() });
     }
-    let sf = tool.speeds_feeds(material.unwrap_or(""), engagement, GENERIC_MAX_RPM).map_err(|e| {
+    let sf = tool.speeds_feeds(material.unwrap_or(""), engagement, max_rpm).map_err(|e| {
         if material.is_none() { Error::BadValue(format!("{e}: give the setup its stock material, or the operation its rpm and feed")) } else { e }
     })?;
     // Warnings about a number the operation gives itself don't apply.
@@ -54,7 +62,7 @@ pub(crate) fn op_feeds(tool: &Tool, engagement: Engagement, material: Option<&st
 fn describe(w: &FeedWarning) -> String {
     match *w {
         FeedWarning::SpindleCapped { wanted, max } => {
-            format!("spindle speed capped at {max:.0} rpm (the tool's data asks {wanted:.0}); no machine is set, so this is the generic top speed")
+            format!("spindle speed capped at {max:.0} rpm, the top speed of the setup's machine (the tool's data asks {wanted:.0})")
         }
         FeedWarning::ChipTooThin { chip, intended } => {
             format!("the chip is {chip:.4} mm, much thinner than the {intended:.4} mm intended: the edge rubs")

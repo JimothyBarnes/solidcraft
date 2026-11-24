@@ -294,7 +294,7 @@ impl ChamferOp {
         // The tool's own chip load, with nothing added for a thin chip: the cut is narrow, but it
         // is made near the tip, on a small diameter where the tool is weakest, and it is a
         // finishing cut. (A radial engagement of the whole diameter is how that is said.)
-        let f = op_feeds(tool, Engagement { axial: shape.leg.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: shape.leg.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
 
         let Some(first) = rounds.first().map(|r| r.entry) else {

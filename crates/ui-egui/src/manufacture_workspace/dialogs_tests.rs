@@ -3186,3 +3186,37 @@ fn new_setup_takes_the_heights_the_tool_travels_and_lifts_at() {
     assert_eq!(open(&h), "setup");
     assert_eq!(data(&mut h)["setups"][0]["safe_heights"], json!({"clearance": 40.0, "retract": 3.0}));
 }
+
+#[test]
+fn new_setup_puts_the_setup_on_a_machine_and_its_tools_run_to_its_top_speed() {
+    let mut h = harness();
+    block(&mut h);
+    // A 3 mm end mill wants 21 221 rev/min from its 200 m/min (T1).
+    add_tool(&mut h, "flat_end_mill", 3.0);
+    ribbon(&mut h, "cam.setup.create");
+    // The generic mill to start with, and the Haas VF-4SS offered, each with its top speed.
+    assert_eq!(setup_form(&mut h).machine, 0);
+    assert!(h.widget(tr("manufacture.setup_machine")).is_some() && h.widget("Generic mill, up to 10000 rpm").is_some());
+    assert_eq!(setup_form(&mut h).params().get("machine"), None);
+    setup_form(&mut h).machine = 1;
+    h.frames(3);
+    assert_eq!(setup_form(&mut h).params()["machine"], json!("haas_vf4ss"));
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["machine"], json!("haas_vf4ss"));
+    // Its tools run to 12 000 there.
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 1})).unwrap();
+    let rpm = |h: &mut Harness| h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap()["numbers"]["rpm"].as_f64();
+    assert_eq!(rpm(&mut h), Some(12_000.0));
+    // The next setup starts on the same machine.
+    ribbon(&mut h, "cam.setup.create");
+    assert_eq!(setup_form(&mut h).machine, 1);
+    press(&mut h, "Cancel");
+    // Changed back to the generic mill: 10 000.
+    let mut form = SetupForm::edit(&h.app, "setup-1").unwrap();
+    assert_eq!(form.machine, 1);
+    form.machine = 0;
+    assert_eq!(form.params()["machine"], json!("generic_mill"));
+    assert!(form.accept(&mut h.app).is_none(), "{:?}", h.app.status);
+    assert_eq!(rpm(&mut h), Some(10_000.0));
+}

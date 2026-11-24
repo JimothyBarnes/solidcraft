@@ -180,6 +180,25 @@ const TAP_LEAD: f64 = 3.0;
 const PATTERNS: [(&str, &str); 2] = [("zig_zag", "manufacture.pattern_zig_zag"), ("one_way", "manufacture.pattern_one_way")];
 const UNITS: [(&str, &str); 2] = [("mm", "manufacture.units_mm"), ("inch", "manufacture.units_inch")];
 const WORK_OFFSETS: [&str; 6] = ["G54", "G55", "G56", "G57", "G58", "G59"];
+
+/// Where a setup on the machine `id` is in `solidcraft_engine::cmd::BUILTIN_MACHINES`: the generic mill
+/// for none, or for one this version does not know.
+fn machine_index(id: Option<&str>) -> usize {
+    solidcraft_engine::cmd::manufacture_machine(id)
+        .and_then(|known| solidcraft_engine::cmd::BUILTIN_MACHINES.iter().position(|m| m.id == known.id))
+        .unwrap_or(0)
+}
+
+/// The machines a setup can be on, as New Setup offers them: each with its top speed.
+fn machine_labels() -> Vec<String> {
+    solidcraft_engine::cmd::BUILTIN_MACHINES
+        .iter()
+        .map(|m| {
+            let name = if m.name.is_empty() { tr("manufacture.machine_generic_mill") } else { m.name };
+            solidcraft_ui_text::format("manufacture.setup_machine_choice", &[("name", name), ("rpm", &format!("{}", m.max_rpm.round()))])
+        })
+        .collect()
+}
 /// The file kinds a program is saved as.
 const PROGRAM_EXTENSIONS: [&str; 4] = ["nc", "tap", "gcode", "txt"];
 /// The fastest spindle and feed a field takes; the commands have the last word.
@@ -835,6 +854,9 @@ pub(crate) struct SetupForm {
     pub side: f64,
     pub top: f64,
     pub bottom: f64,
+    /// Which of the machines this version knows the setup is on (`solidcraft_engine::cmd::BUILTIN_MACHINES`):
+    /// the generic mill first.
+    pub machine: usize,
     /// How high above the stock's top the tool travels between cuts and operations (clearance)
     /// and how high it lifts within one (retract), mm.
     pub clearance: f64,
@@ -869,6 +891,8 @@ impl SetupForm {
             side: over,
             top: over,
             bottom: 0.0,
+            // On the machine the design's last setup is on: a shop's setups are mostly for one.
+            machine: data.setups.last().map_or(0, |setup| machine_index(setup.machine.as_deref())),
             clearance: if inch { 25.4 } else { 25.0 },
             retract: if inch { 5.08 } else { 5.0 },
             origin: 0,
@@ -906,6 +930,7 @@ impl SetupForm {
             side,
             top,
             bottom,
+            machine: machine_index(setup.machine.as_deref()),
             clearance: setup.safe_heights.clearance,
             retract: setup.safe_heights.retract,
             origin,
@@ -932,6 +957,12 @@ impl SetupForm {
         });
         if !self.name.trim().is_empty() {
             params["name"] = json!(self.name.trim());
+        }
+        // The generic mill is what a new setup is on unless it says otherwise; a setup being
+        // changed is told which, so that one can be taken off a machine.
+        let machine = solidcraft_engine::cmd::BUILTIN_MACHINES.get(self.machine).map_or(solidcraft_engine::cmd::GENERIC_MILL, |m| m.id);
+        if self.editing.is_some() || machine != solidcraft_engine::cmd::GENERIC_MILL {
+            params["machine"] = json!(machine);
         }
         match &self.editing {
             // An empty material takes the setup's away.
@@ -996,6 +1027,8 @@ impl SetupForm {
     fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<SetupForm> {
         self.refresh(app);
         let origins: Vec<&str> = ORIGINS.iter().map(|o| tr(o.0)).collect();
+        let machines = machine_labels();
+        let machines: Vec<&str> = machines.iter().map(String::as_str).collect();
         let size = self.stock_size(units, decimals);
         let ready = self.placed.result.is_ok();
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
@@ -1006,6 +1039,7 @@ impl SetupForm {
             .actions(ok, tr("ui.cancel"), None)
             .show(ctx, ready, |ui| {
                 ui_kit::text_row(ui, tr_label("Name"), &mut self.name, &self.usual_name);
+                ui_kit::choice_row(ui, tr("manufacture.setup_machine"), "manufacture_setup_machine", &mut self.machine, &machines);
                 ui_kit::text_row(ui, tr("manufacture.setup_material"), &mut self.material, tr("manufacture.tool_material_hint"));
                 if self.material_unknown() {
                     ui_kit::text(ui, tr("manufacture.setup_material_unknown"), ui_kit::Text::Note("manufacture_setup_material_unknown"));

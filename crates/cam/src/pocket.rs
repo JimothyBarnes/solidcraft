@@ -468,7 +468,7 @@ impl PocketOp {
         // a far lighter cut, but in a corner of the pocket the tool for a moment cuts ahead of
         // itself as well as beside, and a feed worked out for the light cut would be several
         // times too much there.
-        let f = op_feeds(tool, Engagement { axial: deepest.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: deepest.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
         if finishes.iter().any(|(_, rounds)| rounds.iter().any(|r| r.leads.is_none())) {
             said.push(
                 "there is no room for the quarter turns on to a wall and off it: the finishing pass meets it straight across the stock there".into(),

@@ -244,7 +244,7 @@ impl SlotOp {
             }
             plans.push(Plan { line, levels, legs, width: m.width });
         }
-        let f = op_feeds(tool, Engagement { axial: deepest.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
+        let f = op_feeds(tool, Engagement { axial: deepest.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
 
         let Some(first) = plans.first().map(|plan| plan.line.start()) else {

@@ -23,6 +23,7 @@ mod engrave;
 mod face;
 mod feeds;
 mod gcode_reader;
+mod machine;
 mod manufacture;
 mod offset;
 mod placement;
@@ -47,6 +48,7 @@ pub use engrave::{DEFAULT_ENGRAVE_DEPTH, EngraveOp, Engraved, MAX_ENGRAVE_PIECES
 pub use face::{DEFAULT_FACE_CLEAR, DEFAULT_FACE_STEPOVER, FaceOp, FacePattern, Faced, MAX_FACE_LEVELS, MAX_FACE_PASSES};
 pub use feeds::GENERIC_MAX_RPM;
 pub use gcode_reader::{MAX_LINE_CHARS, MAX_LINES, ReadBack, ReadSettings, read as read_gcode};
+pub use machine::{BUILTIN_MACHINES, GENERIC_MILL, Machine, machine};
 
 pub use manufacture::{
     BoxAnchor, BoxOffsets, BoxSide, MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, MAX_DESIGN_TOOLS, MAX_OPERATIONS, MAX_REFERENCES, MAX_SETUPS,

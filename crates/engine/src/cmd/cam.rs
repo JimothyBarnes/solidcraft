@@ -44,10 +44,10 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("search?: words to look for in a tool's number (T3), name, kind and diameter, every one of them, in any case (default: every tool) → tools: [{number, name, kind, diameter, flutes, flute_length, overall_length, stick_out, operations: how many of the design's operations use it}] by number, lengths in mm; of: how many tools the design has"),
     CommandSpec::new("cam.setup.create", "New Setup", crate::checked!("cam.setup.create", setup_create)).icon("cam_setup").doc_only()
         .contract(&TypedContract::<CamSetupCreateParams>::new()).output(output_schema_for::<CamSetupWritten>)
-        .params("name?, machine?, wcs?, work_offset?: 1-6 (G54-G59), stock?, model_bodies?, fixture_bodies?, safe_heights? → id; defaults: stock 1 mm over on the sides and top, WCS at the stock's top centre, G54, clearance 25 mm, retract 5 mm"),
+        .params("name?, machine?: generic_mill (default, speeds to 10 000 rev/min) | haas_vf4ss (to 12 000), wcs?, work_offset?: 1-6 (G54-G59), stock?, model_bodies?, fixture_bodies?, safe_heights? → id; defaults: stock 1 mm over on the sides and top, WCS at the stock's top centre, G54, clearance 25 mm, retract 5 mm"),
     CommandSpec::new("cam.setup.edit", "Edit Setup", crate::checked!("cam.setup.edit", setup_edit)).icon("edit").doc_only()
         .contract(&TypedContract::<CamSetupEditParams>::new()).output(output_schema_for::<CamSetupWritten>)
-        .params("id, then any of name, machine, wcs, work_offset, stock, model_bodies, fixture_bodies, safe_heights → replaces those fields"),
+        .params("id, then any of name, machine (generic_mill | haas_vf4ss), wcs, work_offset, stock, model_bodies, fixture_bodies, safe_heights → replaces those fields"),
     CommandSpec::new("cam.setup.delete", "Delete Setup", crate::checked!("cam.setup.delete", setup_delete)).icon("delete").doc_only()
         .contract(&TypedContract::<CamSetupDeleteParams>::new()).output(output_schema_for::<CamSetupWritten>)
         .params("id → removes the setup and its operations; refused while a later setup takes its stock from it"),
@@ -296,6 +296,11 @@ fn apply(cmd: &str, setup: &mut Setup, f: SetupFields) -> Result<()> {
         setup.name = v;
     }
     if let Some(v) = f.machine {
+        // One of the machines this version knows (decision 0036 of the CAM work).
+        if solidcraft_cam::machine(Some(&v)).is_none() {
+            let known: Vec<&str> = solidcraft_cam::BUILTIN_MACHINES.iter().map(|m| m.id).collect();
+            return Err(bad(cmd, format!("there is no machine '{v}': one of {}", known.join(", "))));
+        }
         setup.machine = Some(v);
     }
     if let Some(v) = f.material {
@@ -1585,7 +1590,7 @@ fn work(
 }
 
 // The Manufacture types a view of a setup is made of, for the UI above the engine.
-pub use solidcraft_cam::{BodyPart, Drawn, Placement, ToolShape};
+pub use solidcraft_cam::{BUILTIN_MACHINES, BodyPart, Drawn, GENERIC_MILL, Machine, Placement, ToolShape, machine as manufacture_machine};
 
 /// Writes `bytes` to the file `path` in one step; a file already there is replaced only when
 /// `overwrite`. `what` names the content in the error.

@@ -133,3 +133,23 @@ fn a_placement_is_plain_json() {
     assert_eq!(json["clearance_z"], 25.0);
     assert_eq!(serde_json::from_value::<Placement>(json).unwrap(), placed);
 }
+
+#[test]
+fn a_setup_on_a_machine_is_kept_to_its_top_speed_and_an_unknown_machine_is_refused() {
+    // On no machine of its own a setup is on the generic mill; the Haas VF-4SS runs to 12 000.
+    let model = Bounds { min: Vec3 { x: 0.0, y: 0.0, z: 0.0 }, max: Vec3 { x: 60.0, y: 40.0, z: 20.0 } };
+    let mut setup = vise();
+    assert_eq!(setup.place(model).unwrap().max_rpm, 10_000.0);
+    setup.machine = Some("haas_vf4ss".into());
+    assert_eq!(setup.place(model).unwrap().max_rpm, 12_000.0);
+    setup.machine = Some("generic_mill".into());
+    assert_eq!(setup.place(model).unwrap().max_rpm, 10_000.0);
+    // A machine this version does not know: the setup can't be placed, and the reason names it.
+    setup.machine = Some("haas_umc750".into());
+    let why = setup.place(model).unwrap_err().to_string();
+    assert!(why.contains("haas_umc750") && why.contains("generic_mill, haas_vf4ss"), "{why}");
+    // A placement written before machines were known reads as the generic mill's.
+    let mut old = serde_json::to_value(vise().place(model).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("max_rpm");
+    assert_eq!(serde_json::from_value::<Placement>(old).unwrap().max_rpm, 10_000.0);
+}

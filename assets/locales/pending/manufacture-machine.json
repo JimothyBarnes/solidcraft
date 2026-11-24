@@ -1,0 +1,42 @@
+{
+  "en": {
+    "manufacture.machine_generic_mill": "Generic mill",
+    "manufacture.setup_machine": "Machine",
+    "manufacture.setup_machine_choice": "{name}, up to {rpm} rpm"
+  },
+  "ar": {
+    "manufacture.machine_generic_mill": "فريزة عامة",
+    "manufacture.setup_machine": "الآلة",
+    "manufacture.setup_machine_choice": "{name}، حتى {rpm} دورة/دقيقة"
+  },
+  "he": {
+    "manufacture.machine_generic_mill": "כרסומת כללית",
+    "manufacture.setup_machine": "מכונה",
+    "manufacture.setup_machine_choice": "{name}, עד {rpm} סל״ד"
+  },
+  "ja": {
+    "manufacture.machine_generic_mill": "汎用フライス盤",
+    "manufacture.setup_machine": "機械",
+    "manufacture.setup_machine_choice": "{name}（最高 {rpm} rpm）"
+  },
+  "vi": {
+    "manufacture.machine_generic_mill": "Máy phay chung",
+    "manufacture.setup_machine": "Máy",
+    "manufacture.setup_machine_choice": "{name}, tối đa {rpm} vòng/phút"
+  },
+  "zh": {
+    "manufacture.machine_generic_mill": "通用铣床",
+    "manufacture.setup_machine": "机床",
+    "manufacture.setup_machine_choice": "{name}，最高 {rpm} rpm"
+  },
+  "de": {
+    "manufacture.machine_generic_mill": "Allgemeine Fräsmaschine",
+    "manufacture.setup_machine": "Maschine",
+    "manufacture.setup_machine_choice": "{name}, bis {rpm} U/min"
+  },
+  "ko": {
+    "manufacture.machine_generic_mill": "일반 밀링 머신",
+    "manufacture.setup_machine": "기계",
+    "manufacture.setup_machine_choice": "{name}, 최대 {rpm} rpm"
+  }
+}

@@ -95,6 +95,13 @@ pub struct Placement {
     pub clearance_z: f64,
     /// The retract height, as Z in the WCS: the stock top plus the setup's retract.
     pub retract_z: f64,
+    /// The top spindle speed of the machine the setup is on, rev/min (decision 0036).
+    #[serde(default = "generic_max_rpm")]
+    pub max_rpm: f64,
+}
+
+fn generic_max_rpm() -> f64 {
+    crate::feeds::GENERIC_MAX_RPM
 }
 
 /// Whether `v` points along `axis` (it is checked to be finite and non-zero when the data is read).
@@ -156,6 +163,11 @@ impl Setup {
         let stock = stock.moved(neg(origin));
         let model = model.moved(neg(origin));
         let h = self.safe_heights;
+        let Some(machine) = crate::machine::machine(self.machine.as_deref()) else {
+            let id = self.machine.as_deref().unwrap_or_default();
+            let known: Vec<&str> = crate::machine::BUILTIN_MACHINES.iter().map(|m| m.id).collect();
+            return Err(Error::BadValue(format!("{what} is on machine '{id}', which this version does not know: one of {}", known.join(", "))));
+        };
         let placed = Placement {
             origin,
             x_axis: X,
@@ -165,6 +177,7 @@ impl Setup {
             stock,
             clearance_z: stock.max.z + h.clearance,
             retract_z: stock.max.z + h.retract,
+            max_rpm: machine.max_rpm,
         };
         placed.stock.check(&format!("{what}: the stock"))?;
         placed.model.check(&format!("{what}: the model"))?;

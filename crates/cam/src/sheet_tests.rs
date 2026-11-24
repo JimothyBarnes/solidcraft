@@ -19,6 +19,7 @@ fn block() -> Placement {
         stock: Bounds { min: p(-31.0, -21.0, -21.0), max: p(31.0, 21.0, 0.0) },
         clearance_z: 25.0,
         retract_z: 5.0,
+        max_rpm: 10_000.0,
     }
 }
 
