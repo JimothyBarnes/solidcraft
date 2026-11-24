@@ -2710,3 +2710,85 @@ fn a_pocket_is_finished_with_a_pass_along_its_walls_when_asked() {
     let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     assert!(posted["notes"].as_array().unwrap().is_empty() && posted["text"].as_str().unwrap().contains("(POCKET 1)"), "{posted}");
 }
+
+#[test]
+fn a_chamfer_breaks_the_edges_picked_and_a_point_on_the_model_says_which() {
+    use std::f64::consts::PI;
+    // The plate of the chamfer of all the edges: a pocket 50 x 40, 8 deep, about (-15, 0) in
+    // the WCS with a round post of 12 standing in its middle; a hole of 8 through the plate
+    // about (30, 20); and a recess 10 x 10, 1 deep, about (30, -20), not as deep as the tool's
+    // point goes. In the model the plate's corner is at the origin and its top at Z 20.
+    let mut s = plate();
+    boxed(&mut s, [10.0, 20.0, 12.0], [50.0, 40.0, 8.0], "cut");
+    run(&mut s, "solid.cylinder", json!({"diameter": 12, "height": 8, "base": [35, 40, 12], "axis": "Z", "operation": "join", "targets": ["Plate"]}));
+    run(&mut s, "solid.cylinder", json!({"diameter": 8, "height": 30, "base": [80, 60, -5], "axis": "Z", "operation": "cut", "targets": ["Plate"]}));
+    boxed(&mut s, [75.0, 15.0, 19.0], [10.0, 10.0, 1.0], "cut");
+    run(&mut s, "cam.tool.create", json!({"tool": chamfer10()}));
+    // What a chamfer with tool 6 can break besides the outside edge: the pocket's rim and the
+    // hole's, each named by a point in it; the recess is not one of them.
+    let asked = json!({"setup": "setup-1", "tool": 6});
+    let rims = crate::cmd::manufacture_rims(&s, &asked).unwrap();
+    assert_eq!(rims.len(), 2, "{rims:?}");
+    let in_pocket = |at: &[f64; 2]| (-40.0..=10.0).contains(&at[0]) && (-20.0..=20.0).contains(&at[1]) && (at[0] + 15.0).hypot(at[1]) > 6.0;
+    let in_hole = |at: &[f64; 2]| (at[0] - 30.0).hypot(at[1] - 20.0) < 4.0;
+    let (pocket, hole) = (rims.iter().position(in_pocket).unwrap(), rims.iter().position(in_hole).unwrap());
+    // A point of the model says which edge: the pocket's wall, its floor and the post's side
+    // are the pocket's rim; the hole's wall the hole's; the plate's own walls the outside edge.
+    let rim_at = |x: f64, y: f64, z: f64| crate::cmd::manufacture_rim_at(&s, &asked, solidcore_record::Vec3 { x, y, z }).unwrap();
+    assert_eq!(
+        (rim_at(10.0, 40.0, 15.0), rim_at(20.0, 30.0, 12.0), rim_at(41.0, 40.0, 15.0)),
+        (Some(pocket + 1), Some(pocket + 1), Some(pocket + 1))
+    );
+    assert_eq!((rim_at(84.0, 60.0, 10.0), rim_at(80.0, 56.0, 1.0)), (Some(hole + 1), Some(hole + 1)));
+    assert_eq!((rim_at(0.0, 40.0, 10.0), rim_at(50.0, 0.0, 5.0), rim_at(100.0, 30.0, 19.0)), (Some(0), Some(0), Some(0)));
+    // Neither: the plate's top and the post's (next to every edge), the recess's wall and its
+    // floor (the tool's point has no room there), off the part, and hostile points.
+    for (x, y, z) in [
+        (90.0, 70.0, 20.0),
+        (35.0, 40.0, 20.0),
+        (75.0, 20.0, 19.5),
+        (80.0, 20.0, 19.0),
+        (200.0, 0.0, 0.0),
+        (f64::NAN, 25.0, 12.0),
+        (65.0, f64::INFINITY, 12.0),
+        (65.0, 25.0, 1e300),
+    ] {
+        assert_eq!(rim_at(x, y, z), None, "{x} {y} {z}");
+    }
+    let nowhere = solidcore_record::Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    assert!(
+        crate::cmd::manufacture_rim_at(&s, &json!({"setup": "setup-9", "tool": 6}), nowhere)
+            .err()
+            .is_some_and(|why| why.contains("no setup 'setup-9'"))
+    );
+    assert!(crate::cmd::manufacture_rims(&s, &json!({"setup": "setup-1", "tool": 9})).err().is_some_and(|why| why.contains("no tool 9")));
+    // The hole's rim alone: 1 inside its wall, a circle of radius 3, and nothing else.
+    let op = json!({"setup": "setup-1", "tool": 6, "chamfer": {"edges": "picked", "openings": [rims[hole]]}});
+    assert_eq!(run(&mut s, "cam.op.chamfer", op)["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 6.0 * PI) && t["numbers"]["entries"].as_array().is_some_and(|e| e.len() == 1), "{}", t["numbers"]);
+    assert!(t["notes"].as_array().unwrap().is_empty(), "{}", t["notes"]);
+    // The outside edge and the pocket's rim (with the post's edge): 360 and the corners' quarter
+    // turns, 172 inside the pocket's wall, and a circle of radius 7 round the post.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "picked", "outside": true, "openings": [rims[pocket]]}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["round"], 360.0 + 2.0 * PI + 172.0 + 14.0 * PI), "{}", t["numbers"]);
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.2}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let kept = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["operation"]["chamfer"].clone();
+    assert_eq!((kept["edges"].clone(), kept["outside"].clone(), kept["openings"].clone()), (json!("picked"), json!(true), json!([rims[pocket]])));
+    // Refused, with why: a point where no rim can be broken (the plate's top, the recess),
+    // nothing picked, and a pick without the word for it.
+    for at in [json!([40, 30]), json!([30, -20])] {
+        let op = json!({"id": "op-1", "chamfer": {"edges": "picked", "openings": [at]}});
+        run(&mut s, "cam.op.edit", op);
+        let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+        assert!(why.contains("there is no opening at X") && why.contains("whose rim the tool can break"), "{at}: {why}");
+    }
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "picked"}})).contains("no edge is picked"));
+    assert!(refused(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"outside": true}})).contains("they go with edges: picked"));
+    assert!(
+        refused(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6, "chamfer": {"edges": "all", "openings": [[0, 0]]}}))
+            .contains("they go with edges: picked")
+    );
+}

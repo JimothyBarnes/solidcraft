@@ -95,6 +95,7 @@ impl Dialog {
             Dialog::Bore(_) => true,
             Dialog::Slot(form) => form.editing.is_none(),
             Dialog::Contour(form) => form.editing.is_none() && form.inside(),
+            Dialog::Chamfer(form) => form.editing.is_none(),
             _ => false,
         }
     }

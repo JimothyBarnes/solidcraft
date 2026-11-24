@@ -578,8 +578,10 @@ pub struct CamOpChamferParams {
     /// `{width?: mm, the chamfer seen from above (default 0.5), tip_below?: mm the tool's tip is
     /// below the chamfer's lower edge (default 1), top?: Z of the edge that is chamfered (default
     /// the model's top), edges?: outside (default) | all (the rims of the openings in the part's
-    /// top and what stands in them too), direction?: climb | conventional, lead?: mm, the radius
-    /// of the arcs on to the wall and off it, rpm?, feed?}`; every field has a default.
+    /// top and what stands in them too) | picked (then outside?: true for the outside edge, and
+    /// openings?: [[x, y], …], a point in each opening whose rim is broken, in the WCS),
+    /// direction?: climb | conventional, lead?: mm, the radius of the arcs on to the wall and off
+    /// it, rpm?, feed?}`; every field has a default.
     #[serde(default)]
     pub chamfer: Option<Value>,
 }

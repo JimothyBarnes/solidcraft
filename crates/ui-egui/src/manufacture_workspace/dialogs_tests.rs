@@ -2809,3 +2809,80 @@ fn pocket_takes_a_finishing_pass_when_one_is_asked_for() {
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["finish"], json!(null));
 }
+
+#[test]
+fn chamfer_takes_the_edges_clicked_on_the_model() {
+    use std::f64::consts::PI;
+    let mut h = harness();
+    // The block (60 x 40 x 20) with a pocket 30 x 20, 6 deep, and a hole of 8 through it, and a
+    // 10 mm, 90 degree chamfer mill (T1).
+    block(&mut h);
+    h.app.run("solid.box", json!({"length": 30, "width": 20, "height": 6, "corner": [5, 10, 14], "operation": "cut"})).unwrap();
+    h.app.run("solid.cylinder", json!({"diameter": 8, "height": 30, "base": [48, 20, -5], "operation": "cut"})).unwrap();
+    add_tool(&mut h, "chamfer_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    from_the_corner(&mut h);
+    ribbon(&mut h, "cam.op.chamfer");
+    h.frames(3);
+    let round = |h: &mut Harness| chamfer_form(h).worked.get().and_then(|(_, preview)| preview.numbers["round"].as_f64()).unwrap();
+    assert_eq!(chamfer_form(&mut h).edges, 0);
+    assert!(!crate::manufacture_workspace::picking::active(&h.app) && h.widget(tr("manufacture.chamfer_pick_hint")).is_some());
+    // What the corner's view shows: the pocket's wall at X 5 and its floor, the far side of the
+    // hole's wall just under its mouth, the block's own walls at X 60 and Y 0, and its top.
+    let (wall, floor, hole) = ([5.0, 20.0, 17.0], [20.0, 20.0, 14.0], [48.0 - 8.0_f64.sqrt(), 20.0 + 8.0_f64.sqrt(), 19.0]);
+    let (right, front, top) = ([60.0, 20.0, 10.0], [30.0, 0.0, 10.0], [55.0, 35.0, 20.0]);
+    // The pocket's wall: its rim alone, 1 inside the wall (28 x 18: 92), a choice the row gains.
+    click_model(&mut h, wall);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len(), form.pick_missed()), (2, false, 1, false));
+    assert_eq!(form.params()["chamfer"]["edges"], "picked");
+    assert!((round(&mut h) - 92.0).abs() < 1e-6, "{}", round(&mut h));
+    assert!(h.widget(tr("manufacture.chamfer_picked_note")).is_some());
+    // The block's top says no edge: nothing changes, and the form says so.
+    click_model(&mut h, top);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.picked.1.len(), form.pick_missed()), (2, 1, true));
+    assert!(h.widget(tr("manufacture.chamfer_pick_missed")).is_some());
+    // A wall of the block: the outside edge too, 200 and its four corners.
+    click_model(&mut h, right);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len(), form.pick_missed()), (2, true, 1, false));
+    assert!((round(&mut h) - (200.0 + 2.0 * PI + 92.0)).abs() < 1e-6, "{}", round(&mut h));
+    // The hole too: every edge, which is the row's own second choice.
+    click_model(&mut h, hole);
+    assert_eq!(chamfer_form(&mut h).edges, 1);
+    assert!((round(&mut h) - (200.0 + 2.0 * PI + 92.0 + 6.0 * PI)).abs() < 1e-6, "{}", round(&mut h));
+    // The block's other wall takes the outside edge out again; the pocket's floor, its rim.
+    click_model(&mut h, front);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len()), (2, false, 2));
+    click_model(&mut h, floor);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len()), (2, false, 1));
+    assert!((round(&mut h) - 6.0 * PI).abs() < 1e-6, "{}", round(&mut h));
+    // A choice from the row's list forgets the picks.
+    chamfer_form(&mut h).edges = 0;
+    h.frames(3);
+    assert_eq!((chamfer_form(&mut h).edges, h.app.dialog.as_ref().map(|d| d.inputs[0].items.len())), (0, Some(0)));
+    assert!((round(&mut h) - (200.0 + 2.0 * PI)).abs() < 1e-6);
+    // Created on the hole's rim clicked: the operation breaks that edge alone, and the picking
+    // stops.
+    click_model(&mut h, hole);
+    assert_eq!(chamfer_form(&mut h).edges, 2);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert!(h.app.dialog.is_none());
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"].clone();
+    assert_eq!((kept["edges"].clone(), kept.get("outside"), kept["openings"].as_array().map(Vec::len)), (json!("picked"), None, Some(1)), "{kept}");
+    let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // Changed from its row it keeps the edge picked, whatever else is changed.
+    row_menu(&mut h, "Chamfer 1 (T1)", "manufacture.edit");
+    assert_eq!((open(&h), chamfer_form(&mut h).edges, chamfer_form(&mut h).picked.1.len()), ("chamfer", 2, 1));
+    (chamfer_form(&mut h).width, chamfer_form(&mut h).typed_width) = (0.8, true);
+    h.frames(3);
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let after = data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"].clone();
+    assert_eq!((after["edges"].clone(), after["openings"].clone(), after["width"].clone()), (json!("picked"), kept["openings"].clone(), json!(0.8)));
+}

@@ -92,7 +92,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: a flat or bull-nose end mill no wider than the slots, slot: {slots: [[x, y]] a point in each slot, top?, bottom?: Z (default each slot's floor, or the part's bottom where it goes through), stepdown?, ramp_angle?, rpm?, feed?} → id of the new operation: each slot (read from the model at its point when the toolpath is worked out) milled along its middle line, the tool going down along the line to and fro no steeper than the ramp angle and once along it at each level; a tool narrower than a slot leaves the same on each wall, which the toolpath's notes say"),
     CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("cam_chamfer").doc_only()
         .contract(&TypedContract::<CamOpChamferParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), edges?: outside | all, direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge; with edges all, round the inside of every opening in the part's top and round what stands in it as well, but for an opening too narrow for the tool or not open as far down as its point, which is left sharp and said"),
+        .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), edges?: outside | all | picked (with outside?: true and openings?: [[x, y]] a point in each opening), direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge; with edges all, round the inside of every opening in the part's top and round what stands in it as well, but for an opening too narrow for the tool or not open as far down as its point, which is left sharp and said; with edges picked, the outside edge only when asked and the rims of the openings named"),
     CommandSpec::new("cam.op.toolpath", "Operation Toolpath", crate::checked!("cam.op.toolpath", op_toolpath_command)).icon("inspect").noundo().read_only()
         .contract(&TypedContract::<CamOpToolpathParams>::new()).output(output_schema_for::<CamOpToolpath>)
         .params("id: an operation → toolpath worked out now from its parameters, the setup's placement and the tool, with feed_length, rapid_length, cut_minutes, min, max, numbers, notes"),
@@ -692,6 +692,12 @@ fn rims_of(
     .map_err(said)
 }
 
+/// Whether `point` is in the opening `rim` is the air of: inside its wall, on the air or on what
+/// stands in it.
+fn in_rim(rim: &solidcore_record::Region2, point: solidcore_record::Vec2) -> bool {
+    solidcore_record::Region2 { outer: rim.outer.ccw(), holes: Vec::new() }.contains(point)
+}
+
 /// The rims and the openings read lately ([`rims_of`], [`openings_at`]), each under a number made
 /// of what the reading depends on ([`reading_key`]).
 static RIMS: std::sync::Mutex<Vec<(u64, (Vec<solidcore_record::Region2>, usize))>> = std::sync::Mutex::new(Vec::new());
@@ -940,6 +946,105 @@ pub fn manufacture_slot_at(s: &Session, id: &str, at: solidcore_record::Vec3) ->
     let found = found_regions(s, CMD, setup, &p)?;
     let slots = found.iter().map(|(_, (_, opening))| opening).filter(|opening| solidcraft_cam::slot_line(&opening.region).is_ok());
     Ok(super::cam_pockets::picked(slots, in_wcs(&p, at), p.model.max.z))
+}
+
+/// The edges a chamfer of `params` (as `cam.op.chamfer` takes them; whichever edges they name)
+/// could break, in the setup's WCS: where the setup sits, the Z of the edge, the chamfer's
+/// width, the part's outline at the chamfer's lower edge, and the openings in the part's top
+/// whose rims the tool can break (each open as far down as its point goes).
+type ChamferEdgesFound = (Placement, f64, f64, Vec<solidcore_record::Loop2>, Vec<solidcore_record::Region2>);
+
+fn chamfer_edges(s: &Session, params: &Value) -> std::result::Result<ChamferEdgesFound, String> {
+    const CMD: &str = "cam.op.chamfer";
+    let (id, _, number, operation) = proposed(CMD, given(params)).map_err(said)?;
+    let OperationKind::Chamfer { chamfer } = operation else { return Err("the parameters are not a chamfer's".into()) };
+    // Whichever edges are named, the heights are the same.
+    let chamfer = ChamferOp { edges: ChamferEdges::All, outside: false, openings: Vec::new(), ..chamfer };
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let tool = d.tools.iter().find(|t| t.number == number).ok_or_else(|| format!("the design has no tool {number}"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let wall = chamfer.wall_height(tool, &p).map_err(|e| e.to_string())?;
+    let tip = chamfer.tip_height(tool, &p).map_err(|e| e.to_string())?;
+    let (_, outline) = outline_at(s, CMD, setup, &p, Some(wall - CHAMFER_WALL_BELOW))?;
+    let (rims, _) = rims_of(s, CMD, setup, &p, wall - CHAMFER_WALL_BELOW, tip)?;
+    let top = chamfer.top.unwrap_or(p.model.max.z);
+    Ok((p, top, chamfer.width.unwrap_or(solidcraft_cam::DEFAULT_CHAMFER_WIDTH), outline, rims))
+}
+
+/// The openings whose rims a chamfer of `params` (as `cam.op.chamfer` takes them) can break: a
+/// point in each, X and Y in the setup's WCS, as the chamfer's `openings` takes them (decision
+/// 0030 of the CAM work). It reads the design and changes nothing.
+pub fn manufacture_rims(s: &Session, params: &Value) -> std::result::Result<Vec<[f64; 2]>, String> {
+    let (.., rims) = chamfer_edges(s, params)?;
+    Ok(rims
+        .iter()
+        .map(|rim| {
+            let air = solidcore_record::Region2 { outer: rim.outer.ccw(), holes: rim.holes.iter().map(|island| island.ccw().reversed()).collect() };
+            // To the micron's thousandth: a point well inside stays inside, and reads as a number.
+            let at = air.interior_point();
+            [(at.x * 1e6).round() / 1e6, (at.y * 1e6).round() / 1e6]
+        })
+        .collect())
+}
+
+/// How far a picked point may be from an edge's wall and still be on it, mm, more than the
+/// chamfer's width: a model that has the chamfer on it is clicked on the chamfer's own face.
+const RIM_PICK_REACH: f64 = 0.05;
+
+/// Which edge of a chamfer of `params` the point `at` of the model was picked for: 0 the
+/// outside edge (the point is on the part's outer wall), `k + 1` the rim of the opening `k` of
+/// [`manufacture_rims`] (on its wall, on its floor, or on what stands in it), `None` where it
+/// says neither: on the part's top, which is next to every edge, or in an opening the tool's
+/// point has no room in. The nearest wall wins. It reads the design and changes nothing.
+pub fn manufacture_rim_at(s: &Session, params: &Value, at: solidcore_record::Vec3) -> std::result::Result<Option<usize>, String> {
+    let (p, top, width, outline, rims) = chamfer_edges(s, params)?;
+    let at = in_wcs(&p, at);
+    let q = solidcore_record::Vec2 { x: at.x, y: at.y };
+    let reach = width + RIM_PICK_REACH;
+    let on_the_part = at.z < top - 1e-6
+        && at.z >= p.model.min.z - reach
+        && (p.model.min.x - reach..=p.model.max.x + reach).contains(&q.x)
+        && (p.model.min.y - reach..=p.model.max.y + reach).contains(&q.y);
+    if !on_the_part {
+        return Ok(None);
+    }
+    let within = |l: &solidcore_record::Loop2| solidcore_record::Region2 { outer: l.ccw(), holes: Vec::new() }.contains(q);
+    let from = |l: &solidcore_record::Loop2| {
+        l.segs
+            .iter()
+            .map(|seg| {
+                let on = seg.point_at(seg.closest_param(q));
+                (on.x - q.x).hypot(on.y - q.y)
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    // The part's own outside: the outlines that are in no other (what stands in a pocket has
+    // an outline of its own just under the top, which is an inside edge).
+    let outer: Vec<&solidcore_record::Loop2> = outline
+        .iter()
+        .filter(|l| {
+            l.segs.first().is_some_and(|first| {
+                !outline.iter().any(|other| {
+                    !std::ptr::eq(other, *l) && solidcore_record::Region2 { outer: other.ccw(), holes: Vec::new() }.contains(first.start())
+                })
+            })
+        })
+        .collect();
+    let outside = outer.iter().map(|l| from(l)).fold(f64::INFINITY, f64::min);
+    let nearest = rims
+        .iter()
+        .enumerate()
+        .map(|(k, rim)| (k, std::iter::once(&rim.outer).chain(&rim.holes).map(from).fold(f64::INFINITY, f64::min)))
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    Ok(match nearest {
+        // On a wall, or on a chamfer the model has there: the nearer wall's edge.
+        Some((k, far)) if far <= reach && far <= outside => Some(k + 1),
+        _ if outside <= reach => Some(0),
+        // Away from every wall: on an opening's floor, or on the part's outside lower down.
+        _ => rims.iter().position(|rim| within(&rim.outer)).map(|k| k + 1).or_else(|| (!outer.iter().any(|l| within(l))).then_some(0)),
+    })
 }
 
 /// The openings the setup `setup` has for an inside contour, as a form or a script reads them:
@@ -1301,12 +1406,42 @@ fn work(
             // The wall is read a hair below the chamfer's lower edge, where the model has it
             // whether or not it has the chamfer.
             let wall = chamfer.wall_height(tool, &placement).map_err(failed)?;
-            let (_, outline) = outline_at(s, cmd, setup, &placement, Some(wall - CHAMFER_WALL_BELOW)).map_err(|e| bad(cmd, of(op, e)))?;
-            let done = if chamfer.edges == ChamferEdges::All {
+            // Picked edges leave the outside one out unless it is one of them: the part's
+            // outline is read only when it is gone round.
+            let picked = chamfer.edges == ChamferEdges::Picked;
+            let outline = if !picked || chamfer.outside {
+                outline_at(s, cmd, setup, &placement, Some(wall - CHAMFER_WALL_BELOW)).map_err(|e| bad(cmd, of(op, e)))?.1
+            } else {
+                Vec::new()
+            };
+            let done = if chamfer.edges == ChamferEdges::All || (picked && !chamfer.openings.is_empty()) {
                 // The rims of the openings in the part's top too, each read at the same height
                 // and open as far down as the tool's point goes.
                 let tip = chamfer.tip_height(tool, &placement).map_err(failed)?;
                 let (openings, left_out) = rims_of(s, cmd, setup, &placement, wall - CHAMFER_WALL_BELOW, tip).map_err(|e| bad(cmd, of(op, e)))?;
+                // Picked: the rims named by a point in each, in the chamfer's own order.
+                let (openings, left_out) = if picked {
+                    let mut named = Vec::with_capacity(chamfer.openings.len());
+                    for at in &chamfer.openings {
+                        let point = solidcore_record::Vec2 { x: at[0], y: at[1] };
+                        let Some(rim) = openings.iter().find(|rim| in_rim(rim, point)) else {
+                            return Err(bad(
+                                cmd,
+                                of(
+                                    op,
+                                    format!(
+                                        "there is no opening at X {} Y {} whose rim the tool can break: none in the part's top there, or one not open as far down as the tool's point goes",
+                                        at[0], at[1]
+                                    ),
+                                ),
+                            ));
+                        };
+                        named.push(rim.clone());
+                    }
+                    (named, 0)
+                } else {
+                    (openings, left_out)
+                };
                 let mut done = chamfer.toolpath_round(start, tool, &placement, material, &outline, &openings).map_err(failed)?;
                 if left_out > 0 {
                     done.notes.push(format!(

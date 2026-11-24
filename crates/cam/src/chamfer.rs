@@ -52,6 +52,10 @@ pub enum ChamferEdges {
     /// The outside edge, and the rims of the openings in the part's top with the edges of
     /// whatever stands in them.
     All,
+    /// The edges picked: the outside edge when the chamfer says so ([`ChamferOp::outside`]), and
+    /// the rims of the openings it names by a point in each ([`ChamferOp::openings`]), with the
+    /// edges of whatever stands in those.
+    Picked,
 }
 
 /// A chamfer operation's parameters, as the design keeps them. Every one has a default.
@@ -70,6 +74,13 @@ pub struct ChamferOp {
     /// Which edges at that height: the outside one alone unless told otherwise.
     #[serde(default)]
     pub edges: ChamferEdges,
+    /// With picked edges: whether the outside edge of the part is one of them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
+    /// With picked edges: a point in each opening of the part's top whose rim is broken, X and Y
+    /// in the WCS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openings: Vec<[f64; 2]>,
     #[serde(default)]
     pub direction: CutDirection,
     /// The radius of the quarter turns on to the wall and off it, mm; `None` for the wider of a
@@ -139,6 +150,16 @@ impl ChamferOp {
         }
         if !self.lead.is_none_or(|v| (0.0..=MAX_LEAVE).contains(&v)) {
             return bad(format!("the radius of the arcs in and out must be 0 to {MAX_LEAVE} mm"));
+        }
+        if self.edges == ChamferEdges::Picked {
+            if !self.outside && self.openings.is_empty() {
+                return bad("no edge is picked: the outside edge (outside: true), or a point in an opening (openings)".into());
+            }
+            if self.openings.len() > MAX_CHAMFER_OUTLINES || !self.openings.iter().flatten().all(|v| v.abs() <= MAX_COORDINATE) {
+                return bad(format!("the openings picked: at most {MAX_CHAMFER_OUTLINES} points, each within {MAX_COORDINATE} mm"));
+            }
+        } else if self.outside || !self.openings.is_empty() {
+            return bad("`outside` and `openings` say which edges are picked: they go with edges: picked".into());
         }
         if !self.rpm.is_none_or(|r| r > 0.0 && r <= MAX_SPINDLE_RPM) {
             return bad(format!("rpm must be above 0 and at most {MAX_SPINDLE_RPM}"));
@@ -218,6 +239,11 @@ impl ChamferOp {
         if self.edges == ChamferEdges::Outside && !openings.is_empty() {
             return bad("openings are for a chamfer of all the edges: the outside edge alone is the part's own outline".into());
         }
+        if self.edges == ChamferEdges::Picked && openings.len() != self.openings.len() {
+            return bad(format!("{} openings were read from the model for the chamfer's {} points", openings.len(), self.openings.len()));
+        }
+        // Picked edges leave the outside one out unless it is one of them.
+        let round_the_part = self.edges != ChamferEdges::Picked || self.outside;
         let loops_inside = |opening: &Region2| std::iter::once(&opening.outer).chain(&opening.holes).map(|l| l.segs.len()).sum::<usize>();
         if openings.len() > MAX_CHAMFER_OUTLINES || openings.iter().map(loops_inside).sum::<usize>() > MAX_OFFSET_SEGMENTS {
             return bad(format!("the openings to chamfer: at most {MAX_CHAMFER_OUTLINES}, of {MAX_OFFSET_SEGMENTS} segments together"));
@@ -228,7 +254,7 @@ impl ChamferOp {
         if !(retract - top > SAME_HEIGHT) {
             return bad(format!("the retract height ({retract} mm) must be above the chamfered edge ({top} mm)"));
         }
-        if outline.is_empty() {
+        if round_the_part && outline.is_empty() {
             return bad("there is no outline to chamfer".into());
         }
         if outline.len() > MAX_CHAMFER_OUTLINES || outline.iter().map(|l| l.segs.len()).sum::<usize>() > MAX_OFFSET_SEGMENTS {
@@ -239,11 +265,11 @@ impl ChamferOp {
         let within = |k: usize, l: &Loop2| {
             l.segs.first().is_some_and(|first| outline.iter().enumerate().any(|(other, o)| other != k && winding(first.start(), o) != 0))
         };
-        let outside: Vec<&Loop2> = outline.iter().enumerate().filter(|(k, l)| !within(*k, l)).map(|(_, l)| l).collect();
-        let islands = outline.len() - outside.len();
+        let outside: Vec<&Loop2> = outline.iter().enumerate().filter(|(k, l)| round_the_part && !within(*k, l)).map(|(_, l)| l).collect();
+        let islands = if round_the_part { outline.len() - outside.len() } else { 0 };
         let regions: Vec<Region2> = outside.iter().map(|l| Region2 { outer: (*l).clone(), holes: Vec::new() }).collect();
         let moved = moved_at_least(&regions, -shape.offset).map_err(|e| Error::BadValue(format!("the part's outline: {e}")))?;
-        if moved.is_empty() {
+        if round_the_part && moved.is_empty() {
             return bad("the outline left nothing to go round".into());
         }
         // The tool goes down where the arc on to the wall begins: nowhere beside the stock, as the
@@ -271,7 +297,13 @@ impl ChamferOp {
         let f = op_feeds(tool, Engagement { axial: shape.leg.max(1e-4), radial: g.diameter }, material, self.rpm, self.feed)?;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
 
-        let Some(first) = rounds.first().map(|r| r.entry) else { return bad("the outline left nothing to go round".into()) };
+        let Some(first) = rounds.first().map(|r| r.entry) else {
+            return bad(if round_the_part {
+                "the outline left nothing to go round".into()
+            } else {
+                format!("tool {} does not fit in any opening that is picked: there is nothing to go round", tool.number)
+            });
+        };
         let mut moves = vec![Move::ToolChange { tool: tool.number }, Move::Spindle { rpm: f.rpm, direction: SpindleDirection::Clockwise }];
         if tool.coolant != Coolant::Off {
             moves.push(Move::Coolant { mode: tool.coolant });

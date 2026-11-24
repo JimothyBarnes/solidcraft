@@ -391,6 +391,11 @@ fn hostile_numbers_never_panic_and_a_chamfer_is_plain_json() {
             }
             let _ = chamfered(&op, &chamfer10());
         }
+        // Picked edges of hostile numbers: points, and openings read for them.
+        let picked = ChamferOp { edges: ChamferEdges::Picked, openings: vec![[v, v]], ..ChamferOp::default() };
+        let odd = Region2 { outer: rectangle((v, 2.0), (-8.0, v)), holes: Vec::new() };
+        let _ = picked.toolpath_round(None, &chamfer10(), &faced_block(), Some("aluminium"), &[block_outline()], &[odd]);
+        let _ = picked.toolpath_round(None, &chamfer10(), &faced_block(), Some("aluminium"), &[], &[]);
         for size in 0..4 {
             let mut odd = chamfer10();
             match size {
@@ -628,4 +633,72 @@ fn an_opening_the_tool_does_not_fit_in_is_left_sharp_and_said() {
     let op: ChamferOp = serde_json::from_str(r#"{"edges": "all"}"#).unwrap();
     assert_eq!((op.edges, ChamferOp::default().edges), (ChamferEdges::All, ChamferEdges::Outside));
     assert!(serde_json::from_str::<ChamferOp>(r#"{"edges": "inside"}"#).is_err());
+}
+
+#[test]
+fn picked_edges_are_the_only_ones_broken() {
+    // The block with the pocket X -22 to 2, Y -8 to 8 in its top, and the pocket's rim alone
+    // picked, by a point in it. The tool goes round inside the pocket as it does for all the
+    // edges (down at (-11, -6), 72 round, off at (-9, -6)) and nowhere round the block.
+    let pocket = Region2 { outer: rectangle((-22.0, 2.0), (-8.0, 8.0)), holes: Vec::new() };
+    let picked = |outside: bool, points: Vec<[f64; 2]>, regions: &[Region2]| {
+        ChamferOp { edges: ChamferEdges::Picked, outside, openings: points, ..ChamferOp::default() }.toolpath_round(
+            None,
+            &chamfer10(),
+            &faced_block(),
+            Some("aluminium"),
+            &[block_outline()],
+            regions,
+        )
+    };
+    let d = picked(false, vec![[-10.0, 0.0]], std::slice::from_ref(&pocket)).unwrap();
+    assert_eq!((d.entries.clone(), d.leads.clone(), d.z), (vec![[-11.0, -6.0]], vec![1.0], -1.5));
+    assert!(close(d.round, 72.0) && d.notes.is_empty(), "{} {:?}", d.round, d.notes);
+    let mut at = d.toolpath.start;
+    for m in &d.toolpath.moves {
+        at = m.end(at);
+        assert!(
+            (-21.0 - 1e-9..=1.0 + 1e-9).contains(&at.x) && (-7.0 - 1e-9..=7.0 + 1e-9).contains(&at.y),
+            "{m:?} ends at {at:?}, outside the pocket"
+        );
+    }
+    // With the outside edge picked as well it is the chamfer of all the edges, move for move;
+    // the outside edge alone, picked, is the chamfer as it is with no word about edges.
+    let both = picked(true, vec![[-10.0, 0.0]], std::slice::from_ref(&pocket)).unwrap();
+    let all = all_round(&ChamferOp::default(), std::slice::from_ref(&pocket)).unwrap();
+    assert!(same_moves(&both.toolpath.moves, &all.toolpath.moves), "{:#?}", both.toolpath.moves);
+    let outside = picked(true, vec![], &[]).unwrap();
+    let alone = chamfered(&ChamferOp::default(), &chamfer10()).unwrap();
+    assert!(same_moves(&outside.toolpath.moves, &alone.toolpath.moves), "{:#?}", outside.toolpath.moves);
+    // The rim alone needs no outline of the part at all.
+    let rim = ChamferOp { edges: ChamferEdges::Picked, openings: vec![[-10.0, 0.0]], ..ChamferOp::default() };
+    let d = rim.toolpath_round(None, &chamfer10(), &faced_block(), Some("aluminium"), &[], std::slice::from_ref(&pocket)).unwrap();
+    assert!(close(d.round, 72.0));
+    // What is refused, and why.
+    let why = |r: Result<Chamfered>| r.unwrap_err().to_string();
+    assert!(why(picked(false, vec![], &[])).contains("no edge is picked"));
+    assert!(
+        why(picked(false, vec![[-10.0, 0.0], [20.0, 0.0]], std::slice::from_ref(&pocket)))
+            .contains("1 openings were read from the model for the chamfer's 2 points")
+    );
+    assert!(why(picked(false, vec![[f64::NAN, 0.0]], std::slice::from_ref(&pocket))).contains("the openings picked"));
+    // A hole 1.5 across: the tool's centre has nowhere to be 1 inside its wall.
+    let narrow = Region2 { outer: circle(20.0, 0.0, 0.75), holes: Vec::new() };
+    assert!(why(picked(false, vec![[20.0, 0.0]], std::slice::from_ref(&narrow))).contains("does not fit in any opening that is picked"));
+    // ...and with the pocket picked too it is left sharp, and said.
+    let d = picked(false, vec![[-10.0, 0.0], [20.0, 0.0]], &[pocket.clone(), narrow]).unwrap();
+    assert!(close(d.round, 72.0) && d.notes.iter().any(|n| n.contains("1 opening(s) too narrow")), "{:?}", d.notes);
+    for odd in [
+        ChamferOp { outside: true, ..ChamferOp::default() },
+        ChamferOp { openings: vec![[0.0, 0.0]], ..ChamferOp::default() },
+        ChamferOp { edges: ChamferEdges::All, outside: true, ..ChamferOp::default() },
+    ] {
+        assert!(odd.validate(&chamfer10()).unwrap_err().to_string().contains("they go with edges: picked"), "{odd:?}");
+    }
+    // As the design keeps it: a chamfer with no picked edges has no word of them, as before.
+    let kept = serde_json::to_value(ChamferOp::default()).unwrap();
+    assert!(kept.get("outside").is_none() && kept.get("openings").is_none() && kept["edges"] == "outside", "{kept}");
+    let op: ChamferOp = serde_json::from_str(r#"{"edges": "picked", "outside": true, "openings": [[1, 2]]}"#).unwrap();
+    assert_eq!((op.edges, op.outside, op.openings.clone()), (ChamferEdges::Picked, true, vec![[1.0, 2.0]]));
+    assert_eq!(serde_json::from_value::<ChamferOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
 }
