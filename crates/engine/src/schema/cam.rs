@@ -458,6 +458,9 @@ pub struct CamOpEditParams {
     /// A slot operation's parameters, whole, as `cam.op.slot` takes them.
     #[serde(default)]
     pub slot: Option<Value>,
+    /// An engraving's parameters, whole, as `cam.op.engrave` takes them.
+    #[serde(default)]
+    pub engrave: Option<Value>,
     /// A chamfer's parameters, whole, as `cam.op.chamfer` takes them.
     #[serde(default)]
     pub chamfer: Option<Value>,
@@ -563,6 +566,34 @@ pub struct CamOpSlotParams {
     /// the part's bottom where it goes through), stepdown?: mm (default half the tool's
     /// diameter), ramp_angle?: radians (default 3 degrees), rpm?, feed?}`.
     pub slot: Value,
+}
+
+/// Add an engraving to a setup (decision 0032 of the CAM work).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamOpEngraveParams {
+    /// The setup's id.
+    pub setup: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of the design's tool numbers: an engraving tool, a chamfer mill, a spot drill or an
+    /// end mill.
+    pub tool: u32,
+    /// `{sketch: the name of the sketch whose drawn curves are followed (its text too), depth?:
+    /// mm below the surface (default 0.2), top?: Z of the surface in the WCS (default the
+    /// sketch's own plane), rpm?, feed?}`.
+    pub engrave: Value,
+}
+
+/// A sketch an engraving can follow in a setup: one whose plane faces the tool.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct FoundSketch {
+    pub name: String,
+    /// How many pieces of curve it comes to, and how long they are together, mm.
+    pub pieces: usize,
+    pub length: f64,
+    /// The Z of its plane in the setup's WCS.
+    pub z: f64,
 }
 
 /// Add a chamfer to a setup (decision 0018 of the CAM work).

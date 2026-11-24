@@ -90,6 +90,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.op.slot", "Slot", crate::checked!("cam.op.slot", op_slot)).icon("cam_slot").doc_only()
         .contract(&TypedContract::<crate::schema::cam::CamOpSlotParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill no wider than the slots, slot: {slots: [[x, y]] a point in each slot, top?, bottom?: Z (default each slot's floor, or the part's bottom where it goes through), stepdown?, ramp_angle?, rpm?, feed?} → id of the new operation: each slot (read from the model at its point when the toolpath is worked out) milled along its middle line, the tool going down along the line to and fro no steeper than the ramp angle and once along it at each level; a tool narrower than a slot leaves the same on each wall, which the toolpath's notes say"),
+    CommandSpec::new("cam.op.engrave", "Engrave", crate::checked!("cam.op.engrave", op_engrave)).icon("cam_engrave").doc_only()
+        .contract(&TypedContract::<crate::schema::cam::CamOpEngraveParams>::new()).output(output_schema_for::<CamOpWritten>)
+        .params("setup: id, name?, tool: an engraving tool, a chamfer mill, a spot drill or an end mill, engrave: {sketch: the sketch's name, depth?: mm below the surface (default 0.2), top?: Z of the surface (default the sketch's own plane), rpm?, feed?} → id of the new operation: the tool's centre along every drawn curve of the sketch, its text too (read from the sketch when the toolpath is worked out), curves that meet cut in one go; the sketch's plane has to face the tool"),
     CommandSpec::new("cam.op.chamfer", "Chamfer", crate::checked!("cam.op.chamfer", op_chamfer)).icon("cam_chamfer").doc_only()
         .contract(&TypedContract::<CamOpChamferParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a chamfer mill or a spot drill, chamfer?: {width?: mm seen from above (default 0.5), tip_below?: mm the tool's tip is below the chamfer (default 1), top?: Z of the edge (default the model's top), edges?: outside | all | picked (with outside?: true and openings?: [[x, y]] a point in each opening), direction?: climb | conventional, lead?, rpm?, feed?} → id of the new operation: once round the part's wall (read from the model at the chamfer's lower edge when the toolpath is worked out), the tool's cone cutting the top outside edge; with edges all, round the inside of every opening in the part's top and round what stands in it as well, but for an opening too narrow for the tool or not open as far down as its point, which is left sharp and said; with edges picked, the outside edge only when asked and the rims of the openings named"),
@@ -948,6 +951,81 @@ pub fn manufacture_slot_at(s: &Session, id: &str, at: solidcore_record::Vec3) ->
     Ok(super::cam_pockets::picked(slots, in_wcs(&p, at), p.model.max.z))
 }
 
+/// How near a free-form curve the straight lines it is engraved as stay, mm.
+const ENGRAVE_CURVE_TOLERANCE: f64 = 0.01;
+/// How far a sketch's plane may lean from facing the tool, as the sine of the angle.
+const ENGRAVE_PLANE_LEAN: f64 = 1e-6;
+
+/// The drawn curves of the sketch `name` for a setup placed at `p`, as an engraving follows
+/// them (decision 0032 of the CAM work): the Z of the sketch's plane and its curves as lines
+/// and arcs, both in the setup's WCS. Drawn curves are what a profile is made of: not
+/// construction or centre lines, and not what is projected from the model, but text is.
+/// Free-form curves come as short straight lines within [`ENGRAVE_CURVE_TOLERANCE`] of them.
+fn sketch_curves(s: &Session, p: &Placement, name: &str) -> std::result::Result<(f64, Vec<solidcore_record::Seg2>), String> {
+    use solidcore_record::{Seg2, Vec2};
+    let world = s.world_state().map_err(|e| e.to_string())?;
+    let found = world.sketches.iter().find(|ss| ss.name == name).ok_or_else(|| format!("the design has no sketch '{name}'"))?;
+    let dot = |a: solidcore_record::Vec3, b: solidcore_record::Vec3| a.x * b.x + a.y * b.y + a.z * b.z;
+    let plane = &found.plane;
+    // The sketch's own X and Y as the setup sees them: flat in its XY when the plane faces the tool.
+    let (xx, xy, yx, yy) = (dot(plane.x, p.x_axis), dot(plane.x, p.y_axis), dot(plane.y, p.x_axis), dot(plane.y, p.y_axis));
+    let lean = dot(plane.x, p.z_axis).abs().max(dot(plane.y, p.z_axis).abs());
+    if !(lean <= ENGRAVE_PLANE_LEAN) {
+        return Err(format!("sketch '{name}' does not face the tool: its plane has to be parallel to the setup's XY"));
+    }
+    let origin = in_wcs(p, plane.origin);
+    let at = |q: Vec2| Vec2 { x: origin.x + q.x * xx + q.y * yx, y: origin.y + q.x * xy + q.y * yy };
+    // Seen from the tool a sketch drawn on the underside is mirrored: its arcs turn the other way.
+    let turn = (xx * yy - yx * xy).signum();
+    let sk = &found.sketch;
+    let mut pieces = Vec::new();
+    for (i, curve) in sk.curves.iter().enumerate() {
+        if curve.construction || curve.centerline || (curve.link.is_some() && !sk.is_text_curve(i)) {
+            continue;
+        }
+        for seg in sk.segs(i) {
+            match seg {
+                Seg2::Line { a, b } => pieces.push(Seg2::Line { a: at(a), b: at(b) }),
+                Seg2::Arc { center, radius, start, sweep } => {
+                    let (c, from) = (at(center), at(Vec2 { x: center.x + start.cos(), y: center.y + start.sin() }));
+                    pieces.push(Seg2::Arc { center: c, radius, start: (from.y - c.y).atan2(from.x - c.x), sweep: sweep * turn });
+                }
+                other => {
+                    let points = other.polyline(ENGRAVE_CURVE_TOLERANCE);
+                    pieces.extend(points.windows(2).filter_map(|w| Some(Seg2::Line { a: at(*w.first()?), b: at(*w.get(1)?) })));
+                }
+            }
+        }
+    }
+    Ok((origin.z, pieces))
+}
+
+/// The sketches an engraving can follow in the setup `id`, for a form to offer: those whose
+/// plane faces the tool and that have drawn curves, in the design's order. It reads the design
+/// and changes nothing.
+pub fn manufacture_sketches(s: &Session, id: &str) -> std::result::Result<Vec<crate::schema::cam::FoundSketch>, String> {
+    const CMD: &str = "cam.op.engrave";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let world = s.world_state().map_err(|e| e.to_string())?;
+    let mut found: Vec<crate::schema::cam::FoundSketch> = Vec::new();
+    for sketch in &world.sketches {
+        // One of a name is offered: the first, which is the one the operation would read.
+        if found.iter().any(|known| known.name == sketch.name) {
+            continue;
+        }
+        let Ok((z, pieces)) = sketch_curves(s, &p, &sketch.name) else { continue };
+        if pieces.is_empty() {
+            continue;
+        }
+        let length = pieces.iter().map(solidcraft_geom::Seg2Geom::length).sum::<f64>();
+        found.push(crate::schema::cam::FoundSketch { name: sketch.name.clone(), pieces: pieces.len(), length, z });
+    }
+    Ok(found)
+}
+
 /// The edges a chamfer of `params` (as `cam.op.chamfer` takes them; whichever edges they name)
 /// could break, in the setup's WCS: where the setup sits, the Z of the edge, the chamfer's
 /// width, the part's outline at the chamfer's lower edge, and the openings in the part's top
@@ -1206,6 +1284,10 @@ fn op_slot(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.slot", "Slot", p)
 }
 
+fn op_engrave(s: &mut Session, p: &Value) -> Result<Value> {
+    add_operation(s, "cam.op.engrave", "Engrave", p)
+}
+
 fn op_chamfer(s: &mut Session, p: &Value) -> Result<Value> {
     add_operation(s, "cam.op.chamfer", "Chamfer", p)
 }
@@ -1255,6 +1337,11 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             let slot: solidcraft_cam::SlotOp = parse(cmd, "slot", &p.slot)?;
             Ok((p.setup, p.name, p.tool, OperationKind::Slot { slot }))
         }
+        "cam.op.engrave" => {
+            let p: crate::schema::cam::CamOpEngraveParams = parse(cmd, "parameters", p)?;
+            let engrave: solidcraft_cam::EngraveOp = parse(cmd, "engrave", &p.engrave)?;
+            Ok((p.setup, p.name, p.tool, OperationKind::Engrave { engrave }))
+        }
         "cam.op.chamfer" => {
             let p: CamOpChamferParams = parse(cmd, "parameters", p)?;
             let chamfer: ChamferOp = match &p.chamfer {
@@ -1263,7 +1350,7 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
             };
             Ok((p.setup, p.name, p.tool, OperationKind::Chamfer { chamfer }))
         }
-        other => Err(bad(other, "not a command that adds a drill, face, contour, bore, pocket, slot or chamfer operation")),
+        other => Err(bad(other, "not a command that adds a drill, face, contour, bore, pocket, slot, engrave or chamfer operation")),
     }
 }
 
@@ -1400,6 +1487,19 @@ fn work(
                 "left": done.left
             });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
+        }
+        OperationKind::Engrave { engrave } => {
+            let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            // Its numbers and tool first: what is wrong with them is said before the sketch is read.
+            engrave.validate(tool).map_err(failed)?;
+            let (surface, pieces) = sketch_curves(s, &placement, &engrave.sketch).map_err(|e| bad(cmd, of(op, e)))?;
+            let done = engrave.toolpath(start, tool, &placement, material, surface, &pieces).map_err(failed)?;
+            let numbers = serde_json::json!({
+                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "z": done.z, "depth": done.depth,
+                "width": done.width, "runs": done.runs.len(), "length": done.runs.iter().sum::<f64>()
+            });
+            // The model has no groove: a cut this deep along the curves is the engraving.
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: done.depth })
         }
         OperationKind::Chamfer { chamfer } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
@@ -1540,6 +1640,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
         "pocket" => PocketOp { pockets: vec![[0.0, 0.0]], ..PocketOp::default() }.validate(tool).is_ok(),
         "slot" => solidcraft_cam::SlotOp { slots: vec![[0.0, 0.0]], ..Default::default() }.validate(tool).is_ok(),
         "chamfer" => ChamferOp::default().validate(tool).is_ok(),
+        "engrave" => solidcraft_cam::EngraveOp { sketch: "any".into(), ..Default::default() }.validate(tool).is_ok(),
         _ => true,
     };
     data.tools
@@ -2000,6 +2101,7 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Pocket { .. } => ("a pocket operation", "pocket"),
         OperationKind::Chamfer { .. } => ("a chamfer", "chamfer"),
         OperationKind::Slot { .. } => ("a slot operation", "slot"),
+        OperationKind::Engrave { .. } => ("an engraving", "engrave"),
     };
     let given = [
         (&p.toolpath, "toolpath"),
@@ -2009,6 +2111,7 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         (&p.pocket, "pocket"),
         (&p.chamfer, "chamfer"),
         (&p.slot, "slot"),
+        (&p.engrave, "engrave"),
     ];
     for (given, name) in given {
         if given.is_some() && name != takes {
@@ -2049,6 +2152,11 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
         OperationKind::Slot { slot } => {
             if let Some(v) = &p.slot {
                 *slot = parse(CMD, "slot", v)?;
+            }
+        }
+        OperationKind::Engrave { engrave } => {
+            if let Some(v) = &p.engrave {
+                *engrave = parse(CMD, "engrave", v)?;
             }
         }
     }

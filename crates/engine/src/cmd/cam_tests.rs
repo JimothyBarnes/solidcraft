@@ -502,7 +502,7 @@ fn a_form_previews_an_operation_before_it_is_made() {
         (
             "cam.post",
             json!({"setup": "setup-1", "post": "rs274"}),
-            "not a command that adds a drill, face, contour, bore, pocket, slot or chamfer operation",
+            "not a command that adds a drill, face, contour, bore, pocket, slot, engrave or chamfer operation",
         ),
     ] {
         let said = why(&s, command, params.clone());
@@ -2791,4 +2791,113 @@ fn a_chamfer_breaks_the_edges_picked_and_a_point_on_the_model_says_which() {
         refused(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6, "chamfer": {"edges": "all", "openings": [[0, 0]]}}))
             .contains("they go with edges: picked")
     );
+}
+
+/// Tool 7: a 6 mm, 90 degree engraving tool with a tip of 0.2.
+fn engraver() -> Value {
+    json!({
+        "number": 7, "name": "6 mm 90 degree engraver", "kind": "engraving",
+        "geometry": {"diameter": 6.0, "corner_radius": 0.0, "flute_length": 6.0, "shoulder_length": 0.0, "overall_length": 50.0,
+                     "shank_diameter": 6.0, "tip_angle": std::f64::consts::FRAC_PI_2, "tip_diameter": 0.2, "thread_pitch": 0.0},
+        "flutes": 2, "holder": {"stick_out": 25.0, "segments": []}, "length_offset": 7, "diameter_offset": 7, "coolant": "flood",
+        "cutting_data": [{"material": "aluminium", "surface_speed": 150.0, "chip_load": 0.02, "plunge_factor": 0.5, "ramp_factor": 0.5}],
+        "overrides": {"rpm": null, "feed": null}
+    })
+}
+
+#[test]
+fn an_engraving_follows_the_curves_of_a_sketch_on_the_face_they_are_drawn_on() {
+    // The plate (its corner at the model's origin, its top at Z 20; in the WCS X -50 to 50,
+    // Y -40 to 40, its top at Z -1) with an L drawn on its top: 30 along X and 20 along Y.
+    let mut s = plate();
+    run(&mut s, "cam.tool.create", json!({"tool": engraver()}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "offset": 20}));
+    run(&mut s, "sketch.line", json!({"points": [[20, 20], [50, 20], [50, 40]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    // What the setup can engrave: that sketch, two pieces of curve 50 long together, on the
+    // plate's top.
+    let sketches = crate::cmd::manufacture_sketches(&s, "setup-1").unwrap();
+    assert_eq!(sketches.len(), 1, "{sketches:?}");
+    let mark = sketches[0].name.clone();
+    assert!(sketches[0].pieces == 2 && (sketches[0].length - 50.0).abs() <= 1e-9 && (sketches[0].z + 1.0).abs() <= 1e-9, "{sketches:?}");
+    // Engraved with tool 7: one run of 50, the tip 0.2 below the top, a groove 0.6 wide.
+    assert_eq!(run(&mut s, "cam.op.engrave", json!({"setup": "setup-1", "tool": 7, "engrave": {"sketch": mark}}))["id"], "op-1");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert_eq!((n["runs"].as_u64(), n["z"].as_f64(), n["depth"].as_f64()), (Some(1), Some(-1.2), Some(0.2)), "{n}");
+    assert!(about(&n["length"], 50.0) && about(&n["width"], 0.6), "{n}");
+    // The L in the WCS: from (-30, -20) to (0, -20) to (0, 0).
+    assert!(near(&t["min"], [-30.0, -20.0, -1.2]) && near(&t["max"], [0.0, 0.0, 25.0]), "{t}");
+    // Simulated: the model has no groove, and a cut that deep along the curves is the
+    // engraving, not a cut into the part. The plate has a millimetre of stock on top, so the
+    // cone is 1.2 into the stock: a groove 0.2 wide at its bottom and 2.6 at the stock's top
+    // (1.68 mm2) along 50 mm, 84 mm3, and half a cone's worth at each end (2.3 together).
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.1}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let removed = sim["operations"][0]["removed"].as_f64().unwrap();
+    assert!((removed - 86.3).abs() < 2.0, "{removed}");
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = posted["text"].as_str().unwrap();
+    assert!(text.contains("(ENGRAVE 1)") && text.contains("Z-1.2"), "{text}");
+    // Deeper when asked, and kept as given.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "engrave": {"sketch": mark, "depth": 0.5}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!((t["numbers"]["z"].as_f64(), t["numbers"]["depth"].as_f64()), (Some(-1.5), Some(0.5)));
+    let kept = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["operation"].clone();
+    assert_eq!(
+        (kept["kind"].clone(), kept["engrave"]["sketch"].clone(), kept["engrave"]["depth"].clone()),
+        (json!("engrave"), json!(mark), json!(0.5))
+    );
+    // The sketch changed is another engraving: a third line added to the L's end.
+    run(&mut s, "sketch.edit", json!({"sketch": mark}));
+    run(&mut s, "sketch.line", json!({"points": [[50, 40], [40, 40]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(about(&t["numbers"]["length"], 60.0) && t["numbers"]["runs"].as_u64() == Some(1), "{}", t["numbers"]);
+    // Text is followed along its letters' outlines: a second sketch, and more runs than one.
+    run(&mut s, "sketch.create", json!({"plane": "XY", "offset": 20}));
+    run(&mut s, "sketch.text", json!({"text": "A1", "at": [10, 55], "height": 10}));
+    run(&mut s, "sketch.finish", json!({}));
+    let sketches = crate::cmd::manufacture_sketches(&s, "setup-1").unwrap();
+    assert_eq!(sketches.len(), 2, "{sketches:?}");
+    let label = sketches[1].name.clone();
+    assert!(sketches[1].pieces > 8 && sketches[1].length > 30.0, "{sketches:?}");
+    assert_eq!(run(&mut s, "cam.op.engrave", json!({"setup": "setup-1", "tool": 7, "engrave": {"sketch": label}}))["id"], "op-2");
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    // An A has an outline and a hole, a 1 an outline: three closed runs, within the text's
+    // place on the plate (X 10 to about 25, Y 55 to 65 in the model).
+    assert_eq!(t["numbers"]["runs"].as_u64(), Some(3), "{}", t["numbers"]);
+    let (min, max) = (t["min"].as_array().unwrap(), t["max"].as_array().unwrap());
+    let within = |v: &Value, lo: f64, hi: f64| v.as_f64().is_some_and(|v| v >= lo && v <= hi);
+    assert!(
+        within(&min[0], -41.0, -38.0) && within(&max[0], -35.0, -20.0) && within(&min[1], 14.0, 16.0) && within(&max[1], 22.0, 27.0),
+        "{min:?} {max:?}"
+    );
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.1}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // Refused, with why: a sketch that is not there, one that does not face the tool, a tool
+    // that does not engrave, and a depth that is none.
+    let why = |s: &mut Session, engrave: Value, tool: u32| {
+        let made = s.execute("cam.op.engrave", &json!({"setup": "setup-1", "tool": tool, "engrave": engrave}));
+        match made {
+            Err(e) => e.to_string(),
+            Ok(made) => refused(s, "cam.op.toolpath", json!({"id": made["id"]})),
+        }
+    };
+    assert!(why(&mut s, json!({"sketch": "No such sketch"}), 7).contains("the design has no sketch 'No such sketch'"));
+    run(&mut s, "sketch.create", json!({"plane": "XZ"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, 5]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let side = s.world_state().unwrap().sketches.last().unwrap().name.clone();
+    assert!(why(&mut s, json!({"sketch": side}), 7).contains("does not face the tool"));
+    assert_eq!(crate::cmd::manufacture_sketches(&s, "setup-1").unwrap().len(), 2);
+    let mut drill = engraver();
+    (drill["number"], drill["kind"], drill["geometry"]["tip_diameter"]) = (json!(8), json!("drill"), json!(0.0));
+    run(&mut s, "cam.tool.create", json!({"tool": drill}));
+    assert!(why(&mut s, json!({"sketch": mark}), 8).contains("does not engrave"));
+    // An end mill does: the 10 mm one leaves a groove as wide as itself.
+    let made = run(&mut s, "cam.op.engrave", json!({"setup": "setup-1", "tool": 2, "engrave": {"sketch": mark}}));
+    assert!(about(&run(&mut s, "cam.op.toolpath", json!({"id": made["id"]}))["numbers"]["width"], 10.0));
+    assert!(why(&mut s, json!({"sketch": mark, "depth": 0}), 7).contains("the depth must be"));
+    assert!(why(&mut s, json!({"depth": 0.2}), 7).contains("sketch"));
 }

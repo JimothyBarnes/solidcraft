@@ -29,6 +29,7 @@ use crate::ui_kit;
 mod bore;
 mod chamfer;
 mod contour;
+mod engrave;
 mod library;
 mod pocket;
 mod simulate;
@@ -36,6 +37,7 @@ mod slot;
 pub(crate) use bore::BoreForm;
 pub(crate) use chamfer::ChamferForm;
 pub(crate) use contour::ContourForm;
+pub(crate) use engrave::EngraveForm;
 pub(crate) use library::LibraryForm;
 pub(crate) use pocket::PocketForm;
 pub(crate) use simulate::SimForm;
@@ -54,6 +56,7 @@ pub(crate) enum Dialog {
     Drill(DrillForm),
     Bore(BoreForm),
     Slot(SlotForm),
+    Engrave(EngraveForm),
     Simulate(SimForm),
     Post(PostForm),
     Posted(Posted),
@@ -109,6 +112,7 @@ impl Dialog {
             | Dialog::Pocket(PocketForm { editing: Some(edited), .. })
             | Dialog::Chamfer(ChamferForm { editing: Some(edited), .. })
             | Dialog::Slot(SlotForm { editing: Some(edited), .. })
+            | Dialog::Engrave(EngraveForm { editing: Some(edited), .. })
             | Dialog::Drill(DrillForm { editing: Some(edited), .. }) => edited.id.as_str(),
             _ => None,
         }
@@ -125,6 +129,7 @@ impl Dialog {
             Dialog::Drill(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Bore(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Slot(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
+            Dialog::Engrave(form) => form.worked.get().map(|(key, preview)| (key, Shown::Operation(preview))),
             Dialog::Simulate(form) => form.worked.get().map(|(key, shown)| (key, Shown::Stock(&shown.0, shown.1.as_ref()))),
             _ => None,
         }
@@ -1864,6 +1869,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
             | "cam.op.drill"
             | "cam.op.bore"
             | "cam.op.slot"
+            | "cam.op.engrave"
             | "cam.simulate"
             | "cam.setup.sheet"
             | "cam.post"
@@ -1901,6 +1907,7 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         "cam.op.drill" => Dialog::Drill(DrillForm::new(app)),
         "cam.op.bore" => Dialog::Bore(BoreForm::new(app)),
         "cam.op.slot" => Dialog::Slot(SlotForm::new(app)),
+        "cam.op.engrave" => Dialog::Engrave(EngraveForm::new(app)),
         "cam.simulate" => Dialog::Simulate(SimForm::new(app)),
         _ => Dialog::Post(PostForm::new(app)),
     });
@@ -1923,6 +1930,7 @@ pub(crate) fn edit(app: &mut SolveApp, target: &Target) {
             "pocket" => PocketForm::edit(app, id).map(Dialog::Pocket),
             "chamfer" => ChamferForm::edit(app, id).map(Dialog::Chamfer),
             "slot" => SlotForm::edit(app, id).map(Dialog::Slot),
+            "engrave" => EngraveForm::edit(app, id).map(Dialog::Engrave),
             "drill" => DrillForm::edit(app, id).map(Dialog::Drill),
             _ => Err(tr("manufacture.edit_unsupported_operation").to_string()),
         }),
@@ -1959,6 +1967,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Drill(form) => form.show(app, ctx, &units, decimals).map(Dialog::Drill),
         Dialog::Bore(form) => form.show(app, ctx, &units, decimals).map(Dialog::Bore),
         Dialog::Slot(form) => form.show(app, ctx, &units, decimals).map(Dialog::Slot),
+        Dialog::Engrave(form) => form.show(app, ctx, &units, decimals).map(Dialog::Engrave),
         Dialog::Simulate(form) => form.show(app, ctx, &units, decimals).map(Dialog::Simulate),
         Dialog::Post(form) => form.show(app, ctx).map(Dialog::Post),
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),

@@ -18,7 +18,8 @@ pub const TABS: &[&str] = &["MANUFACTURE"];
 /// The ribbon's Milling panel, in its order: what an end mill does, a hole bored with one too.
 /// The first four are its buttons (a panel has four at most) and the rest are in its menu, from
 /// where one can be pinned to the ribbon (`crate::workspace` has the panel's row).
-pub(crate) const MILLING: &[&str] = &["cam.op.face", "cam.op.contour", "cam.op.pocket", "cam.op.chamfer", "cam.op.bore", "cam.op.slot"];
+pub(crate) const MILLING: &[&str] =
+    &["cam.op.face", "cam.op.contour", "cam.op.pocket", "cam.op.chamfer", "cam.op.bore", "cam.op.slot", "cam.op.engrave"];
 
 /// How the workspace menu shows Manufacture.
 pub(crate) const STYLE: crate::ui_kit::WorkspaceStyle = crate::ui_kit::WorkspaceStyle {

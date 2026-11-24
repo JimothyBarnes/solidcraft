@@ -1,0 +1,90 @@
+{
+  "en": {
+    "cmd.cam_op_engrave": "Engrave",
+    "help.cam.op.engrave": "Follows the drawn curves of a sketch with the tool's centre, a little below the face they are drawn on: a part number, a logo, a line. Text is followed along its letters' outlines. Curves that meet are cut in one go; the tool goes down where a run starts and up where it ends. The sketch has to face the tool. The curves are read from the sketch each time, so a changed sketch is a changed engraving.",
+    "manufacture.engrave_depth": "Depth",
+    "manufacture.engrave_length": "Length of cut",
+    "manufacture.engrave_none": "No sketch to follow: draw one on the face to engrave, facing the tool. Its curves and its text are followed.",
+    "manufacture.engrave_note": "The tool's centre follows every drawn curve of the sketch, its text too. Curves that meet are cut in one go.",
+    "manufacture.engrave_sketch": "Sketch",
+    "manufacture.engrave_width": "Groove width",
+    "manufacture.no_tool_for_engrave": "Add an engraving tool, a chamfer mill, a spot drill or an end mill first, with Add Tool."
+  },
+  "ar": {
+    "cmd.cam_op_engrave": "نقش",
+    "help.cam.op.engrave": "يتبع مركز الأداة المنحنيات المرسومة في رسم تخطيطي، أسفل الوجه المرسومة عليه بقليل: رقم قطعة، شعار، خط. يُتبع النص على حدود حروفه. المنحنيات المتلاقية تُقطع دفعة واحدة؛ تنزل الأداة حيث يبدأ المسار وترتفع حيث ينتهي. يجب أن يواجه الرسم التخطيطي الأداة. تُقرأ المنحنيات من الرسم في كل مرة، فتغيير الرسم يغيّر النقش.",
+    "manufacture.engrave_depth": "العمق",
+    "manufacture.engrave_length": "طول القطع",
+    "manufacture.engrave_none": "لا يوجد رسم تخطيطي يُتبع: ارسم واحدًا على الوجه المراد نقشه، مواجهًا للأداة. تُتبع منحنياته ونصه.",
+    "manufacture.engrave_note": "يتبع مركز الأداة كل منحنى مرسوم في الرسم التخطيطي، ونصه كذلك. المنحنيات المتلاقية تُقطع دفعة واحدة.",
+    "manufacture.engrave_sketch": "الرسم التخطيطي",
+    "manufacture.engrave_width": "عرض الأخدود",
+    "manufacture.no_tool_for_engrave": "أضف أداة نقش أو قاطعة شطف أو مثقاب تمركز أو قاطعة طرفية أولًا عبر «إضافة أداة»."
+  },
+  "he": {
+    "cmd.cam_op_engrave": "חריטה",
+    "help.cam.op.engrave": "מרכז הכלי עוקב אחר העקומות המשורטטות בסקיצה, מעט מתחת לפאה שעליה שורטטו: מספר חלק, לוגו, קו. טקסט נחרט לאורך קווי המתאר של האותיות. עקומות שנפגשות נחתכות במהלך אחד; הכלי יורד היכן שמהלך מתחיל ועולה היכן שהוא מסתיים. הסקיצה חייבת לפנות אל הכלי. העקומות נקראות מהסקיצה בכל פעם, כך ששינוי בסקיצה משנה את החריטה.",
+    "manufacture.engrave_depth": "עומק",
+    "manufacture.engrave_length": "אורך החיתוך",
+    "manufacture.engrave_none": "אין סקיצה לעקוב אחריה: שרטטו אחת על הפאה לחריטה, כשהיא פונה אל הכלי. העקומות והטקסט שלה נחרטים.",
+    "manufacture.engrave_note": "מרכז הכלי עוקב אחר כל עקומה משורטטת בסקיצה, וגם אחר הטקסט שלה. עקומות שנפגשות נחתכות במהלך אחד.",
+    "manufacture.engrave_sketch": "סקיצה",
+    "manufacture.engrave_width": "רוחב החריץ",
+    "manufacture.no_tool_for_engrave": "הוסף תחילה כלי חריטה, כרסום פאזות, מקדח מרכוז או כרסום קצה, באמצעות \"הוספת כלי\"."
+  },
+  "ja": {
+    "cmd.cam_op_engrave": "彫刻",
+    "help.cam.op.engrave": "スケッチに描かれた曲線を、描かれた面の少し下で工具の中心がたどります。部品番号、ロゴ、線などです。文字は輪郭に沿ってたどります。つながった曲線は一度に加工し、工具は経路の始点で下がり、終点で上がります。スケッチは工具の方を向いている必要があります。曲線は毎回スケッチから読み取るので、スケッチを変更すれば彫刻も変わります。",
+    "manufacture.engrave_depth": "深さ",
+    "manufacture.engrave_length": "加工長さ",
+    "manufacture.engrave_none": "たどるスケッチがありません。彫刻する面に、工具の方を向けてスケッチを描いてください。その曲線と文字をたどります。",
+    "manufacture.engrave_note": "工具の中心が、スケッチに描かれたすべての曲線と文字をたどります。つながった曲線は一度に加工します。",
+    "manufacture.engrave_sketch": "スケッチ",
+    "manufacture.engrave_width": "溝の幅",
+    "manufacture.no_tool_for_engrave": "先に「工具を追加」で、彫刻工具、面取りカッター、スポットドリル、またはエンドミルを追加してください。"
+  },
+  "vi": {
+    "cmd.cam_op_engrave": "Khắc",
+    "help.cam.op.engrave": "Tâm dao đi theo các đường cong đã vẽ của một bản phác thảo, thấp hơn một chút so với mặt mà chúng được vẽ lên: số chi tiết, logo, một đường kẻ. Chữ được đi theo đường viền của từng ký tự. Các đường cong nối nhau được cắt trong một lượt; dao đi xuống ở đầu lượt và đi lên ở cuối lượt. Bản phác thảo phải hướng về phía dao. Các đường cong được đọc từ bản phác thảo mỗi lần, nên bản phác thảo thay đổi thì đường khắc cũng thay đổi.",
+    "manufacture.engrave_depth": "Chiều sâu",
+    "manufacture.engrave_length": "Chiều dài cắt",
+    "manufacture.engrave_none": "Không có bản phác thảo nào để đi theo: hãy vẽ một bản trên mặt cần khắc, hướng về phía dao. Các đường cong và chữ của nó sẽ được đi theo.",
+    "manufacture.engrave_note": "Tâm dao đi theo mọi đường cong đã vẽ của bản phác thảo, kể cả chữ. Các đường cong nối nhau được cắt trong một lượt.",
+    "manufacture.engrave_sketch": "Bản phác thảo",
+    "manufacture.engrave_width": "Bề rộng rãnh",
+    "manufacture.no_tool_for_engrave": "Trước tiên hãy thêm một dao khắc, dao vát mép, mũi khoan định tâm hoặc dao phay ngón bằng Thêm dao."
+  },
+  "zh": {
+    "cmd.cam_op_engrave": "雕刻",
+    "help.cam.op.engrave": "刀具中心沿草图中绘制的曲线走刀，略低于草图所在的面：零件号、标志、线条。文字沿其字符轮廓加工。相连的曲线一次切完；刀具在一段路径的起点下刀，在终点抬刀。草图必须朝向刀具。每次都从草图读取曲线，因此草图改变，雕刻也随之改变。",
+    "manufacture.engrave_depth": "深度",
+    "manufacture.engrave_length": "切削长度",
+    "manufacture.engrave_none": "没有可沿其加工的草图：请在要雕刻的面上绘制一个朝向刀具的草图。将沿其曲线和文字加工。",
+    "manufacture.engrave_note": "刀具中心沿草图中绘制的每条曲线走刀，文字也一样。相连的曲线一次切完。",
+    "manufacture.engrave_sketch": "草图",
+    "manufacture.engrave_width": "槽宽",
+    "manufacture.no_tool_for_engrave": "请先用“添加刀具”添加雕刻刀、倒角刀、定心钻或立铣刀。"
+  },
+  "de": {
+    "cmd.cam_op_engrave": "Gravieren",
+    "help.cam.op.engrave": "Folgt mit der Werkzeugmitte den gezeichneten Kurven einer Skizze, knapp unter der Fläche, auf der sie gezeichnet sind: eine Teilenummer, ein Logo, eine Linie. Text wird entlang der Umrisse seiner Buchstaben abgefahren. Kurven, die sich treffen, werden in einem Zug geschnitten; das Werkzeug taucht am Anfang eines Zuges ein und hebt an seinem Ende ab. Die Skizze muss dem Werkzeug zugewandt sein. Die Kurven werden jedes Mal aus der Skizze gelesen, eine geänderte Skizze ist also eine geänderte Gravur.",
+    "manufacture.engrave_depth": "Tiefe",
+    "manufacture.engrave_length": "Schnittlänge",
+    "manufacture.engrave_none": "Keine Skizze zum Abfahren: Eine auf der zu gravierenden Fläche zeichnen, dem Werkzeug zugewandt. Ihre Kurven und ihr Text werden abgefahren.",
+    "manufacture.engrave_note": "Die Werkzeugmitte folgt jeder gezeichneten Kurve der Skizze, auch ihrem Text. Kurven, die sich treffen, werden in einem Zug geschnitten.",
+    "manufacture.engrave_sketch": "Skizze",
+    "manufacture.engrave_width": "Rillenbreite",
+    "manufacture.no_tool_for_engrave": "Zuerst mit „Werkzeug hinzufügen“ einen Gravierstichel, einen Fasenfräser, einen Anbohrer oder einen Schaftfräser anlegen."
+  },
+  "ko": {
+    "cmd.cam_op_engrave": "각인",
+    "help.cam.op.engrave": "스케치에 그린 곡선을 공구 중심이 그려진 면보다 조금 아래에서 따라갑니다. 부품 번호, 로고, 선 등입니다. 문자는 글자의 윤곽을 따라갑니다. 서로 만나는 곡선은 한 번에 가공하며, 공구는 경로가 시작되는 곳에서 내려가고 끝나는 곳에서 올라옵니다. 스케치는 공구를 향해야 합니다. 곡선은 매번 스케치에서 읽으므로 스케치가 바뀌면 각인도 바뀝니다.",
+    "manufacture.engrave_depth": "깊이",
+    "manufacture.engrave_length": "절삭 길이",
+    "manufacture.engrave_none": "따라갈 스케치가 없습니다. 각인할 면에 공구를 향하도록 스케치를 그리십시오. 그 곡선과 문자를 따라갑니다.",
+    "manufacture.engrave_note": "공구 중심이 스케치에 그린 모든 곡선과 문자를 따라갑니다. 서로 만나는 곡선은 한 번에 가공합니다.",
+    "manufacture.engrave_sketch": "스케치",
+    "manufacture.engrave_width": "홈 폭",
+    "manufacture.no_tool_for_engrave": "먼저 '공구 추가'로 각인 공구, 모따기 커터, 스폿 드릴 또는 엔드밀을 추가하십시오."
+  }
+}

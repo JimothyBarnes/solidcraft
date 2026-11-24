@@ -58,6 +58,7 @@ fn open(h: &Harness) -> &'static str {
         Some(Dialog::Drill(_)) => "drill",
         Some(Dialog::Bore(_)) => "bore",
         Some(Dialog::Slot(_)) => "slot",
+        Some(Dialog::Engrave(_)) => "engrave",
         Some(Dialog::Simulate(_)) => "simulate",
         Some(Dialog::Post(_)) => "post",
         Some(Dialog::Posted(_)) => "posted",
@@ -2885,4 +2886,86 @@ fn chamfer_takes_the_edges_clicked_on_the_model() {
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     let after = data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"].clone();
     assert_eq!((after["edges"].clone(), after["openings"].clone(), after["width"].clone()), (json!("picked"), kept["openings"].clone(), json!(0.8)));
+}
+
+fn engrave_form(h: &mut Harness) -> &mut EngraveForm {
+    match h.app.manufacture_workspace.dialog.as_mut() {
+        Some(Dialog::Engrave(form)) => form,
+        _ => panic!("Engrave is not open"),
+    }
+}
+
+#[test]
+fn engrave_follows_a_sketch_and_keeps_only_what_is_typed() {
+    // The block (60 x 40 x 20) with an L drawn on its top: 30 along X and 20 along Y. It is
+    // made in Design, where sketches are drawn.
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    block(&mut h);
+    h.app.run("sketch.create", json!({"plane": "XY", "offset": 20})).unwrap();
+    h.app.run("sketch.line", json!({"points": [[10, 10], [40, 10], [40, 30]]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+    h.frames(2);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    // No tool that engraves yet: the form says what to add.
+    panel_menu(&mut h, "MILLING", "cam.op.engrave");
+    h.frames(3);
+    assert_eq!(open(&h), "engrave");
+    assert!(h.widget(tr("manufacture.no_tool_for_engrave")).is_some());
+    press(&mut h, "Cancel");
+    // With a 10 mm, 90 degree chamfer mill (T1) it opens on the sketch: 50 mm of curve, the tip
+    // 0.2 below the block's top (Z -1 in the WCS), a groove 0.4 wide.
+    add_tool(&mut h, "chamfer_mill", 10.0);
+    panel_menu(&mut h, "MILLING", "cam.op.engrave");
+    h.frames(3);
+    let form = engrave_form(&mut h);
+    assert_eq!((form.sketches().len(), form.sketch, form.depth, form.typed_depth), (1, 0, 0.2, false));
+    let name = form.sketch_name.clone();
+    assert_eq!((name.is_empty(), form.sketches()[0].name == name), (false, true));
+    let numbers = |h: &mut Harness| engrave_form(h).worked.get().map(|(_, preview)| preview.numbers.clone()).unwrap();
+    let n = numbers(&mut h);
+    assert!((n["length"].as_f64().unwrap() - 50.0).abs() < 1e-9 && (n["z"].as_f64().unwrap() + 1.2).abs() < 1e-9, "{n}");
+    assert!((n["width"].as_f64().unwrap() - 0.4).abs() < 1e-9 && n["runs"].as_u64() == Some(1), "{n}");
+    assert!(h.widget(tr("manufacture.engrave_note")).is_some() && h.widget(tr("manufacture.engrave_sketch")).is_some());
+    // Nothing typed: the command is given the sketch's name alone.
+    assert_eq!(engrave_form(&mut h).params()["engrave"], json!({"sketch": name}));
+    // A depth typed is kept; the speed and feed are the tool's own and are not.
+    let form = engrave_form(&mut h);
+    (form.depth, form.typed_depth) = (0.4, true);
+    h.frames(3);
+    assert!((numbers(&mut h)["z"].as_f64().unwrap() + 1.4).abs() < 1e-9);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["name"].clone(), kept["operation"]["kind"].clone()), (json!("Engrave 1"), json!("engrave")));
+    let engrave = kept["operation"]["engrave"].clone();
+    assert_eq!((engrave["sketch"].clone(), engrave["depth"].clone(), engrave["rpm"].clone()), (json!(name), json!(0.4), json!(null)));
+    let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // Changed from its row it opens on what it has, and a new depth is the change.
+    row_menu(&mut h, "Engrave 1 (T1)", "manufacture.edit");
+    assert_eq!(open(&h), "engrave");
+    let form = engrave_form(&mut h);
+    assert_eq!((form.sketch_name.clone(), form.depth, form.typed_depth), (name.clone(), 0.4, true));
+    engrave_form(&mut h).depth = 0.3;
+    h.frames(3);
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let engrave = data(&mut h)["setups"][0]["operations"][0]["operation"]["engrave"].clone();
+    assert_eq!((engrave["sketch"].clone(), engrave["depth"].clone()), (json!(name), json!(0.3)));
+    // A second sketch is another choice of the row, and choosing it engraves that one.
+    h.app.run("sketch.create", json!({"plane": "XY", "offset": 20})).unwrap();
+    h.app.run("sketch.line", json!({"points": [[5, 35], [25, 35]]})).unwrap();
+    h.app.run("sketch.finish", json!({})).unwrap();
+    crate::workspace::enter(&mut h.app, "manufacture").unwrap();
+    h.frames(2);
+    panel_menu(&mut h, "MILLING", "cam.op.engrave");
+    h.frames(3);
+    assert_eq!((engrave_form(&mut h).sketches().len(), engrave_form(&mut h).sketch_name.clone()), (2, name.clone()));
+    engrave_form(&mut h).sketch = 1;
+    h.frames(3);
+    let form = engrave_form(&mut h);
+    assert!(form.sketch_name != name && form.sketch == 1);
+    assert!((numbers(&mut h)["length"].as_f64().unwrap() - 20.0).abs() < 1e-9);
 }

@@ -16,6 +16,7 @@ use solidcore_record::Vec3;
 use crate::chamfer::ChamferOp;
 use crate::contour::ContourOp;
 use crate::drill::DrillOp;
+use crate::engrave::EngraveOp;
 use crate::face::FaceOp;
 use crate::pocket::PocketOp;
 use crate::slot::SlotOp;
@@ -145,6 +146,9 @@ pub enum OperationKind {
     Chamfer { chamfer: ChamferOp },
     /// Slots milled along their middle, each named by a point in it (decision 0026).
     Slot { slot: SlotOp },
+    /// The curves of a sketch followed by the tool's centre, a little below the face they are
+    /// drawn on (decision 0032).
+    Engrave { engrave: EngraveOp },
 }
 
 /// One operation of a setup.
@@ -350,6 +354,7 @@ impl ManufactureData {
                 OperationKind::Pocket { pocket } => pocket.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Chamfer { chamfer } => chamfer.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
                 OperationKind::Slot { slot } => slot.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
+                OperationKind::Engrave { engrave } => engrave.validate(tool).map_err(|e| Error::BadValue(format!("{what}: {e}")))?,
             }
         }
         Ok(())

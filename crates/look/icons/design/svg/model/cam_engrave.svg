@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Engrave</title>
+  <path d="M3 26.42L32 43.16L32 54.32L3 37.58Z" fill="#b8c3cf"/>
+  <path d="M61 26.42L32 43.16L32 54.32L61 37.58Z" fill="#8e9faf"/>
+  <path d="M32 9.68L61 26.42L32 43.16L3 26.42Z" fill="#e2e8ef"/>
+  <path d="M32 9.68L61 26.42L61 37.58L32 54.32L3 37.58L3 26.42Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M3 26.42L32 43.16L61 26.42" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M32 43.16L32 54.32" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M30.99 16.96L46.07 25.67L43.46 27.17L28.38 18.47Z" fill="#236ead"/>
+  <path d="M24.61 20.65L34.76 26.5L32.15 28.01L22 22.15Z" fill="#236ead"/>
+  <path d="M18.23 24.33L31.57 32.03L28.96 33.53L15.62 25.83Z" fill="#236ead"/>
+</svg>
