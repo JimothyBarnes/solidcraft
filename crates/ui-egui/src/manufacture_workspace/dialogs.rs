@@ -835,6 +835,10 @@ pub(crate) struct SetupForm {
     pub side: f64,
     pub top: f64,
     pub bottom: f64,
+    /// How high above the stock's top the tool travels between cuts and operations (clearance)
+    /// and how high it lifts within one (retract), mm.
+    pub clearance: f64,
+    pub retract: f64,
     pub origin: usize,
     /// 0 for G54 up to 5 for G59.
     pub work_offset: usize,
@@ -851,18 +855,22 @@ pub(crate) struct SetupForm {
 
 impl SetupForm {
     /// The vise setup the command starts from: 1 mm of stock on the sides and on top (0.04 in in
-    /// an inch design), the origin at the stock's top centre, G54. Its stock material is the
+    /// an inch design), the origin at the stock's top centre, G54, the tool travelling 25 mm
+    /// above the stock and lifting to 5 mm above it (1 in and 0.2 in). Its stock material is the
     /// first one the design's tools have cutting data for, so operations find their feeds.
     pub fn new(app: &SolveApp) -> SetupForm {
         let data = manufacture_data(&app.session.doc).unwrap_or_default();
         let known_materials: Vec<String> = data.tools.iter().flat_map(|t| t.cutting_data.iter().map(|c| c.material.clone())).collect();
-        let over = if imperial(&app.session.doc.units) { 1.016 } else { 1.0 };
+        let inch = imperial(&app.session.doc.units);
+        let over = if inch { 1.016 } else { 1.0 };
         SetupForm {
             name: String::new(),
             material: known_materials.first().cloned().unwrap_or_default(),
             side: over,
             top: over,
             bottom: 0.0,
+            clearance: if inch { 25.4 } else { 25.0 },
+            retract: if inch { 5.08 } else { 5.0 },
             origin: 0,
             work_offset: 0,
             usual_name: format!("Setup {}", data.setups.len() + 1),
@@ -898,6 +906,8 @@ impl SetupForm {
             side,
             top,
             bottom,
+            clearance: setup.safe_heights.clearance,
+            retract: setup.safe_heights.retract,
             origin,
             work_offset: usize::from(setup.work_offset.clamp(1, 6)) - 1,
             usual_name: setup.name.clone(),
@@ -909,7 +919,7 @@ impl SetupForm {
     }
 
     /// The `cam.setup.create` parameters, or `cam.setup.edit`'s for the setup being changed (its
-    /// bodies and safe heights are not given, so they stay as they are).
+    /// bodies are not given, so they stay as they are).
     pub fn params(&self) -> Value {
         let [x, y, z] = ORIGINS.get(self.origin).or(ORIGINS.first()).map_or(["center", "center", "max"], |o| o.1);
         let mut params = json!({
@@ -918,6 +928,7 @@ impl SetupForm {
             }},
             "wcs": {"origin": {"kind": "stock_box", "anchor": {"x": x, "y": y, "z": z}}, "orientation": {"kind": "model"}},
             "work_offset": self.work_offset.min(5) + 1,
+            "safe_heights": {"clearance": self.clearance, "retract": self.retract},
         });
         if !self.name.trim().is_empty() {
             params["name"] = json!(self.name.trim());
@@ -1007,6 +1018,8 @@ impl SetupForm {
                 }
                 ui_kit::choice_row(ui, tr("manufacture.setup_origin"), "manufacture_setup_origin", &mut self.origin, &origins);
                 ui_kit::choice_row(ui, tr("manufacture.setup_work_offset"), "manufacture_setup_offset", &mut self.work_offset, &WORK_OFFSETS);
+                ui_kit::row(ui, tr("manufacture.setup_clearance"), |ui| ui_kit::length_field(ui, &mut self.clearance, units, decimals));
+                ui_kit::row(ui, tr("manufacture.setup_retract"), |ui| ui_kit::length_field(ui, &mut self.retract, units, decimals));
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_setup_preview_note"));
                 }

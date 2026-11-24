@@ -1,0 +1,34 @@
+{
+  "en": {
+    "manufacture.setup_clearance": "Clearance above stock",
+    "manufacture.setup_retract": "Retract above stock"
+  },
+  "ar": {
+    "manufacture.setup_clearance": "الخلوص فوق الخامة",
+    "manufacture.setup_retract": "التراجع فوق الخامة"
+  },
+  "he": {
+    "manufacture.setup_clearance": "מרווח מעל חומר הגלם",
+    "manufacture.setup_retract": "נסיגה מעל חומר הגלם"
+  },
+  "ja": {
+    "manufacture.setup_clearance": "素材上のクリアランス",
+    "manufacture.setup_retract": "素材上の退避"
+  },
+  "vi": {
+    "manufacture.setup_clearance": "Khoảng hở trên phôi",
+    "manufacture.setup_retract": "Rút dao trên phôi"
+  },
+  "zh": {
+    "manufacture.setup_clearance": "毛坯上方安全高度",
+    "manufacture.setup_retract": "毛坯上方退刀高度"
+  },
+  "de": {
+    "manufacture.setup_clearance": "Sicherheitshöhe über Rohteil",
+    "manufacture.setup_retract": "Rückzug über Rohteil"
+  },
+  "ko": {
+    "manufacture.setup_clearance": "소재 위 안전 높이",
+    "manufacture.setup_retract": "소재 위 후퇴 높이"
+  }
+}

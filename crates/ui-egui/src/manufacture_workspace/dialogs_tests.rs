@@ -917,7 +917,9 @@ fn a_form_changes_only_what_it_shows() {
     let setup = SetupForm::edit(&h.app, "setup-1").unwrap().params();
     assert_eq!((setup["id"].as_str(), setup["name"].as_str(), setup["material"].as_str()), (Some("setup-1"), Some("Top"), Some("aluminium")));
     assert_eq!((setup["stock"].clone(), setup["wcs"].clone()), (kept["setups"][0]["stock"].clone(), kept["setups"][0]["wcs"].clone()));
-    assert!(setup.get("safe_heights").is_none() && setup.get("model_bodies").is_none());
+    // The safe heights it shows are the setup's own as kept; the bodies it does not show are not given.
+    assert_eq!(setup["safe_heights"], kept["setups"][0]["safe_heights"]);
+    assert!(setup.get("model_bodies").is_none());
 
     // The drill operation's form keeps its two holes and changes its depth and cycle.
     h.frames(3);
@@ -3141,4 +3143,46 @@ fn thread_mill_offers_the_holes_and_suggests_the_thread_they_are_drilled_for() {
         (after["hand"].clone(), after["passes"].clone(), after["holes"].clone(), after["depth"].clone()),
         (json!("left"), json!(3), thread["holes"].clone(), json!(12.0))
     );
+}
+
+#[test]
+fn new_setup_takes_the_heights_the_tool_travels_and_lifts_at() {
+    let mut h = harness();
+    block(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    ribbon(&mut h, "cam.setup.create");
+    assert_eq!(open(&h), "setup");
+    // 25 mm above the stock between cuts and 5 mm within one, until other heights are typed.
+    let form = setup_form(&mut h);
+    assert_eq!((form.clearance, form.retract), (25.0, 5.0));
+    assert!(h.widget(tr("manufacture.setup_clearance")).is_some() && h.widget(tr("manufacture.setup_retract")).is_some());
+    // A clamp stands 30 mm above the stock: 40 and 3.
+    let form = setup_form(&mut h);
+    (form.clearance, form.retract) = (40.0, 3.0);
+    h.frames(3);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    assert_eq!(data(&mut h)["setups"][0]["safe_heights"], json!({"clearance": 40.0, "retract": 3.0}));
+    // An operation travels at the one: a facing's highest move is 40 mm above the stock's
+    // top, which is Z 0.
+    h.app.run("cam.op.face", json!({"setup": "setup-1", "tool": 1})).unwrap();
+    let cut = h.app.run("cam.op.toolpath", json!({"id": "op-1"})).unwrap();
+    assert_eq!(cut["max"][2].as_f64(), Some(40.0), "{}", cut["max"]);
+    // The form that changes the setup opens on them, and a retract above the clearance is
+    // refused with the reason.
+    let form = SetupForm::edit(&h.app, "setup-1").unwrap();
+    assert_eq!((form.clearance, form.retract), (40.0, 3.0));
+    h.app.manufacture_workspace.dialog = Some(Dialog::Setup(form));
+    h.frames(3);
+    let form = setup_form(&mut h);
+    (form.clearance, form.retract) = (2.0, 3.0);
+    h.frames(3);
+    assert!(
+        setup_form(&mut h).placed.trouble().is_some_and(|why| why.contains("clearance at or above retract")),
+        "{:?}",
+        setup_form(&mut h).placed.trouble()
+    );
+    press(&mut h, "OK");
+    assert_eq!(open(&h), "setup");
+    assert_eq!(data(&mut h)["setups"][0]["safe_heights"], json!({"clearance": 40.0, "retract": 3.0}));
 }
