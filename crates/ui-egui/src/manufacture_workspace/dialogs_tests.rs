@@ -2837,29 +2837,32 @@ fn chamfer_takes_the_edges_clicked_on_the_model() {
     // hole's wall just under its mouth, the block's own walls at X 60 and Y 0, and its top.
     let (wall, floor, hole) = ([5.0, 20.0, 17.0], [20.0, 20.0, 14.0], [48.0 - 8.0_f64.sqrt(), 20.0 + 8.0_f64.sqrt(), 19.0]);
     let (right, front, top) = ([60.0, 20.0, 10.0], [30.0, 0.0, 10.0], [55.0, 35.0, 20.0]);
-    // The pocket's wall: its rim alone, 1 inside the wall (28 x 18: 92), a choice the row gains.
+    // The pocket's wall: its rim, 1 inside the wall (28 x 18: 92), with the outside edge the
+    // form starts with (200 and its four corners): a choice the row gains.
     click_model(&mut h, wall);
     let form = chamfer_form(&mut h);
-    assert_eq!((form.edges, form.picked.0, form.picked.1.len(), form.pick_missed()), (2, false, 1, false));
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len(), form.pick_missed()), (2, true, 1, false));
     assert_eq!(form.params()["chamfer"]["edges"], "picked");
-    assert!((round(&mut h) - 92.0).abs() < 1e-6, "{}", round(&mut h));
+    assert!((round(&mut h) - (200.0 + 2.0 * PI + 92.0)).abs() < 1e-6, "{}", round(&mut h));
     assert!(h.widget(tr("manufacture.chamfer_picked_note")).is_some());
     // The block's top says no edge: nothing changes, and the form says so.
     click_model(&mut h, top);
     let form = chamfer_form(&mut h);
     assert_eq!((form.edges, form.picked.1.len(), form.pick_missed()), (2, 1, true));
     assert!(h.widget(tr("manufacture.chamfer_pick_missed")).is_some());
-    // A wall of the block: the outside edge too, 200 and its four corners.
+    // A wall of the block takes the outside edge out; the other wall puts it back, lit now.
     click_model(&mut h, right);
     let form = chamfer_form(&mut h);
-    assert_eq!((form.edges, form.picked.0, form.picked.1.len(), form.pick_missed()), (2, true, 1, false));
-    assert!((round(&mut h) - (200.0 + 2.0 * PI + 92.0)).abs() < 1e-6, "{}", round(&mut h));
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len(), form.pick_missed()), (2, false, 1, false));
+    assert!((round(&mut h) - 92.0).abs() < 1e-6, "{}", round(&mut h));
+    click_model(&mut h, front);
+    assert!(chamfer_form(&mut h).picked.0);
     // The hole too: every edge, which is the row's own second choice.
     click_model(&mut h, hole);
     assert_eq!(chamfer_form(&mut h).edges, 1);
     assert!((round(&mut h) - (200.0 + 2.0 * PI + 92.0 + 6.0 * PI)).abs() < 1e-6, "{}", round(&mut h));
-    // The block's other wall takes the outside edge out again; the pocket's floor, its rim.
-    click_model(&mut h, front);
+    // The block's wall takes the outside edge out again; the pocket's floor, its rim.
+    click_model(&mut h, right);
     let form = chamfer_form(&mut h);
     assert_eq!((form.edges, form.picked.0, form.picked.1.len()), (2, false, 2));
     click_model(&mut h, floor);
@@ -2871,10 +2874,40 @@ fn chamfer_takes_the_edges_clicked_on_the_model() {
     h.frames(3);
     assert_eq!((chamfer_form(&mut h).edges, h.app.dialog.as_ref().map(|d| d.inputs[0].items.len())), (0, Some(0)));
     assert!((round(&mut h) - (200.0 + 2.0 * PI)).abs() < 1e-6);
-    // Created on the hole's rim clicked: the operation breaks that edge alone, and the picking
-    // stops.
+    // The outside edge the row stands for counts as picked: one click on a wall of the block
+    // takes it out, and nothing is lit for it. With no edge picked the form says what to do,
+    // and Create does nothing.
+    click_model(&mut h, right);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.none_picked(), form.pick_missed()), (2, true, false));
+    assert_eq!(h.app.dialog.as_ref().map(|d| d.inputs[0].items.len()), Some(0));
+    assert!(h.widget(tr("manufacture.chamfer_none_picked")).is_some() && h.widget("0 of 3, picked on the model").is_some());
+    press(&mut h, "Create");
+    assert_eq!((open(&h), data(&mut h)["setups"][0]["operations"].clone()), ("chamfer", json!([])));
+    // A second click puts it back, lit now, which is the row's own choice again; a third takes
+    // it out again.
+    click_model(&mut h, right);
+    assert_eq!((chamfer_form(&mut h).edges, h.app.dialog.as_ref().map(|d| d.inputs[0].items.len())), (0, Some(1)));
+    assert!((round(&mut h) - (200.0 + 2.0 * PI)).abs() < 1e-6);
+    click_model(&mut h, right);
+    assert!(chamfer_form(&mut h).none_picked());
+    // All the top edges, from the row, then one click on the pocket's wall: all but its rim.
+    chamfer_form(&mut h).edges = 1;
+    h.frames(3);
+    click_model(&mut h, wall);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len()), (2, true, 1));
+    assert!((round(&mut h) - (200.0 + 2.0 * PI + 6.0 * PI)).abs() < 1e-6, "{}", round(&mut h));
+    // The outside edge, from the row, and the hole's rim clicked: both.
+    chamfer_form(&mut h).edges = 0;
+    h.frames(3);
     click_model(&mut h, hole);
-    assert_eq!(chamfer_form(&mut h).edges, 2);
+    let form = chamfer_form(&mut h);
+    assert_eq!((form.edges, form.picked.0, form.picked.1.len()), (2, true, 1));
+    // Created on the hole's rim alone (the outside edge clicked out): the operation breaks
+    // that edge alone, and the picking stops.
+    click_model(&mut h, front);
+    assert_eq!((chamfer_form(&mut h).edges, chamfer_form(&mut h).picked.0), (2, false));
     press(&mut h, "Create");
     assert_eq!(open(&h), "none", "{:?}", h.app.status);
     assert!(h.app.dialog.is_none());

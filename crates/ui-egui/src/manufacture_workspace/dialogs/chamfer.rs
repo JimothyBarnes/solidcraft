@@ -48,6 +48,13 @@ pub(crate) struct ChamferForm {
     clicked: picking::Picks<usize>,
     /// The choice of edges as the clicks last left it: another one since is the row's own.
     left_at: usize,
+    /// The edges the row's choice stands for that no click has taken out (0 the outside edge,
+    /// then the openings' rims): they count as picked though nothing lights them, so a click
+    /// on one takes it out, as a click on an edge picked does (the owner, 2026-11-24: the
+    /// outside edge to start with, easy to take out).
+    chosen: Vec<usize>,
+    /// The edges the clicks stand for, lit on the model, as they last were.
+    lit: Vec<usize>,
     pub direction: usize,
     /// How wide the chamfer is seen from above, mm: half a millimetre until it is typed.
     pub width: f64,
@@ -84,6 +91,8 @@ impl ChamferForm {
             rims: Worked::new(),
             clicked: picking::Picks::new(),
             left_at: 0,
+            chosen: vec![0],
+            lit: Vec::new(),
             direction: 0,
             width: WIDTH,
             typed_width: false,
@@ -195,12 +204,24 @@ impl ChamferForm {
         self.clicked.missed
     }
 
+    /// The edges the row's choice `edges` stands for, of an outside edge and `rims` openings: 0
+    /// the outside edge, then the rims; none for the edges picked, which say their own.
+    fn of_choice(edges: usize, rims: usize) -> Vec<usize> {
+        match edges {
+            0 => vec![0],
+            1 => (0..=rims).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Takes what was clicked on the model since the last frame (decision 0030 of the CAM
     /// work): a wall of the part is its outside edge, a wall or the floor of an opening (or of
-    /// what stands in it) the opening's rim, and a second click on an edge takes it out. The
-    /// edges picked are the row's own choice of them where it has one (the outside edge alone,
-    /// which none picked is too, and all of them), else a choice the row gains. Whether what
-    /// is cut changed.
+    /// what stands in it) the opening's rim. A click on an edge not picked picks it; a click on
+    /// one picked takes it out, whether a click picked it or the row's choice did (the outside
+    /// edge the form starts with is taken out by one click on a wall of the part). The edges
+    /// picked are the row's own choice of them where it has one (the outside edge alone, and
+    /// all of them), else a choice the row gains, which may be none. Whether what is cut
+    /// changed.
     fn take_picks(&mut self, app: &mut SolveApp, ctx: &egui::Context) -> bool {
         let asked = self.asked();
         let (found, rims) = self.rims.get().map_or((None, Vec::new()), |(key, rims)| (Some(key), rims.clone()));
@@ -208,13 +229,26 @@ impl ChamferForm {
         let changed = match self.clicked.take(app, ctx, PICKED, found, on_edge) {
             None => false,
             Some(mut clicked) => {
-                clicked.sort_unstable();
-                self.edges = if clicked.is_empty() || clicked == [0] {
+                // An edge the row's choice stood for, clicked: the click takes it out, and it is
+                // not lit.
+                let new: Vec<usize> = clicked.iter().filter(|edge| !self.lit.contains(edge)).copied().collect();
+                for edge in new {
+                    if let Some(at) = self.chosen.iter().position(|chosen| *chosen == edge) {
+                        self.chosen.remove(at);
+                        self.clicked.keep(app, |lit| *lit != edge);
+                        clicked.retain(|lit| *lit != edge);
+                    }
+                }
+                self.lit = clicked.clone();
+                let mut picked: Vec<usize> = self.chosen.iter().chain(&clicked).copied().filter(|edge| *edge <= rims.len()).collect();
+                picked.sort_unstable();
+                picked.dedup();
+                self.edges = if picked == [0] {
                     0
-                } else if clicked.len() == rims.len() + 1 {
+                } else if picked.len() == rims.len() + 1 {
                     1
                 } else {
-                    self.picked = (clicked.contains(&0), clicked.iter().filter_map(|edge| rims.get(edge.checked_sub(1)?).copied()).collect());
+                    self.picked = (picked.contains(&0), picked.iter().filter_map(|edge| rims.get(edge.checked_sub(1)?).copied()).collect());
                     PICKED_EDGES
                 };
                 true
@@ -222,6 +256,11 @@ impl ChamferForm {
         };
         self.left_at = self.edges;
         changed
+    }
+
+    /// Whether no edge is picked: every one the form started with was clicked out.
+    pub fn none_picked(&self) -> bool {
+        self.edges == PICKED_EDGES && !self.picked.0 && self.picked.1.is_empty()
     }
 
     /// Works the chamfer out, if its parameters or the design changed, and shows the numbers that
@@ -273,6 +312,8 @@ impl ChamferForm {
         if picks && self.edges != self.left_at {
             self.clicked.forget(app);
             self.left_at = self.edges;
+            self.chosen = Self::of_choice(self.edges, self.rims.get().map_or(0, |(_, rims)| rims.len()));
+            self.lit.clear();
         }
         self.refresh(app);
         if picks && self.take_picks(app, ctx) {
@@ -293,6 +334,7 @@ impl ChamferForm {
         edges.extend(picked_label.as_deref());
         let missing = self.missing();
         let ready = missing.is_none() && self.worked.result.is_ok();
+        let none_picked = self.none_picked();
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         // Where the tool's tip runs: the number to check against what is beside the part.
         let tip = self.worked.get().and_then(|(_, preview)| preview.numbers.get("z")?.as_f64()).map(|z| format_length(z, units, decimals));
@@ -349,6 +391,7 @@ impl ChamferForm {
                     ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_chamfer_engine_note"));
                 }
                 let note = match self.edges {
+                    PICKED_EDGES if none_picked => "manufacture.chamfer_none_picked",
                     PICKED_EDGES => "manufacture.chamfer_picked_note",
                     1 => "manufacture.chamfer_all_note",
                     _ => "manufacture.chamfer_note",
@@ -357,7 +400,8 @@ impl ChamferForm {
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_chamfer_preview_note"));
                 }
-                refusal(ui, self.error.as_deref().or(self.worked.trouble()));
+                // With no edge picked the note says what to do; the engine's refusal says it again.
+                refusal(ui, self.error.as_deref().or(self.worked.trouble().filter(|_| !none_picked)));
             });
         match action {
             ui_kit::Action::Ok => self.accept(app),

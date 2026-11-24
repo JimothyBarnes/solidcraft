@@ -1,41 +1,49 @@
 {
   "en": {
-    "manufacture.chamfer_pick_hint": "Or click the edges to break on the model: a wall of the part, or of an opening in its top.",
+    "manufacture.chamfer_none_picked": "No edge is picked: click the edges to break on the model.",
+    "manufacture.chamfer_pick_hint": "Or click the edges to break on the model: a wall of the part, or of an opening in its top. A click on an edge already picked takes it out, the outside edge too.",
     "manufacture.chamfer_pick_missed": "That face is on no edge the tool can break: click a wall of the part, or of an opening its point fits in.",
     "manufacture.chamfer_picked_note": "Round the edges picked on the model. Chamfer after what makes them is cut: the tool goes down close to the wall."
   },
   "ar": {
-    "manufacture.chamfer_pick_hint": "أو انقر على الحواف المراد شطفها على النموذج: جدار للقطعة، أو لفتحة في سطحها العلوي.",
+    "manufacture.chamfer_none_picked": "لم تُختر أي حافة: انقر على الحواف المراد شطفها على النموذج.",
+    "manufacture.chamfer_pick_hint": "أو انقر على الحواف المراد شطفها على النموذج: جدار للقطعة، أو لفتحة في سطحها العلوي. النقر على حافة مختارة يلغي اختيارها، والحافة الخارجية كذلك.",
     "manufacture.chamfer_pick_missed": "هذا الوجه ليس على حافة تستطيع الأداة شطفها: انقر على جدار للقطعة، أو لفتحة يتسع لها رأس الأداة.",
     "manufacture.chamfer_picked_note": "حول الحواف المختارة على النموذج. اشطف بعد قطع ما يصنعها: الأداة تنزل قريبًا من الجدار."
   },
   "he": {
-    "manufacture.chamfer_pick_hint": "או לחצו במודל על הקצוות שיש לשבור: דופן של החלק, או של פתח בפניו העליונים.",
+    "manufacture.chamfer_none_picked": "לא נבחר אף קצה: לחצו במודל על הקצוות שיש לשבור.",
+    "manufacture.chamfer_pick_hint": "או לחצו במודל על הקצוות שיש לשבור: דופן של החלק, או של פתח בפניו העליונים. לחיצה על קצה שכבר נבחר מבטלת את בחירתו, גם את הקצה החיצוני.",
     "manufacture.chamfer_pick_missed": "הפאה הזו אינה על קצה שהכלי יכול לשבור: לחצו על דופן של החלק, או של פתח שחוד הכלי נכנס בו.",
     "manufacture.chamfer_picked_note": "סביב הקצוות שנבחרו במודל. שברו קצוות אחרי חיתוך מה שיוצר אותם: הכלי יורד קרוב לדופן."
   },
   "ja": {
-    "manufacture.chamfer_pick_hint": "または、面取りするエッジをモデル上でクリックします。部品の壁、または上面の開口の壁です。",
+    "manufacture.chamfer_none_picked": "エッジが選択されていません。面取りするエッジをモデル上でクリックしてください。",
+    "manufacture.chamfer_pick_hint": "または、面取りするエッジをモデル上でクリックします。部品の壁、または上面の開口の壁です。選択済みのエッジをクリックすると、外周のエッジも含めて選択が外れます。",
     "manufacture.chamfer_pick_missed": "その面は、工具で面取りできるエッジの面ではありません。部品の壁、または工具の先端が入る開口の壁をクリックしてください。",
     "manufacture.chamfer_picked_note": "モデル上で選択したエッジを一周します。面取りは、それらを作る加工の後に行ってください。工具は壁の近くに下ります。"
   },
   "vi": {
-    "manufacture.chamfer_pick_hint": "Hoặc nhấp vào các cạnh cần vát trên mô hình: một vách của chi tiết, hoặc của một lỗ mở trên mặt trên.",
+    "manufacture.chamfer_none_picked": "Chưa chọn cạnh nào: hãy nhấp vào các cạnh cần vát trên mô hình.",
+    "manufacture.chamfer_pick_hint": "Hoặc nhấp vào các cạnh cần vát trên mô hình: một vách của chi tiết, hoặc của một lỗ mở trên mặt trên. Nhấp vào một cạnh đã chọn sẽ bỏ chọn nó, kể cả cạnh ngoài.",
     "manufacture.chamfer_pick_missed": "Mặt đó không thuộc cạnh nào dao có thể vát: hãy nhấp vào một vách của chi tiết, hoặc của một lỗ mở mà mũi dao lọt vào.",
     "manufacture.chamfer_picked_note": "Quanh các cạnh đã chọn trên mô hình. Vát sau khi đã cắt những gì tạo ra chúng: dao đi xuống sát vách."
   },
   "zh": {
-    "manufacture.chamfer_pick_hint": "或在模型上单击要倒角的边：零件的侧壁，或顶面开口的侧壁。",
+    "manufacture.chamfer_none_picked": "未选择任何边：请在模型上单击要倒角的边。",
+    "manufacture.chamfer_pick_hint": "或在模型上单击要倒角的边：零件的侧壁，或顶面开口的侧壁。单击已选的边会取消选择，外轮廓边也一样。",
     "manufacture.chamfer_pick_missed": "该面不属于刀具可以倒角的任何边：请单击零件的侧壁，或刀尖能进入的开口的侧壁。",
     "manufacture.chamfer_picked_note": "沿模型上所选的边加工。请在切出这些边之后再倒角：刀具在靠近侧壁处下刀。"
   },
   "de": {
-    "manufacture.chamfer_pick_hint": "Oder die zu brechenden Kanten am Modell anklicken: eine Wand des Teils oder einer Öffnung in seiner Oberseite.",
+    "manufacture.chamfer_none_picked": "Keine Kante gewählt: die zu brechenden Kanten am Modell anklicken.",
+    "manufacture.chamfer_pick_hint": "Oder die zu brechenden Kanten am Modell anklicken: eine Wand des Teils oder einer Öffnung in seiner Oberseite. Ein Klick auf eine schon gewählte Kante nimmt sie heraus, auch die Außenkante.",
     "manufacture.chamfer_pick_missed": "Diese Fläche gehört zu keiner Kante, die das Werkzeug brechen kann: eine Wand des Teils anklicken, oder einer Öffnung, in die seine Spitze passt.",
     "manufacture.chamfer_picked_note": "Um die am Modell gewählten Kanten. Erst fasen, wenn geschnitten ist, was sie erzeugt: Das Werkzeug taucht nah an der Wand ein."
   },
   "ko": {
-    "manufacture.chamfer_pick_hint": "또는 모델에서 모따기할 모서리를 클릭하십시오. 부품의 벽이나 윗면 개구부의 벽입니다.",
+    "manufacture.chamfer_none_picked": "선택된 모서리가 없습니다. 모델에서 모따기할 모서리를 클릭하십시오.",
+    "manufacture.chamfer_pick_hint": "또는 모델에서 모따기할 모서리를 클릭하십시오. 부품의 벽이나 윗면 개구부의 벽입니다. 이미 선택된 모서리를 클릭하면 바깥 모서리도 선택이 해제됩니다.",
     "manufacture.chamfer_pick_missed": "그 면은 공구로 모따기할 수 있는 모서리의 면이 아닙니다. 부품의 벽이나 공구 끝이 들어가는 개구부의 벽을 클릭하십시오.",
     "manufacture.chamfer_picked_note": "모델에서 선택한 모서리를 따라 돕니다. 그 모서리를 만드는 가공이 끝난 뒤에 모따기하십시오. 공구는 벽 가까이에서 내려갑니다."
   }
