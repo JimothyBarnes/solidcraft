@@ -148,6 +148,12 @@ pub struct ContourOp {
     /// is read there each time the toolpath is worked out.
     #[serde(default)]
     pub openings: Vec<[f64; 2]>,
+    /// Edges picked on the model to go round instead of what is found there (decision 0038 of
+    /// the CAM work): a point on each, in model coordinates; the engine reads the chains of level
+    /// edges they are on each time the toolpath is worked out. Round their outside or their
+    /// inside, as `side` says.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<[f64; 3]>,
     /// Inside: the angle the tool goes down along the wall at, radians; `None` for 3 degrees.
     #[serde(default)]
     pub ramp_angle: Option<f64>,
@@ -288,13 +294,21 @@ impl ContourOp {
                 "tabs go with one pass: cut the stock away in passes down to above the bottom, and the part out in one pass with its tabs".into()
             );
         }
+        if self.edges.len() > MAX_CONTOUR_OPENINGS || self.edges.iter().flatten().any(|v| !finite(*v)) {
+            return bad(format!(
+                "a contour goes round at most {MAX_CONTOUR_OPENINGS} edges picked, each a point finite and within {MAX_COORDINATE} mm"
+            ));
+        }
         match self.side {
             ContourSide::Inside => {
                 if self.tabs.is_some() {
                     return bad("tabs hold a part that is cut round its outside: an inside contour takes none".into());
                 }
-                if self.openings.is_empty() || self.openings.len() > MAX_CONTOUR_OPENINGS {
+                if self.edges.is_empty() && (self.openings.is_empty() || self.openings.len() > MAX_CONTOUR_OPENINGS) {
                     return bad(format!("an inside contour goes round 1 to {MAX_CONTOUR_OPENINGS} openings, not {}", self.openings.len()));
+                }
+                if !self.edges.is_empty() && !self.openings.is_empty() {
+                    return bad("an inside contour goes round the openings found or the edges picked, not both".into());
                 }
                 if self.openings.iter().flatten().any(|v| !finite(*v)) {
                     return bad(format!("an opening's point must be finite and within {MAX_COORDINATE} mm"));
@@ -567,7 +581,7 @@ impl ContourOp {
         if self.side != ContourSide::Inside {
             return bad("an outside contour goes round the part's outline, not round openings".into());
         }
-        if openings.len() != self.openings.len() {
+        if self.edges.is_empty() && openings.len() != self.openings.len() {
             return bad(format!("{} openings were read from the model for the operation's {} points", openings.len(), self.openings.len()));
         }
         let d = self.depths(tool, placement)?;

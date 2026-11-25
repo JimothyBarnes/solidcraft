@@ -12,7 +12,7 @@ use solidcraft_cam::{
 };
 use solidcraft_cam::{HeightFrom, HeightRef, Heights};
 use solidcraft_doc::plugin_data::DATA;
-use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
+use solidcraft_geom::{Loop2Geom as _, PlaneGeom as _, Region2Geom as _, Seg2Geom as _};
 
 use super::CommandSpec;
 use crate::plugin::storage::{self, StorageCaller};
@@ -746,6 +746,119 @@ fn read_or_kept<T: Clone>(kept: &std::sync::Mutex<Vec<(u64, T)>>, key: Option<u6
         kept.truncate(OUTLINES_KEPT);
     }
     Ok(found)
+}
+
+/// Chains of edges picked on the model, as read lately: by a number for the bodies' geometry,
+/// the plane and the points.
+static CHAINS: std::sync::Mutex<Vec<(u64, Vec<super::cam_chains::Chain>)>> = std::sync::Mutex::new(Vec::new());
+/// Whether picked chains were found clear to be gone round, as checked lately: by a number for
+/// the geometry, the chains, the bottom and the side.
+static CHAINS_CLEAR: std::sync::Mutex<Vec<(u64, Option<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The closed chains of level edges `picks` name (points on edges, in model coordinates) for a
+/// contour round them (decision 0038 of the CAM work), in the setup's WCS: the bottom it is cut
+/// down to (`bottom`, else the chains' own height and `offset`) and the chains as loops,
+/// counter-clockwise. Refused, with the reason: a chain that does not close, chains of
+/// different heights, and (checked exactly) round the outside anything of the part above the
+/// bottom that reaches out past them, round the inside anything in the way above it.
+fn picked_chains(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    picks: &[[f64; 3]],
+    (bottom, offset): (Option<f64>, f64),
+    inside: bool,
+) -> std::result::Result<(f64, Vec<solidcore_record::Loop2>), String> {
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    let points: Vec<solidcore_record::Vec3> = picks.iter().map(|at| solidcore_record::Vec3 { x: at[0], y: at[1], z: at[2] }).collect();
+    let flat: Vec<f64> = picks.iter().flatten().copied().collect();
+    with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let chains = read_or_kept(&CHAINS, reading_key(bodies, &plane, &flat), || {
+            super::cam_chains::chains(&named, &plane, &points).map_err(|e| bad(cmd, e))
+        })?;
+        let Some(first) = chains.first() else { return Err(bad(cmd, "no edges are picked")) };
+        if let Some(open) = chains.iter().find(|c| !c.closed) {
+            let end = open.segs.last().map(|seg| seg.end()).unwrap_or(solidcore_record::Vec2 { x: 0.0, y: 0.0 });
+            return Err(bad(
+                cmd,
+                format!(
+                    "the chain of edges picked does not close: it ends at X {:.3} Y {:.3} (where two edges go on, or none): a contour round an open chain is not cut yet, so pick edges that go all the way round",
+                    end.x, end.y
+                ),
+            ));
+        }
+        let z = first.z;
+        if let Some(other) = chains.iter().find(|c| (c.z - z).abs() > 1e-6) {
+            return Err(bad(cmd, format!("the chains picked are at different heights (Z {:.3} and Z {:.3} mm): make a contour for each", z, other.z)));
+        }
+        let bottom = bottom.unwrap_or(z + offset);
+        let loops: Vec<solidcore_record::Loop2> = chains.iter().map(|c| solidcore_record::Loop2 { segs: c.segs.clone() }.ccw()).collect();
+        let mut asked = flat.clone();
+        asked.extend([bottom, if inside { 1.0 } else { 0.0 }]);
+        let trouble = read_or_kept(&CHAINS_CLEAR, reading_key(bodies, &plane, &asked), || {
+            if inside {
+                for ring in &loops {
+                    if let Some(name) = super::cam_chains::in_the_way(&named, &plane, ring, bottom).map_err(|e| bad(cmd, e))? {
+                        return Ok(Some(format!(
+                            "something of body '{name}' stands inside the chain picked above the bottom (Z {bottom:.3} mm): round the inside of a chain it must be open; an opening with something in it is cut by Pocket"
+                        )));
+                    }
+                }
+                Ok(None)
+            } else {
+                let cut = plane.offset(bottom);
+                Ok(super::cam_outline::reaching_past(&named, &cut, &loops).map_err(|e| bad(cmd, e))?.map(|name| {
+                    format!(
+                        "something of body '{name}' above the bottom (Z {bottom:.3} mm) reaches out past the chains picked, so a cut round them would cut into it: pick the chains of everything that stands there, or raise the bottom"
+                    )
+                }))
+            }
+        })?;
+        match trouble {
+            Some(why) => Err(bad(cmd, why)),
+            None => Ok((bottom, loops)),
+        }
+    })
+    .map_err(said)
+}
+
+/// A chain of edges picked on the model, as a form shows it (decision 0038 of the CAM work).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickedChain {
+    /// The body it is on, and the lowest of its edges' numbers: what tells one chain from another.
+    pub body: String,
+    pub first_edge: usize,
+    pub closed: bool,
+    /// Its length, mm, and its Z in the setup's WCS.
+    pub length: f64,
+    pub z: f64,
+}
+
+/// The chain of level edges the point `at` (model coordinates) is on, for a contour of the setup
+/// `id` to go round; why there is none. It reads the design and changes nothing.
+pub fn manufacture_chain_at(s: &Session, id: &str, at: [f64; 3]) -> std::result::Result<PickedChain, String> {
+    const CMD: &str = "cam.op.contour";
+    let d = manufacture_data(&s.doc)?;
+    let setup = d.setups.iter().find(|x| x.id == id).ok_or_else(|| format!("the design has no setup '{id}'"))?;
+    let (model, _) = model_box(s, CMD, setup).map_err(said)?;
+    let p = setup.place(model).map_err(|e| e.to_string())?;
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    let point = solidcore_record::Vec3 { x: at[0], y: at[1], z: at[2] };
+    with_bodies(s, CMD, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let chains = super::cam_chains::chains(&named, &plane, &[point]).map_err(|e| bad(CMD, e))?;
+        let chain = chains.first().ok_or_else(|| bad(CMD, "no chain there"))?;
+        Ok(PickedChain {
+            body: named.get(chain.body).map_or_else(String::new, |(name, _)| (*name).to_string()),
+            first_edge: chain.edges.iter().copied().min().unwrap_or(0),
+            closed: chain.closed,
+            length: chain.length(),
+            z: (chain.z * 1e9).round() / 1e9,
+        })
+    })
+    .map_err(said)
 }
 
 /// The opening each of `points` is in ([`super::cam_pockets::Finder::opening_at`]), in their
@@ -1612,7 +1725,21 @@ fn work(
             {
                 contour.bottom = Some(bottom);
             }
-            let done = if contour.side == ContourSide::Inside {
+            let done = if !contour.edges.is_empty() {
+                // Round chains of edges picked on the model (decision 0038), down to their own
+                // height unless its heights say otherwise.
+                let inside = contour.side == ContourSide::Inside;
+                let given = (contour.bottom, feature_bottom.map_or(0.0, |h| h.offset));
+                let (bottom, loops) = picked_chains(s, cmd, setup, &placement, &contour.edges, given, inside).map_err(|e| bad(cmd, of(op, e)))?;
+                let contour = ContourOp { bottom: Some(bottom), ..contour.clone() };
+                if inside {
+                    let openings: Vec<solidcore_record::Region2> =
+                        loops.into_iter().map(|outer| solidcore_record::Region2 { outer, holes: Vec::new() }).collect();
+                    contour.toolpath_inside(start, tool, &placement, material, &openings).map_err(failed)?
+                } else {
+                    contour.toolpath(start, tool, &placement, material, &loops).map_err(failed)?
+                }
+            } else if contour.side == ContourSide::Inside {
                 // Round the inside of its openings, each read from the model where its point is,
                 // down to the bottom it was given (as far as it says: a little under the part
                 // breaks through) or, given none, to the one found.

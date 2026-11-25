@@ -33,9 +33,44 @@ pub(crate) fn stop(app: &mut SolveApp) {
 /// Starts the picking for the open form, unless it has started or something else has the
 /// viewport (a tool, another dialog). `label` is what the form calls what it takes.
 fn start(app: &mut SolveApp, label: &'static str) {
+    start_taking(app, label, FACES);
+}
+
+/// [`start`], for picks of the kinds `accept` (faces, edges).
+fn start_taking(app: &mut SolveApp, label: &'static str, accept: crate::selection::Accept) {
     if app.tool.is_none() && app.dialog.is_none() {
-        app.dialog = Some(Dialog::new(Kind::ManufacturePick, vec![SelInput::new(label, FACES, true)]));
+        app.dialog = Some(Dialog::new(Kind::ManufacturePick, vec![SelInput::new(label, accept, true)]));
     }
+}
+
+/// Lets go of a picking that takes edges only, so that the form's own picking of faces starts
+/// afresh (Contour, back from its edges to the openings found).
+pub(crate) fn faces_again(app: &mut SolveApp) {
+    let takes = app.dialog.as_ref().filter(|d| matches!(d.kind, Kind::ManufacturePick)).and_then(|d| d.inputs.first()).map(|input| input.accept);
+    if takes.is_some_and(|accept| accept & FACES == 0) {
+        stop(app);
+    }
+}
+
+/// For a form that takes edges picked on the model (a contour's chains, decision 0038 of the CAM
+/// work): starts a picking that takes edges (in place of one that took faces), and takes the
+/// point of the edge clicked since the last frame, if one was. Nothing is left lit: the form says
+/// what it took, and its toolpath shows it.
+pub(crate) fn clicked_edge(app: &mut SolveApp, ctx: &egui::Context) -> Option<Vec3> {
+    let takes = app.dialog.as_ref().filter(|d| matches!(d.kind, Kind::ManufacturePick)).and_then(|d| d.inputs.first()).map(|input| input.accept);
+    if takes.is_some_and(|accept| accept & crate::selection::EDGES == 0) {
+        stop(app);
+    }
+    if on_model(app, ctx) {
+        start_taking(app, "manufacture.contour_chains", crate::selection::EDGES);
+    }
+    let shown = shown(app)?;
+    let point = shown.iter().rev().find_map(|sel| match sel {
+        Sel::Edge { point, .. } => Some(*point),
+        _ => None,
+    });
+    shown.clear();
+    point
 }
 
 /// The faces picked for the open form, to read and to change: `None` while the viewport does
@@ -63,7 +98,7 @@ pub(crate) fn clicked_point(app: &mut SolveApp, ctx: &egui::Context, before: &[S
     let added = shown.iter().find(|sel| !before.iter().any(|b| same_item(b, sel)));
     let dropped = before.iter().find(|b| !shown.iter().any(|sel| same_item(b, sel)));
     let point = added.or(dropped).and_then(|sel| match sel {
-        Sel::Face { point, .. } => Some(*point),
+        Sel::Face { point, .. } | Sel::Edge { point, .. } => Some(*point),
         _ => None,
     })?;
     *shown = before.to_vec();

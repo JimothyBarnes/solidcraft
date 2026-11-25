@@ -25,6 +25,7 @@ mod board_layers;
 mod bom;
 pub(crate) mod browser;
 mod cam;
+mod cam_chains;
 mod cam_heights;
 mod cam_holes;
 mod cam_library;
@@ -146,12 +147,12 @@ pub use crate::schema::cam::{
     CamLibraryToolStatus, CamLibraryTools, FoundOpening, FoundPocket, FoundSketch, FoundSlot, HoleBottom, HoleGroup, ToolRow,
 };
 pub use cam::{
-    BUILTIN_MACHINES, BodyPart, Drawn, GENERIC_MILL, Machine, OperationPreview, OperationView, Placement, Playback, PlaybackOperation,
-    ProgramPreview, SetupView, Simulated, SimulatedOperation, ToolAt, ToolChoice, ToolShape, manufacture_data, manufacture_hole_at,
-    manufacture_holes, manufacture_machine, manufacture_opening_at, manufacture_openings, manufacture_playback, manufacture_pocket_at,
-    manufacture_pockets, manufacture_post_stops, manufacture_posts, manufacture_preview, manufacture_program, manufacture_rim_at, manufacture_rims,
-    manufacture_setup_preview, manufacture_simulation, manufacture_sketches, manufacture_slot_at, manufacture_slots, manufacture_tool_rows,
-    manufacture_tools, manufacture_view,
+    BUILTIN_MACHINES, BodyPart, Drawn, GENERIC_MILL, Machine, OperationPreview, OperationView, PickedChain, Placement, Playback, PlaybackOperation,
+    ProgramPreview, SetupView, Simulated, SimulatedOperation, ToolAt, ToolChoice, ToolShape, manufacture_chain_at, manufacture_data,
+    manufacture_hole_at, manufacture_holes, manufacture_machine, manufacture_opening_at, manufacture_openings, manufacture_playback,
+    manufacture_pocket_at, manufacture_pockets, manufacture_post_stops, manufacture_posts, manufacture_preview, manufacture_program,
+    manufacture_rim_at, manufacture_rims, manufacture_setup_preview, manufacture_simulation, manufacture_sketches, manufacture_slot_at,
+    manufacture_slots, manufacture_tool_rows, manufacture_tools, manufacture_view,
 };
 pub use cam_library::manufacture_library;
 pub(crate) use clipboard::{component_path_form, copy_keys};

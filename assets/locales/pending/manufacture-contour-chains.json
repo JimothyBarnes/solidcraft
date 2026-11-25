@@ -1,0 +1,90 @@
+{
+  "en": {
+    "manufacture.contour_chains": "Edges",
+    "manufacture.contour_chains_hint": "Click an edge on the model: its whole chain at that height is picked, through every corner where it goes on one way. A click on a chain picked takes it out.",
+    "manufacture.contour_chains_inside": "Round their inside",
+    "manufacture.contour_chains_none": "None picked yet",
+    "manufacture.contour_chains_outside": "Round their outside",
+    "manufacture.contour_chains_value": "{count} chains, {closed} closed, {length} long",
+    "manufacture.contour_geometry": "Geometry",
+    "manufacture.contour_geometry_edges": "Edges picked on the model",
+    "manufacture.contour_geometry_found": "Found on the model"
+  },
+  "ar": {
+    "manufacture.contour_chains": "الحواف",
+    "manufacture.contour_chains_hint": "انقر على حافة في النموذج: تُختار سلسلتها كلها عند ذلك الارتفاع، عبر كل زاوية تستمر منها في اتجاه واحد. النقر على سلسلة مختارة يلغي اختيارها.",
+    "manufacture.contour_chains_inside": "حول داخلها",
+    "manufacture.contour_chains_none": "لم يُختر شيء بعد",
+    "manufacture.contour_chains_outside": "حول خارجها",
+    "manufacture.contour_chains_value": "{count} سلاسل، {closed} مغلقة، بطول {length}",
+    "manufacture.contour_geometry": "الهندسة",
+    "manufacture.contour_geometry_edges": "حواف مختارة على النموذج",
+    "manufacture.contour_geometry_found": "ما وُجد في النموذج"
+  },
+  "he": {
+    "manufacture.contour_chains": "קצוות",
+    "manufacture.contour_chains_hint": "לחצו על קצה במודל: כל השרשרת שלו בגובה זה נבחרת, דרך כל פינה שבה היא ממשיכה בדרך אחת. לחיצה על שרשרת שנבחרה מבטלת את בחירתה.",
+    "manufacture.contour_chains_inside": "סביב החלק הפנימי שלהן",
+    "manufacture.contour_chains_none": "עדיין לא נבחר דבר",
+    "manufacture.contour_chains_outside": "סביב החלק החיצוני שלהן",
+    "manufacture.contour_chains_value": "{count} שרשראות, {closed} סגורות, באורך {length}",
+    "manufacture.contour_geometry": "גאומטריה",
+    "manufacture.contour_geometry_edges": "קצוות שנבחרו במודל",
+    "manufacture.contour_geometry_found": "מה שנמצא במודל"
+  },
+  "ja": {
+    "manufacture.contour_chains": "エッジ",
+    "manufacture.contour_chains_hint": "モデル上のエッジをクリックすると、その高さにあるチェーン全体が選択されます（一方向にだけ続く角はたどります）。選択済みのチェーンをクリックすると外れます。",
+    "manufacture.contour_chains_inside": "内側を回る",
+    "manufacture.contour_chains_none": "まだ選択されていません",
+    "manufacture.contour_chains_outside": "外側を回る",
+    "manufacture.contour_chains_value": "{count} 本のチェーン、閉じたもの {closed} 本、長さ {length}",
+    "manufacture.contour_geometry": "形状",
+    "manufacture.contour_geometry_edges": "モデル上で選択したエッジ",
+    "manufacture.contour_geometry_found": "モデル上で検出"
+  },
+  "vi": {
+    "manufacture.contour_chains": "Cạnh",
+    "manufacture.contour_chains_hint": "Nhấp vào một cạnh trên mô hình: cả chuỗi của nó ở độ cao đó được chọn, qua mọi góc mà nó chỉ đi tiếp một hướng. Nhấp vào một chuỗi đã chọn sẽ bỏ chọn nó.",
+    "manufacture.contour_chains_inside": "Đi quanh phía trong",
+    "manufacture.contour_chains_none": "Chưa chọn gì",
+    "manufacture.contour_chains_outside": "Đi quanh phía ngoài",
+    "manufacture.contour_chains_value": "{count} chuỗi, {closed} khép kín, dài {length}",
+    "manufacture.contour_geometry": "Hình học",
+    "manufacture.contour_geometry_edges": "Các cạnh chọn trên mô hình",
+    "manufacture.contour_geometry_found": "Tìm thấy trên mô hình"
+  },
+  "zh": {
+    "manufacture.contour_chains": "边",
+    "manufacture.contour_chains_hint": "在模型上单击一条边：该高度上的整条链都会被选取，经过每个只往一个方向延续的拐角。单击已选取的链会取消选取。",
+    "manufacture.contour_chains_inside": "沿其内侧",
+    "manufacture.contour_chains_none": "尚未选取",
+    "manufacture.contour_chains_outside": "沿其外侧",
+    "manufacture.contour_chains_value": "{count} 条链，{closed} 条闭合，长 {length}",
+    "manufacture.contour_geometry": "几何",
+    "manufacture.contour_geometry_edges": "在模型上选取的边",
+    "manufacture.contour_geometry_found": "在模型上找到的"
+  },
+  "de": {
+    "manufacture.contour_chains": "Kanten",
+    "manufacture.contour_chains_hint": "Eine Kante am Modell anklicken: ihre ganze Kette auf dieser Höhe wird gewählt, über jede Ecke, an der sie in nur eine Richtung weitergeht. Ein Klick auf eine gewählte Kette nimmt sie heraus.",
+    "manufacture.contour_chains_inside": "Innen herum",
+    "manufacture.contour_chains_none": "Noch keine gewählt",
+    "manufacture.contour_chains_outside": "Außen herum",
+    "manufacture.contour_chains_value": "{count} Ketten, {closed} geschlossen, {length} lang",
+    "manufacture.contour_geometry": "Geometrie",
+    "manufacture.contour_geometry_edges": "Am Modell gewählte Kanten",
+    "manufacture.contour_geometry_found": "Am Modell gefunden"
+  },
+  "ko": {
+    "manufacture.contour_chains": "모서리",
+    "manufacture.contour_chains_hint": "모델에서 모서리를 클릭하면 그 높이에 있는 체인 전체가 선택됩니다(한 방향으로만 이어지는 모서리는 따라갑니다). 선택한 체인을 클릭하면 선택이 해제됩니다.",
+    "manufacture.contour_chains_inside": "안쪽을 따라",
+    "manufacture.contour_chains_none": "아직 선택한 것이 없습니다",
+    "manufacture.contour_chains_outside": "바깥쪽을 따라",
+    "manufacture.contour_chains_value": "체인 {count}개, 닫힌 것 {closed}개, 길이 {length}",
+    "manufacture.contour_geometry": "형상",
+    "manufacture.contour_geometry_edges": "모델에서 선택한 모서리",
+    "manufacture.contour_geometry_found": "모델에서 찾은 것"
+  }
+}

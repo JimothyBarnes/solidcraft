@@ -4,8 +4,8 @@
 //! the other operations' forms do.
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    FoundOpening, OperationPreview, Placement, ToolChoice, manufacture_opening_at, manufacture_openings, manufacture_preview,
-    manufacture_setup_preview, manufacture_tools,
+    FoundOpening, OperationPreview, PickedChain, Placement, ToolChoice, manufacture_chain_at, manufacture_opening_at, manufacture_openings,
+    manufacture_preview, manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number};
 use solidcraft_ui_text::tr;
@@ -24,6 +24,13 @@ const PICKED: &str = "Openings";
 pub(super) const DIRECTIONS: [(&str, &str); 2] = [("climb", "manufacture.direction_climb"), ("conventional", "manufacture.direction_conventional")];
 /// Which side of a wall the cut goes round: the command's word and the label.
 const SIDES: [(&str, &str); 2] = [("outside", "manufacture.contour_side_outside"), ("inside", "manufacture.contour_side_inside")];
+/// What the contour goes round: what is found on the model (the part's outline, or openings), or
+/// chains of edges picked on the model (decision 0038 of the CAM work).
+const GEOMETRIES: [(&str, &str); 2] = [("found", "manufacture.contour_geometry_found"), ("edges", "manufacture.contour_geometry_edges")];
+/// Which of [`GEOMETRIES`] is the edges picked.
+const EDGES_PICKED: usize = 1;
+/// [`SIDES`] as they are said of chains picked: the same words for the command.
+const CHAIN_SIDES: [(&str, &str); 2] = [("outside", "manufacture.contour_chains_outside"), ("inside", "manufacture.contour_chains_inside")];
 /// The widest tool picked for an opening, as a share of the widest circle that fits in it.
 const WIDEST_TOOL: f64 = 0.9;
 /// The stepdown a contour takes when none is typed, as a share of the tool's diameter (the
@@ -107,6 +114,13 @@ pub(crate) struct ContourForm {
     pub error: Option<String>,
     /// Its heights (decision 0037 of the CAM work).
     pub heights: super::heights::HeightsForm,
+    /// Which of [`GEOMETRIES`].
+    pub geometry: usize,
+    /// The chains picked on the model: the point clicked on each, in model coordinates, and the
+    /// chain it named.
+    pub chains: Vec<([f64; 3], PickedChain)>,
+    /// Why the last click on the model named no chain, if it did not.
+    chain_trouble: Option<String>,
 }
 
 impl ContourForm {
@@ -165,6 +179,9 @@ impl ContourForm {
             drawn_setup: None,
             editing: None,
             heights: super::heights::HeightsForm::new([true; 4]),
+            geometry: 0,
+            chains: Vec::new(),
+            chain_trouble: None,
             error: None,
         }
     }
@@ -198,6 +215,10 @@ impl ContourForm {
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
         form.heights = super::heights::HeightsForm::kept(app, id, [true; 4]);
+        // Its chains stay the ones it has: shown by how many points name them.
+        if base["edges"].as_array().is_some_and(|edges| !edges.is_empty()) {
+            form.geometry = EDGES_PICKED;
+        }
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -211,6 +232,42 @@ impl ContourForm {
         } else {
             None
         }
+    }
+
+    /// Takes the edge clicked on the model since the last frame, if one was: its chain is picked,
+    /// or taken out when it is picked already. Why a click named no chain is kept to say.
+    fn take_edge(&mut self, app: &mut SolveApp, ctx: &egui::Context) {
+        let Some(point) = picking::clicked_edge(app, ctx) else { return };
+        let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+        // To the micron: a click is no more exact than that.
+        let micron = |v: f64| (v * 1e6).round() / 1e6;
+        let at = [micron(point.x), micron(point.y), micron(point.z)];
+        match manufacture_chain_at(&app.session, &setup, at) {
+            Ok(chain) => {
+                self.chain_trouble = None;
+                let same = |c: &PickedChain| c.body == chain.body && c.first_edge == chain.first_edge;
+                match self.chains.iter().position(|(_, picked)| same(picked)) {
+                    Some(at) => {
+                        self.chains.remove(at);
+                    }
+                    None => self.chains.push((at, chain)),
+                }
+            }
+            Err(why) => self.chain_trouble = Some(why),
+        }
+    }
+
+    /// What the chains picked are, as the form says it: how many, how many closed, how long.
+    fn chains_said(&self, units: &str, decimals: u8) -> String {
+        if self.chains.is_empty() {
+            return tr("manufacture.contour_chains_none").to_string();
+        }
+        let closed = self.chains.iter().filter(|(_, c)| c.closed).count().to_string();
+        let long = format_length(self.chains.iter().map(|(_, c)| c.length).sum(), units, decimals);
+        solidcraft_ui_text::format(
+            "manufacture.contour_chains_value",
+            &[("count", &self.chains.len().to_string()), ("closed", &closed), ("length", &long)],
+        )
     }
 
     /// Whether the cut goes round the inside of openings.
@@ -338,7 +395,10 @@ impl ContourForm {
     /// top, its clearance, its side and its openings) stays.
     pub fn params(&self) -> Value {
         let mut contour = self.editing.as_ref().map_or_else(|| json!({}), |edited| edited.base.clone());
-        if self.editing.is_none() && self.inside() {
+        if self.editing.is_none() && self.geometry == EDGES_PICKED {
+            contour["side"] = json!(word(&SIDES, self.side));
+            contour["edges"] = json!(self.chains.iter().map(|(at, _)| *at).collect::<Vec<_>>());
+        } else if self.editing.is_none() && self.inside() {
             contour["side"] = json!("inside");
             contour["openings"] = json!(self.picked().iter().map(|opening| opening.at).collect::<Vec<_>>());
         }
@@ -384,7 +444,7 @@ impl ContourForm {
         self.placed.refresh(app, &setup, || manufacture_setup_preview(&app.session, "cam.setup.edit", &setup).map(Box::new));
         // Inside, the openings are looked for, and the tool follows the ones picked until it
         // is picked by hand. A contour being changed keeps its openings: nothing is looked for.
-        if self.inside() && self.editing.is_none() {
+        if self.inside() && self.editing.is_none() && self.geometry != EDGES_PICKED {
             let id = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
             if self.found.refresh(app, &setup, || manufacture_openings(&app.session, &id)) {
                 (self.opening, self.suited_to) = (0, None);
@@ -404,6 +464,9 @@ impl ContourForm {
             // contour being changed says where it ended when it was last worked out).
             let worked = || self.worked.get().and_then(|(_, preview)| preview.numbers.get("levels")?.as_array()?.last()?.as_f64());
             let found = match (self.inside(), &self.editing) {
+                // Round chains picked: their height.
+                _ if self.geometry == EDGES_PICKED && self.editing.is_none() => self.chains.first().map(|(_, chain)| chain.z),
+                _ if self.geometry == EDGES_PICKED => worked(),
                 (true, None) => self.picked().first().map(|opening| opening.bottom),
                 (true, Some(_)) => worked(),
                 (false, _) => None,
@@ -475,7 +538,15 @@ impl ContourForm {
         // Inside, what is picked on the model is what is cut round (decision 0030 of the CAM
         // work): a choice from the row's list forgets it, and an opening clicked is taken and
         // worked out.
-        let picks = self.editing.is_none() && self.inside();
+        let picks = self.editing.is_none() && self.inside() && self.geometry != EDGES_PICKED;
+        // Round edges picked: each edge clicked names its chain, and a chain picked again is
+        // taken out.
+        if self.editing.is_none() && self.geometry == EDGES_PICKED && !self.heights.picking() {
+            self.take_edge(app, ctx);
+        }
+        if picks {
+            picking::faces_again(app);
+        }
         if picks && self.opening != self.left_at {
             self.clicked.forget(app);
             self.picks.clear();
@@ -489,7 +560,7 @@ impl ContourForm {
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
         let directions = labels(&DIRECTIONS);
-        let sides = labels(&SIDES);
+        let sides = labels(if self.geometry == EDGES_PICKED { &CHAIN_SIDES } else { &SIDES });
         let inside = self.inside();
         let choice_labels = self.choice_labels(units, decimals);
         let choice_labels: Vec<&str> = choice_labels.iter().map(String::as_str).collect();
@@ -499,7 +570,13 @@ impl ContourForm {
             solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count)])
         });
         let missing = self.missing();
-        let ready = missing.is_none() && self.worked.result.is_ok() && (!inside || self.editing.is_some() || !self.picked().is_empty());
+        let edges = self.geometry == EDGES_PICKED;
+        let ready = missing.is_none()
+            && self.worked.result.is_ok()
+            && (self.editing.is_some() || if edges { !self.chains.is_empty() } else { !inside || !self.picked().is_empty() });
+        let geometries = labels(&GEOMETRIES);
+        let geometry = self.geometry;
+        let chains_said = self.chains_said(units, decimals);
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         let levels = self.levels(units, decimals);
         // The setup picked is the one the viewport draws, so the contour is seen on its own stock.
@@ -534,12 +611,36 @@ impl ContourForm {
                         ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_contour_setup", &mut self.setup, &setup_labels);
                     }
                 }
+                // What it goes round: found on the model, or chains of edges picked on it.
+                match &kept_openings {
+                    Some(_) => {
+                        ui_kit::value_row(ui, tr("manufacture.contour_geometry"), geometries.get(geometry).copied().unwrap_or_default());
+                    }
+                    None => {
+                        ui_kit::choice_row(ui, tr("manufacture.contour_geometry"), "manufacture_contour_geometry", &mut self.geometry, &geometries);
+                    }
+                }
                 // Its side, and inside, its openings: a contour being changed stays on both.
                 match &kept_openings {
                     Some(kept) => {
                         ui_kit::value_row(ui, tr("manufacture.contour_side"), sides.get(self.side).copied().unwrap_or_default());
-                        if inside {
+                        if edges {
+                            let count = self.editing.as_ref().and_then(|e| e.base["edges"].as_array().map(Vec::len)).unwrap_or(0).to_string();
+                            ui_kit::value_row(
+                                ui,
+                                tr("manufacture.contour_chains"),
+                                &solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count)]),
+                            );
+                        } else if inside {
                             ui_kit::value_row(ui, tr("manufacture.contour_opening"), kept);
+                        }
+                    }
+                    None if edges => {
+                        ui_kit::choice_row(ui, tr("manufacture.contour_side"), "manufacture_contour_side", &mut self.side, &sides);
+                        ui_kit::value_row(ui, tr("manufacture.contour_chains"), &chains_said);
+                        ui_kit::text(ui, tr("manufacture.contour_chains_hint"), ui_kit::Text::Note("manufacture_contour_chains_hint"));
+                        if let Some(why) = &self.chain_trouble {
+                            ui_kit::text(ui, why, ui_kit::Text::Note("manufacture_contour_chain_trouble"));
                         }
                     }
                     None => {

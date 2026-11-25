@@ -134,7 +134,7 @@ impl Dialog {
             Dialog::Drill(form) => form.editing.is_none(),
             Dialog::Bore(_) => true,
             Dialog::Slot(form) => form.editing.is_none(),
-            Dialog::Contour(form) => form.editing.is_none() && form.inside(),
+            Dialog::Contour(form) => form.editing.is_none() && (form.inside() || form.geometry == 1),
             Dialog::Chamfer(form) => form.editing.is_none(),
             Dialog::Thread(form) => form.editing.is_none(),
             _ => false,

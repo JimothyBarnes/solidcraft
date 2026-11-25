@@ -3237,3 +3237,60 @@ fn holes_go_down_to_the_bottom_their_heights_give_and_a_chamfer_takes_no_bottom(
     let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
     assert!(why.contains("a chamfer goes as deep as its width"), "{why}");
 }
+
+#[test]
+fn a_contour_goes_round_a_chain_of_edges_picked_on_the_model() {
+    use std::f64::consts::PI;
+    // A boss 40 x 40 x 10 on the plate's top: the model is 30 high, so in the WCS the boss's top
+    // is Z -1, the plate's top (the boss's base) Z -11, and the boss spans X and Y -20 to 20.
+    let mut s = plate();
+    boxed(&mut s, [30.0, 20.0, 20.0], [40.0, 40.0, 10.0], "join");
+    // One click on the boss's base edge picks its whole outline: four edges through four corners.
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2, "contour": {"edges": [[50, 20, 20]]}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    // Down to the chain's height in levels of at most 5; round it 5 from its walls: four sides
+    // of 40 and a quarter circle of 5 at each corner.
+    assert_eq!(n["levels"].as_array().and_then(|l| l.last()).and_then(Value::as_f64), Some(-11.0), "{n}");
+    assert!((n["round"].as_f64().unwrap() - (160.0 + 10.0 * PI)).abs() < 1e-6, "{n}");
+    assert_eq!(t["min"][2].as_f64(), Some(-11.0));
+    // Simulated: nothing is cut into, no rapid meets stock.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.5}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // The bottom a millimetre above the chain, from its heights: the last level is Z -10.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {"bottom": {"from": "feature", "offset": 1}}}));
+    let n = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}))["numbers"].clone();
+    assert_eq!(n["levels"].as_array().and_then(|l| l.last()).and_then(Value::as_f64), Some(-10.0), "{n}");
+    // Below the chain, into the plate: the plate reaches out past the boss's outline there, and
+    // the contour would cut into it: refused, saying what to do.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {"bottom": {"from": "feature", "offset": -2}}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("reaches out past the chains picked") && why.contains("'Plate'"), "{why}");
+    // A point near no level edge picks nothing, and says so.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {}, "contour": {"edges": [[50, 40, 25]]}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("no edge lying level is near the point picked"), "{why}");
+}
+
+#[test]
+fn an_inside_contour_goes_round_the_floor_edge_of_a_pocket_picked_on_the_model() {
+    // The plate's pocket 60 x 40, 6 deep: its floor at Z -7 in the WCS, its walls at X -30 and 30,
+    // Y -20 and 20. One click on the bottom edge of its front wall picks the floor's outline.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    run(&mut s, "cam.op.contour", json!({"setup": "setup-1", "tool": 2, "contour": {"side": "inside", "edges": [[50, 20, 14]]}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    // Round the inside 5 from the walls (a rectangle 50 x 30), down to the floor.
+    assert!((n["round"].as_f64().unwrap() - 160.0).abs() < 1e-6, "{n}");
+    assert!(near(&t["min"], [-25.0, -15.0, -7.0]) && t["max"][0].as_f64() == Some(25.0), "{t}");
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.5}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // An island in the pocket stands inside the chain: refused, pointing at Pocket.
+    boxed(&mut s, [45.0, 35.0, 14.0], [10.0, 10.0, 6.0], "join");
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("stands inside the chain picked") && why.contains("Pocket"), "{why}");
+    // Openings found and edges picked at once: refused before the model is read.
+    let why = refused(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "edges": [[50, 20, 14]], "openings": [[0, 0]]}}));
+    assert!(why.contains("not both"), "{why}");
+}

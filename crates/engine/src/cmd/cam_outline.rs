@@ -85,9 +85,6 @@ pub(super) fn cut_faces(body: &Body, plane: &Plane) -> Result<Option<Above>, Str
 /// as lines and arcs, or when something of a body above the plane reaches out past the outline.
 pub(super) fn outline(bodies: &[(&str, &Body)], plane: &Plane) -> Result<Vec<Loop2>, String> {
     let mut loops = Vec::new();
-    // What each body has above the plane, and how high the highest reaches above it.
-    let mut above: Vec<(&str, Body)> = Vec::new();
-    let (mut top, mut size) = (0.0_f64, 0.0_f64);
     for &(name, body) in bodies {
         let Some(part) = cut_faces(body, plane).map_err(|e| format!("body '{name}': {e}"))? else { continue };
         // The ring round the others is a face's outline; the rest are openings through the part,
@@ -98,20 +95,39 @@ pub(super) fn outline(bodies: &[(&str, &Body)], plane: &Plane) -> Result<Vec<Loo
             }
             loops.push(outer.ccw());
         }
-        top = top.max(part.reach);
-        size = size.max(body.size());
-        above.push((name, part.kept));
     }
     if loops.is_empty() {
         return Ok(loops);
     }
-    // Nothing above the plane may stick out past the outline: each loop, grown by a hair, as a
-    // prism from just below the plane to just above the highest body.
+    if let Some(name) = reaching_past(bodies, plane, &loops)? {
+        return Err(format!(
+            "body '{name}' is wider above the contour's bottom than at it, so a cut round its outline there would cut into it: raise the bottom to where the part is widest"
+        ));
+    }
+    Ok(loops)
+}
+
+/// Checks that nothing of `bodies` above `plane` reaches out past `loops` (counter-clockwise, in
+/// the plane's coordinates): each loop, grown by a hair, as a prism from just below the plane to
+/// just above the highest body, is cut from what each body has above the plane, and nothing may
+/// be left. The name of the body that reaches out, when one does.
+pub(super) fn reaching_past<'a>(bodies: &[(&'a str, &Body)], plane: &Plane, loops: &[Loop2]) -> Result<Option<&'a str>, String> {
+    let mut above: Vec<(&str, Body)> = Vec::new();
+    let (mut top, mut size) = (0.0_f64, 0.0_f64);
+    for &(name, body) in bodies {
+        let Some(part) = cut_faces(body, plane).map_err(|e| format!("body '{name}': {e}"))? else { continue };
+        top = top.max(part.reach);
+        size = size.max(body.size());
+        above.push((name, part.kept));
+    }
+    if above.is_empty() {
+        return Ok(None);
+    }
     let hair = hair_of(size);
     let mut grown = Vec::with_capacity(loops.len());
-    for l in &loops {
-        let region = Region2 { outer: l.clone(), holes: Vec::new() };
-        let wider = solidcraft_cam::offset_region(&region, -hair).map_err(|e| format!("the part's outline: {e}"))?;
+    for l in loops {
+        let region = Region2 { outer: l.ccw(), holes: Vec::new() };
+        let wider = solidcraft_cam::offset_region(&region, -hair).map_err(|e| format!("the outline: {e}"))?;
         grown.extend(wider.into_iter().map(|r| Region2 { outer: r.outer, holes: Vec::new() }));
     }
     let prisms = solidcraft_kernel::extrude(plane, &grown, -hair, top + hair).map_err(|e| format!("checking for overhangs: {e}"))?;
@@ -122,12 +138,10 @@ pub(super) fn outline(bodies: &[(&str, &Body)], plane: &Plane) -> Result<Vec<Loo
             left = solidcraft_kernel::boolean(&rest, prism, BoolOp::Cut).map_err(|e| format!("checking body '{name}' for overhangs: {e}"))?;
         }
         if left.is_some() {
-            return Err(format!(
-                "body '{name}' is wider above the contour's bottom than at it, so a cut round its outline there would cut into it: raise the bottom to where the part is widest"
-            ));
+            return Ok(Some(name));
         }
     }
-    Ok(loops)
+    Ok(None)
 }
 
 /// The rings of `body`'s face `face` read in `plane`'s coordinates (the face lies in a plane
@@ -167,7 +181,7 @@ pub(super) fn face_rings(body: &Body, face: usize, plane: &Plane) -> Result<Vec<
 
 /// A piece of an edge as the lines and arcs a machine cuts: itself, or a free-form one fitted
 /// with arcs to within [`FIT`].
-fn fitted(seg: &Seg2) -> Result<Vec<Seg2>, String> {
+pub(super) fn fitted(seg: &Seg2) -> Result<Vec<Seg2>, String> {
     seg.fit_arcs(FIT).ok_or_else(|| format!("a curve of its outline could not be fitted with arcs to within {FIT} mm"))
 }
 
@@ -175,7 +189,7 @@ fn fitted(seg: &Seg2) -> Result<Vec<Seg2>, String> {
 /// one Bézier piece, exactly (the geometry crate's knot insertion), and each piece is fitted. A
 /// rational piece of degree 2 is a conic (an ellipse's arc); a rational piece of a higher degree
 /// has no segment of its own and is refused.
-fn spline_arcs(s: &PlanarSpline) -> Result<Vec<Seg2>, String> {
+pub(super) fn spline_arcs(s: &PlanarSpline) -> Result<Vec<Seg2>, String> {
     use solidcraft_geom::bspline::{check_knots, segment, weighted_points};
     let refused = |why: &str| format!("a curve of its outline can't be followed: {why}");
     let (p, n) = (s.degree, s.points.len());

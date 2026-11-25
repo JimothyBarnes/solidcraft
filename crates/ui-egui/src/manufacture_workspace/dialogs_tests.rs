@@ -3371,3 +3371,53 @@ fn an_operations_heights_are_set_in_its_form_kept_and_picked_on_the_model() {
     assert!((bottom["at"][2].as_f64().unwrap() - 20.0).abs() < 1e-6, "{bottom}");
     assert_eq!(levels(&mut h), Some(json!([[-4.0]])));
 }
+
+#[test]
+fn contour_goes_round_chains_of_edges_clicked_on_the_model() {
+    use std::f64::consts::PI;
+    let mut h = harness();
+    // The plate (100 x 80 x 20) with a boss 40 x 40 x 10 on its top, and a 10 mm end mill.
+    h.app.run("solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"})).unwrap();
+    h.app
+        .run("solid.box", json!({"length": 40, "width": 40, "height": 10, "corner": [30, 20, 20], "operation": "join", "targets": ["Plate"]}))
+        .unwrap();
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    from_the_corner(&mut h);
+    ribbon(&mut h, "cam.op.contour");
+    // Edges picked on the model: none yet, and the form says how to pick them.
+    contour_form(&mut h).geometry = 1;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.contour_chains_none")).is_some() && h.widget(tr("manufacture.contour_chains_hint")).is_some());
+    assert!(crate::manufacture_workspace::picking::active(&h.app) || h.app.dialog.is_none());
+    // A click on the boss's front base edge picks its whole outline, closed; the contour goes
+    // round it, 5 from its walls, down to the plate's top (Z -11 in the WCS).
+    click_model(&mut h, [50.0, 20.0, 20.0]);
+    let form = contour_form(&mut h);
+    assert_eq!(form.chains.len(), 1, "{:?}", h.app.status);
+    assert!(form.chains[0].1.closed && (form.chains[0].1.length - 160.0).abs() < 1e-6, "{:?}", form.chains[0]);
+    assert_eq!(form.params()["contour"]["edges"].as_array().map(Vec::len), Some(1));
+    let numbers = contour_form(&mut h).worked.get().map(|(_, p)| p.numbers.clone()).unwrap();
+    assert!((numbers["round"].as_f64().unwrap() - (160.0 + 10.0 * PI)).abs() < 1e-6, "{numbers}");
+    assert_eq!(numbers["levels"].as_array().and_then(|l| l.last()).cloned(), Some(json!(-11.0)));
+    assert!(
+        h.widget(&solidcraft_ui_text::format("manufacture.contour_chains_value", &[("count", "1"), ("closed", "1"), ("length", "160.00 mm")]))
+            .is_some()
+    );
+    // A click on another edge of the same outline takes it out again; a click on the plate's
+    // top, on no edge, picks nothing.
+    click_model(&mut h, [70.0, 40.0, 20.0]);
+    assert!(contour_form(&mut h).chains.is_empty());
+    click_model(&mut h, [50.0, 40.0, 20.0]);
+    click_model(&mut h, [50.0, 20.0, 20.0]);
+    assert_eq!(contour_form(&mut h).chains.len(), 1);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"].clone();
+    assert_eq!((kept["side"].clone(), kept["edges"].as_array().map(Vec::len)), (json!("outside"), Some(1)), "{kept}");
+    // Changed from its row it keeps its edges.
+    row_menu(&mut h, "Contour 1 (T1)", "manufacture.edit");
+    assert_eq!((open(&h), contour_form(&mut h).geometry), ("contour", 1));
+    press(&mut h, "OK");
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"]["edges"], kept["edges"]);
+}
