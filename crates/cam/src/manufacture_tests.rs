@@ -58,6 +58,7 @@ fn shop() -> ManufactureData {
                 name: "Hand-made square".into(),
                 tool: 1,
                 suppressed: false,
+                heights: None,
                 operation: OperationKind::Manual {
                     toolpath: Toolpath {
                         start: p(0.0, 0.0, 25.0),

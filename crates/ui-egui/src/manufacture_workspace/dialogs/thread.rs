@@ -60,6 +60,8 @@ pub(crate) struct ThreadForm {
     /// The operation being changed, when the form changes one: its `thread` parameters as kept.
     pub(super) editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: super::heights::HeightsForm,
 }
 
 impl ThreadForm {
@@ -97,6 +99,7 @@ impl ThreadForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: super::heights::HeightsForm::new([true; 4]),
             error: None,
         }
     }
@@ -119,6 +122,7 @@ impl ThreadForm {
         form.hand = HANDS.iter().position(|hand| Some(hand.0) == base["hand"].as_str()).unwrap_or(0);
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.heights = super::heights::HeightsForm::kept(app, id, [true; 4]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -174,11 +178,14 @@ impl ThreadForm {
         }
         set_or_clear(&mut thread, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut thread, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "thread": thread,
-        })
+        super::with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "thread": thread,
+            }),
+        )
     }
 
     /// Finds the setup's holes and works the threads out, when the design or a field changed,
@@ -234,7 +241,7 @@ impl ThreadForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "thread": params["thread"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "thread": params["thread"].take()})),
             None => app.run("cam.op.thread", params),
         };
         match made {
@@ -247,6 +254,8 @@ impl ThreadForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<ThreadForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         // What is picked on the model is what is threaded (decision 0030 of the CAM work): a
         // group chosen from the row's list forgets it, and a hole clicked is taken and worked out.
         let picks = self.editing.is_none();
@@ -340,6 +349,7 @@ impl ThreadForm {
                 }
                 ui_kit::row(ui, tr("manufacture.thread_passes"), |ui| ui_kit::whole_number_field(ui, &mut self.passes, 1..=20, ""));
                 ui_kit::choice_row(ui, tr("manufacture.thread_hand"), "manufacture_thread_hand", &mut self.hand, &hands);
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

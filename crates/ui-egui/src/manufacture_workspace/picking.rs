@@ -45,6 +45,31 @@ fn shown(app: &mut SolveApp) -> Option<&mut Vec<Sel>> {
     picker.inputs.first_mut().map(|input| &mut input.items)
 }
 
+/// What is picked on the model for the open form now (to put back after a point is clicked for
+/// one of its heights).
+pub(crate) fn picked_now(app: &mut SolveApp) -> Vec<Sel> {
+    shown(app).map(|items| items.clone()).unwrap_or_default()
+}
+
+/// For a form waiting for a point on the model (a height, decision 0037 of the CAM work): starts
+/// the picking, and takes the point of the face clicked since the last frame, if one was, putting
+/// back `before`, what was picked for the form, so its own picks are as they were.
+pub(crate) fn clicked_point(app: &mut SolveApp, ctx: &egui::Context, before: &[Sel]) -> Option<Vec3> {
+    if on_model(app, ctx) {
+        start(app, "manufacture.height_picking");
+    }
+    let shown = shown(app)?;
+    // A face newly picked, or one already picked and clicked again (which lets it go).
+    let added = shown.iter().find(|sel| !before.iter().any(|b| same_item(b, sel)));
+    let dropped = before.iter().find(|b| !shown.iter().any(|sel| same_item(b, sel)));
+    let point = added.or(dropped).and_then(|sel| match sel {
+        Sel::Face { point, .. } => Some(*point),
+        _ => None,
+    })?;
+    *shown = before.to_vec();
+    Some(point)
+}
+
 /// Whether the pointer is over the model's view, clear of every window (the form's own, a
 /// menu).
 fn on_model(app: &SolveApp, ctx: &egui::Context) -> bool {

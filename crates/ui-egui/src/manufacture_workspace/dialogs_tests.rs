@@ -3312,3 +3312,62 @@ fn an_operations_form_makes_the_tool_it_needs_and_comes_back_with_it() {
     assert!(form.picked_tool && form.missing().is_none());
     assert_eq!(form.params()["tool"], json!(2));
 }
+
+#[test]
+fn an_operations_heights_are_set_in_its_form_kept_and_picked_on_the_model() {
+    let mut h = harness();
+    // The plate with its pocket 60 x 40 x 6 (floor at Z -7) and the 10 mm end mill.
+    pocketed_plate(&mut h);
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    // Face: its own heights give no `heights`; the section is there to open.
+    ribbon(&mut h, "cam.op.face");
+    assert_eq!(face_form(&mut h).params().get("heights"), None);
+    assert!(h.widget(tr("manufacture.heights")).is_some());
+    // From 2 above the stock's top down to half a millimetre under the model's top: one level,
+    // at Z -1.5, previewed.
+    let form = face_form(&mut h);
+    form.heights.set("top", "stock_top", 2.0);
+    form.heights.set("bottom", "model_top", -0.5);
+    h.frames(3);
+    let form = face_form(&mut h);
+    assert_eq!(form.params()["heights"], json!({"top": {"from": "stock_top", "offset": 2.0}, "bottom": {"from": "model_top", "offset": -0.5}}));
+    assert_eq!(form.worked.get().map(|(_, p)| p.numbers["levels"].clone()), Some(json!([-1.5])), "{:?}", form.worked.trouble());
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["heights"].clone();
+    assert_eq!(kept["bottom"], json!({"from": "model_top", "offset": -0.5}));
+    // The form that changes it opens on them; set back to its own, the operation keeps none.
+    row_menu(&mut h, "Face 1 (T1)", "manufacture.edit");
+    let form = face_form(&mut h);
+    assert_eq!(form.params()["heights"], kept);
+    form.heights.set("top", "feature", 0.0);
+    form.heights.set("bottom", "feature", 0.0);
+    h.frames(3);
+    press(&mut h, "OK");
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0].get("heights"), None);
+
+    // Pocket on the big pocket, half a millimetre left on its floor: the last level at Z -6.5.
+    ribbon(&mut h, "cam.op.pocket");
+    pocket_form(&mut h).pocket = 1;
+    pocket_form(&mut h).heights.set("bottom", "feature", 0.5);
+    h.frames(3);
+    let levels = |h: &mut Harness| pocket_form(h).worked.get().map(|(_, p)| p.numbers["levels"].clone());
+    assert_eq!(levels(&mut h), Some(json!([[-3.25, -6.5]])));
+    // Its bottom from a point picked on the model: the button waits for a click, which is the
+    // height's and not a pocket picked; the click on the plate's top (Z 20, so Z -1 in the
+    // WCS), less 3, is one Z for the pocket: Z -4.
+    pocket_form(&mut h).heights.pick("bottom");
+    h.frames(2);
+    pocket_form(&mut h).heights.set("bottom", "point", -3.0);
+    from_the_corner(&mut h);
+    click_model(&mut h, [95.0, 75.0, 20.0]);
+    h.frames(3);
+    let form = pocket_form(&mut h);
+    assert!(!form.heights.picking());
+    assert_eq!(form.pocket, 1, "the click picked no pocket");
+    let bottom = form.params()["heights"]["bottom"].clone();
+    assert_eq!((bottom["from"].clone(), bottom["offset"].clone()), (json!("point"), json!(-3.0)), "{bottom}");
+    assert!((bottom["at"][2].as_f64().unwrap() - 20.0).abs() < 1e-6, "{bottom}");
+    assert_eq!(levels(&mut h), Some(json!([[-4.0]])));
+}

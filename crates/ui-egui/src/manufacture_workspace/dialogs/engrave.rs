@@ -47,6 +47,8 @@ pub(crate) struct EngraveForm {
     /// The engraving being changed, when the form changes one: its `engrave` parameters as kept.
     pub(super) editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: super::heights::HeightsForm,
 }
 
 impl EngraveForm {
@@ -81,6 +83,7 @@ impl EngraveForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: super::heights::HeightsForm::new([true, true, true, false]),
             error: None,
         }
     }
@@ -101,6 +104,7 @@ impl EngraveForm {
         (form.depth, form.typed_depth) = number("depth").map_or((DEPTH, false), |v| (v, true));
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.heights = super::heights::HeightsForm::kept(app, id, [true, true, true, false]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -132,11 +136,14 @@ impl EngraveForm {
         set_or_clear(&mut engrave, "depth", self.typed_depth.then_some(self.depth));
         set_or_clear(&mut engrave, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut engrave, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "engrave": engrave,
-        })
+        super::with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "engrave": engrave,
+            }),
+        )
     }
 
     /// Finds the setup's sketches and works the engraving out, if its parameters or the design
@@ -183,7 +190,7 @@ impl EngraveForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "engrave": params["engrave"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "engrave": params["engrave"].take()})),
             None => app.run("cam.op.engrave", params),
         };
         match made {
@@ -196,6 +203,8 @@ impl EngraveForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<EngraveForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         self.refresh(app);
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
@@ -250,6 +259,7 @@ impl EngraveForm {
                 if ui_kit::row(ui, tr("manufacture.engrave_depth"), |ui| ui_kit::length_field(ui, &mut self.depth, units, decimals)).changed() {
                     self.typed_depth = true;
                 }
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

@@ -105,6 +105,8 @@ pub(crate) struct ContourForm {
     /// The contour being changed, when the form changes one: its `contour` parameters as kept.
     pub(super) editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: super::heights::HeightsForm,
 }
 
 impl ContourForm {
@@ -162,6 +164,7 @@ impl ContourForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: super::heights::HeightsForm::new([true; 4]),
             error: None,
         }
     }
@@ -194,6 +197,7 @@ impl ContourForm {
         (form.tab_height, form.typed_tab_height) = tabs["height"].as_f64().map_or((TAB_HEIGHT, false), |v| (v, true));
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.heights = super::heights::HeightsForm::kept(app, id, [true; 4]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -361,11 +365,14 @@ impl ContourForm {
         }
         set_or_clear(&mut contour, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut contour, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "contour": contour,
-        })
+        super::with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "contour": contour,
+            }),
+        )
     }
 
     /// Works the contour out, if its parameters or the design changed, and shows the numbers that
@@ -450,7 +457,7 @@ impl ContourForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "contour": params["contour"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "contour": params["contour"].take()})),
             None => app.run("cam.op.contour", params),
         };
         match made {
@@ -463,6 +470,8 @@ impl ContourForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<ContourForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         // Inside, what is picked on the model is what is cut round (decision 0030 of the CAM
         // work): a choice from the row's list forgets it, and an opening clicked is taken and
         // worked out.
@@ -602,6 +611,7 @@ impl ContourForm {
                         self.typed_tab_height = true;
                     }
                 }
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

@@ -1502,3 +1502,35 @@ fn an_open_pocket_simulated_takes_the_stock_over_its_floor_and_beside_it_and_cut
     let (over, _) = sim.leftover();
     assert!((over - 100.0 * 70.0).abs() < 0.5 * 100.0 * 0.25, "{over}");
 }
+
+#[test]
+fn a_pocket_is_cut_to_its_floor_with_an_offset_or_to_one_z_but_not_into_its_floor_by_mistake() {
+    // The 60 x 40 pocket 6 deep (its floor at Z -7), from the stock's top (Z 0): two levels.
+    let wall = rect(-30.0, -20.0, 30.0, 20.0);
+    let levels = |op: &PocketOp| pocketed(op, &[pocket(&wall, &[])]).map(|done| (done.levels[0].clone(), done.notes));
+    assert_eq!(levels(&one([0.0, 0.0])).unwrap().0, vec![-3.5, -7.0]);
+    // 0.5 left on the floor: the last level is half a millimetre above it, and the levels share
+    // the 6.5 mm.
+    let (left, notes) = levels(&PocketOp { floor_offset: Some(0.5), ..one([0.0, 0.0]) }).unwrap();
+    assert_eq!((left, notes.len()), (vec![-3.25, -6.5], 0));
+    // A millimetre past the floor: said, since it cuts into the part.
+    let (past, notes) = levels(&PocketOp { floor_offset: Some(-1.0), ..one([0.0, 0.0]) }).unwrap();
+    assert_eq!(past, vec![-4.0, -8.0]);
+    assert!(notes.iter().any(|n| n.contains("1.000 mm below its floor, into the part")), "{notes:?}");
+    // One Z for every pocket: down to Z -4 in one level of 4.
+    assert_eq!(levels(&PocketOp { bottom: Some(-4.0), ..one([0.0, 0.0]) }).unwrap().0, vec![-4.0]);
+    // One Z below a floor would cut into it: refused, with what to do instead.
+    let why = levels(&PocketOp { bottom: Some(-8.0), ..one([0.0, 0.0]) }).unwrap_err().to_string();
+    assert!(why.contains("floor is at Z -7") && why.contains("give the floor an offset"), "{why}");
+    // Both at once, or numbers out of range: refused before anything is worked out.
+    for wrong in [
+        PocketOp { bottom: Some(-4.0), floor_offset: Some(0.5), ..one([0.0, 0.0]) },
+        PocketOp { bottom: Some(f64::NAN), ..one([0.0, 0.0]) },
+        PocketOp { floor_offset: Some(1e9), ..one([0.0, 0.0]) },
+    ] {
+        assert!(wrong.validate(&mill10()).is_err(), "{wrong:?}");
+    }
+    // With a finishing pass the walls are finished down to where the pocket is cut to.
+    let done = pocketed(&PocketOp { finish: Some(0.3), floor_offset: Some(0.5), ..one([0.0, 0.0]) }, &[pocket(&wall, &[])]).unwrap();
+    assert_eq!(done.finish_levels[0].last().copied(), Some(-6.5));
+}

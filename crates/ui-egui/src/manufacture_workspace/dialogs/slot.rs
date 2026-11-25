@@ -65,6 +65,8 @@ pub(crate) struct SlotForm {
     /// kept. Its slots stay the ones it has.
     pub(super) editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: super::heights::HeightsForm,
 }
 
 impl SlotForm {
@@ -103,6 +105,7 @@ impl SlotForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: super::heights::HeightsForm::new([true; 4]),
             error: None,
         }
     }
@@ -123,6 +126,7 @@ impl SlotForm {
         (form.stepdown, form.typed_stepdown) = number("stepdown").map_or((0.0, false), |v| (v, true));
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.heights = super::heights::HeightsForm::kept(app, id, [true; 4]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -211,11 +215,14 @@ impl SlotForm {
         set_or_clear(&mut slot, "stepdown", self.typed_stepdown.then_some(self.stepdown));
         set_or_clear(&mut slot, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut slot, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "slot": slot,
-        })
+        super::with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "slot": slot,
+            }),
+        )
     }
 
     /// Finds the setup's slots and works the slotting out, when the design or a field changed,
@@ -295,7 +302,7 @@ impl SlotForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "slot": params["slot"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "slot": params["slot"].take()})),
             None => app.run("cam.op.slot", params),
         };
         match made {
@@ -308,6 +315,8 @@ impl SlotForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<SlotForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         // What is picked on the model is what is cut (decision 0030 of the CAM work): a choice
         // from the row's list forgets it, and a slot clicked is taken and worked out.
         let picks = self.editing.is_none();
@@ -413,6 +422,7 @@ impl SlotForm {
                 if ui_kit::row(ui, tr("manufacture.face_stepdown"), |ui| ui_kit::length_field(ui, &mut self.stepdown, units, decimals)).changed() {
                     self.typed_stepdown = true;
                 }
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

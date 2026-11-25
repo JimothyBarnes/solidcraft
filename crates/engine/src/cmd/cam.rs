@@ -10,6 +10,7 @@ use solidcraft_cam::{
     MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, Posted, ProgramContext,
     ProgramTool, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
+use solidcraft_cam::{HeightFrom, HeightRef, Heights};
 use solidcraft_doc::plugin_data::DATA;
 use solidcraft_geom::{Loop2Geom as _, Region2Geom as _, Seg2Geom as _};
 
@@ -1061,6 +1062,7 @@ type ChamferEdgesFound = (Placement, f64, f64, Vec<solidcore_record::Loop2>, Vec
 fn chamfer_edges(s: &Session, params: &Value) -> std::result::Result<ChamferEdgesFound, String> {
     const CMD: &str = "cam.op.chamfer";
     let (id, _, number, operation) = proposed(CMD, given(params)).map_err(said)?;
+    let heights = proposed_heights(CMD, given(params)).map_err(said)?;
     let OperationKind::Chamfer { chamfer } = operation else { return Err("the parameters are not a chamfer's".into()) };
     // Whichever edges are named, the heights are the same.
     let chamfer = ChamferOp { edges: ChamferEdges::All, outside: false, openings: Vec::new(), ..chamfer };
@@ -1069,6 +1071,18 @@ fn chamfer_edges(s: &Session, params: &Value) -> std::result::Result<ChamferEdge
     let tool = d.tools.iter().find(|t| t.number == number).ok_or_else(|| format!("the design has no tool {number}"))?;
     let (model, _) = model_box(s, CMD, setup).map_err(said)?;
     let p = setup.place(model).map_err(|e| e.to_string())?;
+    let op = Operation {
+        id: String::new(),
+        name: String::new(),
+        tool: number,
+        suppressed: false,
+        heights,
+        operation: OperationKind::Manual { toolpath: Toolpath::default() },
+    };
+    let mut chamfer = chamfer;
+    if let Some(top) = Levels::of(&op, &p).top(chamfer.top.unwrap_or(p.model.max.z))? {
+        chamfer.top = Some(top);
+    }
     let wall = chamfer.wall_height(tool, &p).map_err(|e| e.to_string())?;
     let tip = chamfer.tip_height(tool, &p).map_err(|e| e.to_string())?;
     let (_, outline) = outline_at(s, CMD, setup, &p, Some(wall - CHAMFER_WALL_BELOW))?;
@@ -1280,7 +1294,14 @@ fn op_manual(s: &mut Session, p: &Value) -> Result<Value> {
     let id = next_id("op", d.setups.iter().flat_map(|x| &x.operations).map(|o| o.id.as_str()));
     let setup = d.setups.iter_mut().find(|x| x.id == p.setup).ok_or_else(|| bad(CMD, format!("the design has no setup '{}'", p.setup)))?;
     let name = p.name.unwrap_or_else(|| format!("Hand-made toolpath {}", setup.operations.len() + 1));
-    setup.operations.push(Operation { id: id.clone(), name, tool: p.tool, suppressed: false, operation: OperationKind::Manual { toolpath } });
+    setup.operations.push(Operation {
+        id: id.clone(),
+        name,
+        tool: p.tool,
+        suppressed: false,
+        heights: None,
+        operation: OperationKind::Manual { toolpath },
+    });
     let operations = setup.operations.len();
     store(s, CMD, &d)?;
     reply(CMD, CamOpWritten { id, setup: p.setup, operations })
@@ -1389,15 +1410,84 @@ fn proposed(cmd: &str, p: &Value) -> Result<(String, Option<String>, u32, Operat
     }
 }
 
+/// The heights `p` (an operation command's parameters) give the operation (decision 0037 of the
+/// CAM work), checked; none when they give none, or none but its own.
+fn proposed_heights(cmd: &str, p: &Value) -> Result<Option<Heights>> {
+    match p.get("heights") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let heights: Heights = parse(cmd, "heights", v)?;
+            heights.validate().map_err(|e| bad(cmd, e.to_string()))?;
+            Ok((heights != Heights::default()).then_some(heights))
+        }
+    }
+}
+
+/// The WCS Z of the point a height is from, when it is from one: without the last bits of the
+/// placement's arithmetic, so that a point on a face at Z 20 reads as that face's height.
+fn point_height(placement: &Placement, height: &HeightRef) -> Option<f64> {
+    height.at.map(|at| (in_wcs(placement, solidcore_record::Vec3 { x: at[0], y: at[1], z: at[2] }).z * 1e9).round() / 1e9)
+}
+
+/// The top and bottom an operation's heights give it on its setup's placement (decision 0037 of
+/// the CAM work): each is the operation's own unless its heights say otherwise.
+struct Levels {
+    top: Option<HeightRef>,
+    bottom: Option<HeightRef>,
+    placement: Placement,
+}
+
+impl Levels {
+    fn of(op: &Operation, placement: &Placement) -> Levels {
+        let heights = op.heights.unwrap_or_default();
+        Levels { top: heights.top, bottom: heights.bottom, placement: *placement }
+    }
+
+    fn z(&self, height: &HeightRef, own: f64) -> std::result::Result<f64, String> {
+        height.resolve(&self.placement, own, point_height(&self.placement, height)).map_err(|e| e.to_string())
+    }
+
+    /// The operation's top, when its heights give one other than its own (`own`).
+    fn top(&self, own: f64) -> std::result::Result<Option<f64>, String> {
+        self.top.as_ref().map(|height| self.z(height, own)).transpose()
+    }
+
+    /// Its bottom likewise.
+    fn bottom(&self, own: f64) -> std::result::Result<Option<f64>, String> {
+        self.bottom.as_ref().map(|height| self.z(height, own)).transpose()
+    }
+
+    /// For a cut down to floors found on the model (Pocket, Slot): each floor and an offset when
+    /// the bottom is from the feature (or from the setup), one Z otherwise.
+    fn floors(&self) -> std::result::Result<(Option<f64>, Option<f64>), String> {
+        match &self.bottom {
+            None => Ok((None, None)),
+            Some(height) if matches!(height.from, HeightFrom::Feature | HeightFrom::Setup) => {
+                Ok((None, (height.offset != 0.0).then_some(height.offset)))
+            }
+            Some(height) => Ok((Some(self.z(height, 0.0)?), None)),
+        }
+    }
+
+    /// Refuses a bottom for an operation whose depth comes from something else.
+    fn no_bottom(&self, why: &str) -> std::result::Result<(), String> {
+        match self.bottom {
+            Some(_) => Err(format!("a bottom height is not for this operation: {why}")),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Adds the operation `cmd`'s parameters describe to its setup, named `word` and its place in
 /// the setup when no name is given.
 fn add_operation(s: &mut Session, cmd: &str, word: &str, p: &Value) -> Result<Value> {
     let (setup_id, name, tool, operation) = proposed(cmd, p)?;
+    let heights = proposed_heights(cmd, p)?;
     let mut d = load(s, cmd)?;
     let id = next_id("op", d.setups.iter().flat_map(|x| &x.operations).map(|o| o.id.as_str()));
     let setup = d.setups.iter_mut().find(|x| x.id == setup_id).ok_or_else(|| bad(cmd, format!("the design has no setup '{setup_id}'")))?;
     let name = name.unwrap_or_else(|| format!("{word} {}", setup.operations.len() + 1));
-    setup.operations.push(Operation { id: id.clone(), name, tool, suppressed: false, operation });
+    setup.operations.push(Operation { id: id.clone(), name, tool, suppressed: false, heights, operation });
     let operations = setup.operations.len();
     store(s, cmd, &d)?;
     reply(cmd, CamOpWritten { id, setup: setup_id, operations })
@@ -1439,7 +1529,28 @@ fn tool_and_placement<'a>(
             p
         }
     };
+    // The operation's own clearance and retract heights, where it has them (decision 0037).
+    let Some(heights) = &op.heights else { return Ok((tool, placement)) };
+    let point = |height: &Option<HeightRef>| height.as_ref().and_then(|h| point_height(&placement, h));
+    let placement = heights.placed(&placement, (point(&heights.clearance), point(&heights.retract))).map_err(|e| bad(cmd, of(op, e)))?;
     Ok((tool, placement))
+}
+
+/// The top and depth of holes cut from `top` (`None`: the model's top) `depth` deep, as `op`'s
+/// heights give them (decision 0037 of the CAM work): `None` when they are the operation's own.
+/// The depth is from the top to the bottom, both the holes' own unless the heights say otherwise.
+fn deep_enough(top: Option<f64>, depth: f64, placement: &Placement, op: &Operation) -> std::result::Result<Option<(f64, f64)>, String> {
+    let levels = Levels::of(op, placement);
+    if levels.top.is_none() && levels.bottom.is_none() {
+        return Ok(None);
+    }
+    let own_top = top.unwrap_or(placement.model.max.z);
+    let top = levels.top(own_top)?.unwrap_or(own_top);
+    let bottom = levels.bottom(own_top - depth)?.unwrap_or(own_top - depth);
+    if !(top - bottom > 0.0) {
+        return Err(format!("the bottom (Z {bottom:.3} mm) must be below the top (Z {top:.3} mm)"));
+    }
+    Ok(Some((top, top - bottom)))
 }
 
 /// `op`'s toolpath from `start` (`None`: where the strategy begins): a hand-made one as given, a
@@ -1461,12 +1572,23 @@ fn work(
         }
         OperationKind::Drill { drill } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            let drill = &deep_enough(drill.top, drill.depth, &placement, op)
+                .map_err(|e| bad(cmd, of(op, e)))?
+                .map_or_else(|| drill.clone(), |(top, depth)| DrillOp { top: Some(top), depth, ..drill.clone() });
             let done = drill.toolpath(start, tool, &placement, material).map_err(failed)?;
             let numbers = serde_json::json!({"rpm": done.rpm, "feed": done.feed, "bottom": done.bottom, "r": done.r, "clearance": done.clearance});
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
         }
         OperationKind::Face { face } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            let levels = Levels::of(op, &placement);
+            let mut face = face.clone();
+            if let Some(top) = levels.top(face.top.unwrap_or(placement.stock.max.z)).map_err(|e| bad(cmd, of(op, e)))? {
+                face.top = Some(top);
+            }
+            if let Some(bottom) = levels.bottom(face.bottom.unwrap_or(placement.model.max.z)).map_err(|e| bad(cmd, of(op, e)))? {
+                face.bottom = Some(bottom);
+            }
             let done = face.toolpath(start, tool, &placement, material).map_err(failed)?;
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "levels": done.levels, "passes": done.passes, "stepover": done.stepover
@@ -1477,15 +1599,31 @@ fn work(
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
             // Its numbers and tool first: what is wrong with them is said before the model is cut.
             contour.validate(tool).map_err(failed)?;
+            let levels = Levels::of(op, &placement);
+            let mut contour = contour.clone();
+            if let Some(top) = levels.top(contour.top.unwrap_or(placement.stock.max.z)).map_err(|e| bad(cmd, of(op, e)))? {
+                contour.top = Some(top);
+            }
+            // A bottom from anything but the opening or outline itself is where they are read;
+            // from the feature, it is that bottom and the offset.
+            let feature_bottom = levels.bottom.filter(|h| matches!(h.from, HeightFrom::Feature | HeightFrom::Setup));
+            if feature_bottom.is_none()
+                && let Some(bottom) = levels.bottom(placement.model.min.z).map_err(|e| bad(cmd, of(op, e)))?
+            {
+                contour.bottom = Some(bottom);
+            }
             let done = if contour.side == ContourSide::Inside {
                 // Round the inside of its openings, each read from the model where its point is,
                 // down to the bottom it was given (as far as it says: a little under the part
                 // breaks through) or, given none, to the one found.
                 let (found, openings) = openings_of(s, cmd, setup, &placement, &contour.openings, contour.bottom).map_err(|e| bad(cmd, of(op, e)))?;
-                let bottom = Some(contour.bottom.unwrap_or(found));
+                let bottom = Some(contour.bottom.unwrap_or(found) + feature_bottom.map_or(0.0, |h| h.offset));
                 ContourOp { bottom, ..contour.clone() }.toolpath_inside(start, tool, &placement, material, &openings).map_err(failed)?
             } else {
-                let (_, outline) = outline_at(s, cmd, setup, &placement, contour.bottom).map_err(|e| bad(cmd, of(op, e)))?;
+                let (found, outline) = outline_at(s, cmd, setup, &placement, contour.bottom).map_err(|e| bad(cmd, of(op, e)))?;
+                if let Some(feature) = feature_bottom {
+                    contour.bottom = Some(contour.bottom.unwrap_or(found) + feature.offset);
+                }
                 contour.toolpath(start, tool, &placement, material, &outline).map_err(failed)?
             };
             let numbers = serde_json::json!({
@@ -1499,6 +1637,14 @@ fn work(
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
             // Its numbers and tool first: what is wrong with them is said before the model is cut.
             pocket.validate(tool).map_err(failed)?;
+            let levels = Levels::of(op, &placement);
+            let mut pocket = pocket.clone();
+            if let Some(top) = levels.top(pocket.top.unwrap_or(placement.stock.max.z)).map_err(|e| bad(cmd, of(op, e)))? {
+                pocket.top = Some(top);
+            }
+            if levels.bottom.is_some() {
+                (pocket.bottom, pocket.floor_offset) = levels.floors().map_err(|e| bad(cmd, of(op, e)))?;
+            }
             let found = pockets_of(s, cmd, setup, &placement, Some(&pocket.pockets)).map_err(|e| bad(cmd, of(op, e)))?;
             let shapes: Vec<PocketShape> =
                 found.into_iter().map(|(_, found)| PocketShape { floor: found.floor, region: found.region, open: found.open }).collect();
@@ -1516,6 +1662,14 @@ fn work(
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
             // Its numbers and tool first: what is wrong with them is said before the model is cut.
             slot.validate(tool).map_err(failed)?;
+            let levels = Levels::of(op, &placement);
+            let mut slot = slot.clone();
+            if let Some(top) = levels.top(slot.top.unwrap_or(placement.stock.max.z)).map_err(|e| bad(cmd, of(op, e)))? {
+                slot.top = Some(top);
+            }
+            if levels.bottom.is_some() {
+                (slot.bottom, slot.floor_offset) = levels.floors().map_err(|e| bad(cmd, of(op, e)))?;
+            }
             let shapes = slots_of(s, cmd, setup, &placement, &slot.slots, slot.bottom).map_err(|e| bad(cmd, of(op, e)))?;
             let done = slot.toolpath(start, tool, &placement, material, &shapes).map_err(failed)?;
             let numbers = serde_json::json!({
@@ -1530,6 +1684,12 @@ fn work(
             // Its numbers and tool first: what is wrong with them is said before the sketch is read.
             engrave.validate(tool).map_err(failed)?;
             let (surface, pieces) = sketch_curves(s, &placement, &engrave.sketch).map_err(|e| bad(cmd, of(op, e)))?;
+            let levels = Levels::of(op, &placement);
+            levels.no_bottom("an engraving goes its depth below its surface").map_err(|e| bad(cmd, of(op, e)))?;
+            let mut engrave = engrave.clone();
+            if let Some(top) = levels.top(engrave.top.unwrap_or(surface)).map_err(|e| bad(cmd, of(op, e)))? {
+                engrave.top = Some(top);
+            }
             let done = engrave.toolpath(start, tool, &placement, material, surface, &pieces).map_err(failed)?;
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "z": done.z, "depth": done.depth,
@@ -1540,6 +1700,9 @@ fn work(
         }
         OperationKind::Thread { thread } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            let thread = &deep_enough(thread.top, thread.depth, &placement, op)
+                .map_err(|e| bad(cmd, of(op, e)))?
+                .map_or_else(|| thread.clone(), |(top, depth)| solidcraft_cam::ThreadOp { top: Some(top), depth, ..thread.clone() });
             let done = thread.toolpath(start, tool, &placement, material).map_err(failed)?;
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "centre_feed": done.centre_feed, "plunge_feed": done.plunge_feed, "top": done.top,
@@ -1549,6 +1712,13 @@ fn work(
         }
         OperationKind::Chamfer { chamfer } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
+            let levels = Levels::of(op, &placement);
+            levels.no_bottom("a chamfer goes as deep as its width").map_err(|e| bad(cmd, of(op, e)))?;
+            let mut chamfer = chamfer.clone();
+            if let Some(top) = levels.top(chamfer.top.unwrap_or(placement.model.max.z)).map_err(|e| bad(cmd, of(op, e)))? {
+                chamfer.top = Some(top);
+            }
+            let chamfer = &chamfer;
             // The wall is read a hair below the chamfer's lower edge, where the model has it
             // whether or not it has the chamfer.
             let wall = chamfer.wall_height(tool, &placement).map_err(failed)?;
@@ -1794,10 +1964,11 @@ pub struct OperationPreview {
 pub fn manufacture_preview(s: &Session, command: &str, params: &Value) -> std::result::Result<OperationPreview, String> {
     const CMD: &str = "cam.preview";
     let (setup_id, name, tool, operation) = proposed(command, given(params)).map_err(said)?;
+    let heights = proposed_heights(command, given(params)).map_err(said)?;
     let d = manufacture_data(&s.doc)?;
     let setup = d.setups.iter().find(|x| x.id == setup_id).ok_or_else(|| format!("the design has no setup '{setup_id}'"))?;
     // No id: it is not one of the design's operations yet.
-    let op = Operation { id: String::new(), name: name.unwrap_or_default(), tool, suppressed: false, operation };
+    let op = Operation { id: String::new(), name: name.unwrap_or_default(), tool, suppressed: false, heights, operation };
     let mut placed = None;
     let worked = work(s, CMD, &d, setup, &op, None, &mut placed).map_err(said)?;
     let placement = placed.ok_or_else(|| "the setup was not placed on the model".to_string())?;
@@ -2139,6 +2310,10 @@ fn op_edit(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if let Some(suppressed) = p.suppressed {
         op.suppressed = suppressed;
+    }
+    // Its heights, whole (decision 0037): `{}` gives it its own again.
+    if let Some(v) = &p.heights {
+        op.heights = proposed_heights(CMD, &serde_json::json!({ "heights": v }))?;
     }
     // Its own parameters, whole; another kind's are a mistake, not something to drop quietly.
     let (kind, takes) = match &op.operation {

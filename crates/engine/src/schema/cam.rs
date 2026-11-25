@@ -479,6 +479,12 @@ pub struct CamOpEditParams {
     /// A hand-made operation's toolpath, whole, as `cam.op.manual` takes it.
     #[serde(default)]
     pub toolpath: Option<Value>,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Add a drill operation to a setup (decision 0009 of the CAM work).
@@ -498,6 +504,12 @@ pub struct CamOpDrillParams {
     /// tip | full_diameter, r_above?: mm above the top (default the setup's retract), between?:
     /// r_plane | clearance, rpm?, feed?}`, mm and mm/min.
     pub drill: Value,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Add a facing operation to a setup (decision 0010 of the CAM work).
@@ -515,6 +527,12 @@ pub struct CamOpFaceParams {
     /// stock (default 2), pattern?: zig_zag | one_way, rpm?, feed?}`; every field has a default.
     #[serde(default)]
     pub face: Option<Value>,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Add a contour operation to a setup (decision 0013 of the CAM work).
@@ -541,6 +559,12 @@ pub struct CamOpContourParams {
     /// along the wall, default 3 degrees), rpm?, feed?}`; every field has a default.
     #[serde(default)]
     pub contour: Option<Value>,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Add a pocket operation to a setup (decision 0014 of the CAM work).
@@ -562,6 +586,12 @@ pub struct CamOpPocketParams {
     /// what it could not reach is cut), direction?: climb | conventional, ramp_angle?: radians
     /// (default 3 degrees), rpm?, feed?}`.
     pub pocket: Value,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Add a slot operation to a setup (decision 0026 of the CAM work).
@@ -579,6 +609,12 @@ pub struct CamOpSlotParams {
     /// the part's bottom where it goes through), stepdown?: mm (default half the tool's
     /// diameter), ramp_angle?: radians (default 3 degrees), rpm?, feed?}`.
     pub slot: Value,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Add an engraving to a setup (decision 0032 of the CAM work).
@@ -596,6 +632,12 @@ pub struct CamOpEngraveParams {
     /// mm below the surface (default 0.2), top?: Z of the surface in the WCS (default the
     /// sketch's own plane), rpm?, feed?}`.
     pub engrave: Value,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Add a thread mill operation to a setup (decision 0034 of the CAM work).
@@ -614,6 +656,12 @@ pub struct CamOpThreadParams {
     /// left, passes?: how many passes its depth is taken in (default 2), rpm?, feed?: mm/min
     /// at the cutting edge}`.
     pub thread: Value,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// A sketch an engraving can follow in a setup: one whose plane faces the tool.
@@ -646,6 +694,12 @@ pub struct CamOpChamferParams {
     /// it, rpm?, feed?}`; every field has a default.
     #[serde(default)]
     pub chamfer: Option<Value>,
+    /// The operation's heights (decision 0037 of the CAM work): `{clearance?, retract?, top?,
+    /// bottom?}`, each `{from?: setup | stock_top | stock_bottom | model_top | model_bottom | feature
+    /// (default) | point | z, offset?: mm up, at?: [x, y, z] the point picked, in model
+    /// coordinates}`; a height not given is the operation's own.
+    #[serde(default)]
+    pub heights: Option<Value>,
 }
 
 /// Work out one operation's toolpath.

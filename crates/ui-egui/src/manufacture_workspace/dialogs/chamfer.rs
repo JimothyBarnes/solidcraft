@@ -75,6 +75,8 @@ pub(crate) struct ChamferForm {
     /// The chamfer being changed, when the form changes one: its `chamfer` parameters as kept.
     pub(super) editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: super::heights::HeightsForm,
 }
 
 impl ChamferForm {
@@ -114,6 +116,7 @@ impl ChamferForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: super::heights::HeightsForm::new([true, true, true, false]),
             error: None,
         }
     }
@@ -144,6 +147,7 @@ impl ChamferForm {
         (form.tip_below, form.typed_tip_below) = number("tip_below").map_or((TIP_BELOW, false), |v| (v, true));
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.heights = super::heights::HeightsForm::kept(app, id, [true, true, true, false]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -188,11 +192,14 @@ impl ChamferForm {
         set_or_clear(&mut chamfer, "tip_below", self.typed_tip_below.then_some(self.tip_below));
         set_or_clear(&mut chamfer, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut chamfer, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "chamfer": chamfer,
-        })
+        super::with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "chamfer": chamfer,
+            }),
+        )
     }
 
     /// The form's parameters with no word about edges: what the edges that can be broken are
@@ -302,7 +309,7 @@ impl ChamferForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "chamfer": params["chamfer"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "chamfer": params["chamfer"].take()})),
             None => app.run("cam.op.chamfer", params),
         };
         match made {
@@ -315,6 +322,8 @@ impl ChamferForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<ChamferForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         // What is picked on the model is what is broken (decision 0030 of the CAM work): a
         // choice from the row's list forgets it, and an edge clicked is taken and worked out.
         let picks = self.editing.is_none() && self.missing().is_none();
@@ -393,6 +402,7 @@ impl ChamferForm {
                 {
                     self.typed_tip_below = true;
                 }
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

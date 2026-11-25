@@ -164,6 +164,9 @@ pub struct Operation {
     /// The tool number, one of the design's tools.
     pub tool: u32,
     pub suppressed: bool,
+    /// Its heights, where they are not its own (decision 0037 of the CAM work).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heights: Option<crate::heights::Heights>,
     pub operation: OperationKind,
 }
 
@@ -345,6 +348,9 @@ impl ManufactureData {
             check_name(&what, &op.name)?;
             if self.setups.iter().flat_map(|t| &t.operations).filter(|o| o.id == op.id).count() > 1 {
                 return Err(Error::BadValue(format!("{what}: the id is used twice")));
+            }
+            if let Some(heights) = &op.heights {
+                heights.validate().map_err(|e| Error::BadValue(format!("{what}: {e}")))?;
             }
             let Some(tool) = self.tools.iter().find(|t| t.number == op.tool) else {
                 return Err(Error::BadValue(format!("{what}: tool {} is not one of the design's tools", op.tool)));

@@ -75,6 +75,8 @@ pub(crate) struct PocketForm {
     /// kept. Its pockets stay the ones it has.
     pub(super) editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: super::heights::HeightsForm,
 }
 
 impl PocketForm {
@@ -117,6 +119,7 @@ impl PocketForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: super::heights::HeightsForm::new([true; 4]),
             error: None,
         }
     }
@@ -141,6 +144,7 @@ impl PocketForm {
         form.rest = number("rest").unwrap_or(0.0);
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.heights = super::heights::HeightsForm::kept(app, id, [true; 4]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -223,11 +227,14 @@ impl PocketForm {
         set_or_clear(&mut pocket, "rest", (self.rest > 0.0).then_some(self.rest));
         set_or_clear(&mut pocket, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut pocket, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "pocket": pocket,
-        })
+        super::with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "pocket": pocket,
+            }),
+        )
     }
 
     /// Finds the setup's pockets and works the pocketing out, when the design or a field
@@ -314,7 +321,7 @@ impl PocketForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "pocket": params["pocket"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "pocket": params["pocket"].take()})),
             None => app.run("cam.op.pocket", params),
         };
         match made {
@@ -327,6 +334,8 @@ impl PocketForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<PocketForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         // What is picked on the model is what is cut (decision 0030 of the CAM work): a choice
         // from the row's list forgets it, and a pocket clicked is taken and worked out.
         let picks = self.editing.is_none();
@@ -445,6 +454,7 @@ impl PocketForm {
                 if self.rest > 0.0 {
                     ui_kit::text(ui, tr("manufacture.pocket_rest_note"), ui_kit::Text::Note("manufacture_pocket_rest_note"));
                 }
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

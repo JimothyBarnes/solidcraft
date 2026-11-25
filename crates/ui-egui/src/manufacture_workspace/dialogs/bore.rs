@@ -50,6 +50,8 @@ pub(crate) struct BoreForm {
     /// The setup of the list the viewport was last told to draw.
     drawn_setup: Option<usize>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: super::heights::HeightsForm,
 }
 
 impl BoreForm {
@@ -85,6 +87,7 @@ impl BoreForm {
             typed_feed: false,
             worked: Worked::new(),
             drawn_setup: None,
+            heights: super::heights::HeightsForm::new([true; 4]),
             error: None,
         }
     }
@@ -137,11 +140,14 @@ impl BoreForm {
         contour["direction"] = json!(word(&DIRECTIONS, self.direction));
         set_or_clear(&mut contour, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut contour, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "contour": contour,
-        })
+        super::with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "contour": contour,
+            }),
+        )
     }
 
     /// Finds the setup's holes and works the boring out, when the design or a field changed, and
@@ -197,6 +203,8 @@ impl BoreForm {
     }
 
     pub(super) fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<BoreForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         // What is picked on the model is what is bored (decision 0030 of the CAM work): a group
         // chosen from the row's list forgets it, and a hole clicked is taken and worked out.
         self.holes.follow_row(app, self.group);
@@ -263,6 +271,7 @@ impl BoreForm {
                 if ui_kit::row(ui, tr("manufacture.contour_bottom"), |ui| ui_kit::length_field(ui, &mut self.bottom, units, decimals)).changed() {
                     self.typed_bottom = true;
                 }
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;

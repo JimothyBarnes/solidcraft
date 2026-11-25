@@ -141,6 +141,13 @@ pub struct PocketOp {
     /// The Z the cut starts from; `None` for the stock's top.
     #[serde(default)]
     pub top: Option<f64>,
+    /// The Z every pocket is cut down to, none below its floor; `None` for each pocket's floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<f64>,
+    /// How far above each pocket's floor the cut stops, mm (stock left on the floor), or below it
+    /// when negative; `None` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_offset: Option<f64>,
     /// The most one level takes off, mm; `None` for half the tool's diameter.
     #[serde(default)]
     pub stepdown: Option<f64>,
@@ -308,6 +315,15 @@ impl PocketOp {
         if !self.top.is_none_or(|v| v.abs() <= MAX_COORDINATE) {
             return bad(format!("the top must be finite and within {MAX_COORDINATE} mm"));
         }
+        if !self.bottom.is_none_or(|v| v.abs() <= MAX_COORDINATE) {
+            return bad(format!("the bottom must be finite and within {MAX_COORDINATE} mm"));
+        }
+        if !self.floor_offset.is_none_or(|v| v.abs() <= MAX_COORDINATE) {
+            return bad(format!("the floor's offset must be finite and within {MAX_COORDINATE} mm"));
+        }
+        if self.bottom.is_some() && self.floor_offset.is_some() {
+            return bad("a pocket is cut to one Z or to its floor with an offset, not both".into());
+        }
         if !self.stepdown.is_none_or(|v| (MIN_STEP..=MAX_COORDINATE).contains(&v)) {
             return bad(format!("the stepdown must be at least {MIN_STEP} mm"));
         }
@@ -399,9 +415,25 @@ impl PocketOp {
         let mut deepest = 0.0_f64;
         for (shape, at) in shapes.iter().zip(&self.pockets) {
             let what = format!("the pocket at X {} Y {}", at[0], at[1]);
-            let depth = top - shape.floor;
+            // Where the pocket is cut down to: its floor, as far above or below it as the operation
+            // says (decision 0037: stock left on the floor, or a cut past it), or one Z for every
+            // pocket, which may not be below a floor.
+            let floor = match self.bottom {
+                Some(bottom) if bottom < shape.floor - SAME_HEIGHT => {
+                    return bad(format!(
+                        "{what}: its floor is at Z {} mm, above the bottom asked (Z {bottom} mm), which would cut into it: to cut below a floor, give the floor an offset",
+                        shape.floor
+                    ));
+                }
+                Some(bottom) => bottom,
+                None => shape.floor + self.floor_offset.unwrap_or(0.0),
+            };
+            if floor < shape.floor - SAME_HEIGHT {
+                said.push(format!("{what} is cut {:.3} mm below its floor, into the part, as the operation asks", shape.floor - floor));
+            }
+            let depth = top - floor;
             if !(depth > SAME_HEIGHT) {
-                return bad(format!("{what}: its floor (Z {} mm) is not below the top (Z {top} mm)", shape.floor));
+                return bad(format!("{what}: its bottom (Z {floor} mm) is not below the top (Z {top} mm)"));
             }
             if !(depth <= reach + 1e-9) {
                 return bad(format!(
@@ -422,7 +454,7 @@ impl PocketOp {
                 ));
             }
             deepest = deepest.max(per_level);
-            let levels: Vec<f64> = (1..=count).map(|k| if k == count { shape.floor } else { top - per_level * k as f64 }).collect();
+            let levels: Vec<f64> = (1..=count).map(|k| if k == count { floor } else { top - per_level * k as f64 }).collect();
             if let Some(open) = &shape.open {
                 // Open at a side: passes along its walls, the furthest from them first.
                 if self.rest.is_some() {
@@ -460,7 +492,7 @@ impl PocketOp {
                         .max((depth / (FINISH_DEEPEST * g.diameter) - 1e-9).ceil())
                         .max((by_load - 1e-9).ceil())
                         .clamp(1.0, count as f64) as usize;
-                    (1..=steps).map(|k| if k == steps { shape.floor } else { top - depth * k as f64 / steps as f64 }).collect()
+                    (1..=steps).map(|k| if k == steps { floor } else { top - depth * k as f64 / steps as f64 }).collect()
                 };
                 // A cut with no air to go down in is entered down a ramp along itself.
                 let finish_step = depth / heights.len().max(1) as f64;
@@ -516,7 +548,7 @@ impl PocketOp {
                         tool.number
                     ));
                 }
-                let heights: Vec<f64> = (1..=steps).map(|k| if k == steps { shape.floor } else { top - depth * k as f64 / steps as f64 }).collect();
+                let heights: Vec<f64> = (1..=steps).map(|k| if k == steps { floor } else { top - depth * k as f64 / steps as f64 }).collect();
                 finishes.push((heights, pass.rounds, Vec::new()));
                 pass.everywhere
             } else {

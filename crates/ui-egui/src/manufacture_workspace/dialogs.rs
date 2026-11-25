@@ -30,6 +30,7 @@ mod bore;
 mod chamfer;
 mod contour;
 mod engrave;
+mod heights;
 mod library;
 mod pocket;
 mod simulate;
@@ -112,6 +113,22 @@ impl Dialog {
 
     /// Whether the form takes what is clicked on the model (`super::picking`).
     fn takes_picks(&self) -> bool {
+        // A height waiting for a point clicked on the model, whatever the form.
+        let heights = match self {
+            Dialog::Face(form) => Some(&form.heights),
+            Dialog::Drill(form) => Some(&form.heights),
+            Dialog::Contour(form) => Some(&form.heights),
+            Dialog::Pocket(form) => Some(&form.heights),
+            Dialog::Chamfer(form) => Some(&form.heights),
+            Dialog::Bore(form) => Some(&form.heights),
+            Dialog::Slot(form) => Some(&form.heights),
+            Dialog::Engrave(form) => Some(&form.heights),
+            Dialog::Thread(form) => Some(&form.heights),
+            _ => None,
+        };
+        if heights.is_some_and(heights::HeightsForm::picking) {
+            return true;
+        }
         match self {
             Dialog::Pocket(form) => form.editing.is_none(),
             Dialog::Drill(form) => form.editing.is_none(),
@@ -1133,6 +1150,8 @@ pub(crate) struct FaceForm {
     /// The facing being changed, when the form changes one: its `face` parameters as kept.
     editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: heights::HeightsForm,
 }
 
 /// The setup an operation is in and the operation, as the design keeps them: `(setup, name, tool,
@@ -1187,6 +1206,7 @@ impl FaceForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: heights::HeightsForm::new([true; 4]),
             error: None,
         }
     }
@@ -1210,6 +1230,7 @@ impl FaceForm {
         (form.stepdown, form.multiple_depths) = number("stepdown").map_or((form.stepdown, false), |v| (v, true));
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
+        form.heights = heights::HeightsForm::kept(app, id, [true; 4]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -1235,11 +1256,14 @@ impl FaceForm {
         set_or_clear(&mut face, "stepdown", self.multiple_depths.then_some(self.stepdown));
         set_or_clear(&mut face, "rpm", self.typed_rpm.then_some(self.rpm));
         set_or_clear(&mut face, "feed", self.typed_feed.then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "face": face,
-        })
+        with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "face": face,
+            }),
+        )
     }
 
     /// Works the facing out, if its parameters or the design changed, and shows the numbers that
@@ -1272,7 +1296,7 @@ impl FaceForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "face": params["face"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "face": params["face"].take()})),
             None => app.run("cam.op.face", params),
         };
         match made {
@@ -1285,6 +1309,8 @@ impl FaceForm {
     }
 
     fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<FaceForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         self.refresh(app);
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
@@ -1335,6 +1361,7 @@ impl FaceForm {
                 if self.multiple_depths {
                     ui_kit::row(ui, tr("manufacture.face_stepdown"), |ui| ui_kit::length_field(ui, &mut self.stepdown, units, decimals));
                 }
+                self.heights.show(ui, units, decimals);
                 let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                 self.typed_rpm |= rpm;
                 self.typed_feed |= feed;
@@ -1425,6 +1452,8 @@ pub(crate) struct DrillForm {
     /// kept. Its holes stay the ones it has.
     editing: Option<Edited>,
     pub error: Option<String>,
+    /// Its heights (decision 0037 of the CAM work).
+    pub heights: heights::HeightsForm,
 }
 
 impl DrillForm {
@@ -1464,6 +1493,7 @@ impl DrillForm {
             worked: Worked::new(),
             drawn_setup: None,
             editing: None,
+            heights: heights::HeightsForm::new([true; 4]),
             error: None,
         }
     }
@@ -1484,6 +1514,7 @@ impl DrillForm {
         (form.depth, form.typed_depth) = (base["depth"].as_f64().unwrap_or(0.0), true);
         (form.rpm, form.typed_rpm) = base["rpm"].as_f64().map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = base["feed"].as_f64().map_or((0.0, false), |v| (v, true));
+        form.heights = heights::HeightsForm::kept(app, id, [true; 4]);
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -1565,11 +1596,14 @@ impl DrillForm {
         set_or_clear(&mut drill, "rpm", self.typed_rpm.then_some(self.rpm));
         // A tap's feed is its pitch times its speed: never typed.
         set_or_clear(&mut drill, "feed", (self.typed_feed && self.tap().is_none()).then_some(self.feed));
-        json!({
-            "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
-            "drill": drill,
-        })
+        with_heights(
+            &self.heights,
+            json!({
+                "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
+                "tool": self.tools.get(self.tool).map_or(0, |t| t.number),
+                "drill": drill,
+            }),
+        )
     }
 
     /// Finds the setup's holes and works the drilling out, when the design or a field changed,
@@ -1633,7 +1667,7 @@ impl DrillForm {
         }
         let mut params = self.params();
         let made = match &self.editing {
-            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "drill": params["drill"].take()})),
+            Some(edited) => app.run("cam.op.edit", json!({"id": edited.id, "tool": params["tool"], "heights": params.get("heights").cloned().unwrap_or_else(|| json!({})), "drill": params["drill"].take()})),
             None => app.run("cam.op.drill", params),
         };
         match made {
@@ -1646,6 +1680,8 @@ impl DrillForm {
     }
 
     fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<DrillForm> {
+        // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
+        self.heights.take_point(app, ctx);
         // What is picked on the model is what is drilled (decision 0030 of the CAM work): a
         // group chosen from the row's list forgets it, and a hole clicked is taken and worked out.
         let picks = self.editing.is_none();
@@ -1774,6 +1810,7 @@ impl DrillForm {
                     ui_kit::value_row(ui, tr("manufacture.face_feed"), &format!("{:.2} {unit}/min", self.feed * per));
                     ui_kit::text(ui, tr("manufacture.drill_tap_feed"), ui_kit::Text::Note("manufacture_drill_tap_feed"));
                 } else {
+                    self.heights.show(ui, units, decimals);
                     let (rpm, feed) = speed_and_feed(ui, &mut self.rpm, &mut self.feed, units);
                     self.typed_rpm |= rpm;
                     self.typed_feed |= feed;
@@ -2049,6 +2086,14 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
         _ => Dialog::Post(PostForm::new(app)),
     });
     true
+}
+
+/// An operation command's parameters with the heights of its form, when they are not its own.
+fn with_heights(heights: &heights::HeightsForm, mut params: Value) -> Value {
+    if let Some(given) = heights.params() {
+        params["heights"] = given;
+    }
+    params
 }
 
 /// Opens Add Tool, set to `kind` with cutting data for the stock of the setup `setup`, in the

@@ -3144,3 +3144,96 @@ fn open_pockets_of_other_shapes_are_found_with_what_stands_on_them() {
     let (removed, expected) = (sim["operations"][0]["removed"].as_f64().unwrap(), (102.0 * 82.0 - 40.0 * 30.0) * 7.0);
     assert!((removed - expected).abs() < 0.01 * expected, "{removed} {expected}");
 }
+
+#[test]
+fn an_operations_heights_come_from_where_they_say_and_follow_the_model() {
+    // The plate (100 x 80 x 20, the WCS at the stock's top: the plate's top is Z -1, its bottom
+    // Z -21), a pocket 60 x 40 x 6 in its top (floor at Z -7) and the 10 mm end mill.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    let path = |s: &mut Session| run(s, "cam.op.toolpath", json!({"id": "op-1"}));
+    // A facing 2 mm above the stock's top down to half a millimetre under the model's top.
+    run(
+        &mut s,
+        "cam.op.face",
+        json!({"setup": "setup-1", "tool": 2, "heights": {"top": {"from": "stock_top", "offset": 2}, "bottom": {"from": "model_top", "offset": -0.5}}}),
+    );
+    let t = path(&mut s);
+    assert_eq!(t["numbers"]["levels"], json!([-1.5]), "{}", t["numbers"]);
+    // Kept as references: the operation says where they are measured from, not the Z.
+    let kept = |s: &mut Session| run(s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["heights"].clone();
+    assert_eq!(kept(&mut s)["bottom"], json!({"from": "model_top", "offset": -0.5}));
+    // Its own clearance and retract: 40 above the stock and 3 above the model's top (Z 2). The
+    // toolpath travels at the one, and the rest of the setup's operations keep the setup's 25.
+    run(
+        &mut s,
+        "cam.op.edit",
+        json!({"id": "op-1", "heights": {"clearance": {"from": "stock_top", "offset": 40}, "retract": {"from": "model_top", "offset": 3}}}),
+    );
+    let t = path(&mut s);
+    assert_eq!(t["max"][2].as_f64(), Some(40.0), "{t}");
+    assert_eq!(t["numbers"]["levels"], json!([-1.0]), "the edit gave it its own top and bottom again");
+    // `{}` gives it its own heights again.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {}}));
+    assert_eq!((kept(&mut s), path(&mut s)["max"][2].as_f64()), (json!(null), Some(25.0)));
+    run(&mut s, "cam.op.delete", json!({"id": "op-1"}));
+
+    // The pocket with 0.5 left on its floor: the bottom from the feature, half a millimetre up.
+    run(
+        &mut s,
+        "cam.op.pocket",
+        json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}, "heights": {"bottom": {"from": "feature", "offset": 0.5}}}),
+    );
+    let id = run(&mut s, "cam.data", json!({}))["data"]["setups"][0]["operations"][0]["id"].clone();
+    let levels = |s: &mut Session| run(s, "cam.op.toolpath", json!({"id": id.clone()}))["numbers"]["levels"].clone();
+    assert_eq!(levels(&mut s), json!([[-3.25, -6.5]]));
+    // Made 2 mm deeper on the model, the pocket's bottom follows it.
+    boxed(&mut s, [20.0, 20.0, 12.0], [60.0, 40.0, 2.0], "cut");
+    assert_eq!(levels(&mut s), json!([[-4.25, -8.5]]));
+    // Its bottom from a point picked on the plate's top (Z 20 in the model, -1 in the WCS) less
+    // 3 mm: one Z, Z -4, in one level.
+    run(&mut s, "cam.op.edit", json!({"id": id.clone(), "heights": {"bottom": {"from": "point", "offset": -3, "at": [5, 5, 20]}}}));
+    assert_eq!(levels(&mut s), json!([[-4.0]]));
+    // Below the floor as one Z: refused with what to do instead.
+    run(&mut s, "cam.op.edit", json!({"id": id.clone(), "heights": {"bottom": {"from": "z", "offset": -12}}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": id.clone()}));
+    assert!(why.contains("give the floor an offset"), "{why}");
+    // A retract above the clearance, a point without its place, a reference that is no reference.
+    for wrong in [
+        json!({"retract": {"from": "stock_top", "offset": 30}}),
+        json!({"top": {"from": "point"}}),
+        json!({"top": {"from": "moon"}}),
+        json!({"top": {"offset": "up"}}),
+    ] {
+        let edited = s.execute("cam.op.edit", &json!({"id": id.clone(), "heights": wrong.clone()}));
+        let worked = edited.is_ok() && s.execute("cam.op.toolpath", &json!({"id": id.clone()})).is_ok();
+        assert!(!worked, "{wrong} was taken");
+    }
+}
+
+#[test]
+fn holes_go_down_to_the_bottom_their_heights_give_and_a_chamfer_takes_no_bottom() {
+    // Three holes 10 deep from the block's top (Z -1): their bottom 2 mm above the stock's
+    // bottom (Z -21 + 2) instead is a depth of 18.
+    let mut s = drilling();
+    run(
+        &mut s,
+        "cam.op.drill",
+        json!({"setup": "setup-1", "tool": 3, "drill": three_holes(), "heights": {"bottom": {"from": "stock_bottom", "offset": 2}}}),
+    );
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!(t["numbers"]["bottom"].as_f64(), Some(-19.0), "{}", t["numbers"]);
+    // From the stock's top instead of the holes' own top: the same bottom, a hole 18 deep.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {"top": {"from": "stock_top"}, "bottom": {"from": "z", "offset": -11}}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert_eq!(t["numbers"]["bottom"].as_f64(), Some(-11.0), "{}", t["numbers"]);
+    // A bottom above the top: refused with both.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {"bottom": {"from": "stock_top", "offset": 5}}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("must be below the top"), "{why}");
+    // A chamfer goes as deep as its width: a bottom height is refused, and says why.
+    run(&mut s, "cam.tool.create", json!({"tool": chamfer10()}));
+    run(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6, "heights": {"bottom": {"from": "model_bottom"}}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-2"}));
+    assert!(why.contains("a chamfer goes as deep as its width"), "{why}");
+}

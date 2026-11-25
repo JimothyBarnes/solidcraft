@@ -62,6 +62,10 @@ pub struct SlotOp {
     /// The Z every slot is cut down to; `None` for each slot's own, as the model has it.
     #[serde(default)]
     pub bottom: Option<f64>,
+    /// How far above each slot's floor the cut stops, mm, or below it when negative; `None` for
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_offset: Option<f64>,
     /// The most one level takes off, mm; `None` for half the tool's diameter.
     #[serde(default)]
     pub stepdown: Option<f64>,
@@ -135,6 +139,12 @@ impl SlotOp {
         if !self.bottom.is_none_or(|v| v.abs() <= MAX_COORDINATE) {
             return bad(format!("the bottom must be finite and within {MAX_COORDINATE} mm"));
         }
+        if !self.floor_offset.is_none_or(|v| v.abs() <= MAX_COORDINATE) {
+            return bad(format!("the floor's offset must be finite and within {MAX_COORDINATE} mm"));
+        }
+        if self.bottom.is_some() && self.floor_offset.is_some() {
+            return bad("a slot is cut to one Z or to its floor with an offset, not both".into());
+        }
         if !self.stepdown.is_none_or(|v| (MIN_STEP..=MAX_COORDINATE).contains(&v)) {
             return bad(format!("the stepdown must be at least {MIN_STEP} mm"));
         }
@@ -190,7 +200,7 @@ impl SlotOp {
                     tool.number, g.diameter, m.width
                 ));
             }
-            let bottom = self.bottom.unwrap_or(shape.bottom);
+            let bottom = self.bottom.unwrap_or(shape.bottom + self.floor_offset.unwrap_or(0.0));
             let depth = top - bottom;
             if !(depth > SAME_HEIGHT) {
                 return bad(format!("{what}: its bottom (Z {bottom} mm) is not below the top (Z {top} mm)"));
