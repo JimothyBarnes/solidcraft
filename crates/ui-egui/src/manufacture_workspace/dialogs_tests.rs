@@ -3253,3 +3253,62 @@ fn pocket_offers_a_pocket_open_at_a_side_and_cuts_it_in_passes() {
     let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
     assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
 }
+
+#[test]
+fn an_operations_form_makes_the_tool_it_needs_and_comes_back_with_it() {
+    let mut h = harness();
+    block(&mut h);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    // Face with no tool yet: the form says so and offers to make one.
+    ribbon(&mut h, "cam.op.face");
+    assert!(h.widget(tr("manufacture.no_tool_for_face")).is_some() && h.widget(tr("manufacture.new_tool")).is_some());
+    press(&mut h, tr("manufacture.new_tool"));
+    // Add Tool, set to a face mill 50 mm across with cutting data for the setup's aluminium, in
+    // the form's place.
+    let tool = match h.app.manufacture_workspace.dialog.as_ref() {
+        Some(Dialog::Tool(form)) => form,
+        _ => panic!("Add Tool is not open: {}", open(&h)),
+    };
+    assert_eq!((KINDS[tool.kind].0, tool.diameter, tool.material.as_str(), tool.number), ("face_mill", 50.0, "aluminium", 1));
+    press(&mut h, "Create");
+    // Back in Face, with the face mill picked: its toolpath is worked out from it.
+    assert_eq!(open(&h), "face", "{:?}", h.app.status);
+    let form = face_form(&mut h);
+    assert_eq!((form.tool, form.missing()), (0, None));
+    assert!(form.worked.get().is_some(), "{:?}", form.worked.trouble());
+    assert!((form.stepover - 35.0).abs() < 1e-9, "70% of the 50 mm face mill: {}", form.stepover);
+    press(&mut h, "Create");
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["tool"], json!(1));
+
+    // Pocket, with an end mill there already: the button is by the Tool row too. Add Tool is set
+    // to a flat end mill; cancelled, Pocket comes back as it was.
+    ribbon(&mut h, "cam.op.pocket");
+    let before = pocket_form(&mut h).params();
+    press(&mut h, tr("manufacture.new_tool"));
+    let kind = match h.app.manufacture_workspace.dialog.as_ref() {
+        Some(Dialog::Tool(form)) => KINDS[form.kind].0,
+        _ => panic!("Add Tool is not open: {}", open(&h)),
+    };
+    assert_eq!(kind, "flat_end_mill");
+    press(&mut h, "Cancel");
+    assert_eq!(open(&h), "pocket");
+    assert_eq!(pocket_form(&mut h).params(), before);
+    assert_eq!(data(&mut h)["tools"].as_array().map(Vec::len), Some(1), "nothing was made");
+    press(&mut h, "Cancel");
+
+    // Drill with no tool that drills: a drill, made and picked by hand, so the form keeps it
+    // whatever the holes' size.
+    ribbon(&mut h, "cam.op.drill");
+    assert!(h.widget(tr("manufacture.no_tool_for_drill")).is_some());
+    press(&mut h, tr("manufacture.new_tool"));
+    let kind = match h.app.manufacture_workspace.dialog.as_ref() {
+        Some(Dialog::Tool(form)) => KINDS[form.kind].0,
+        _ => panic!("Add Tool is not open: {}", open(&h)),
+    };
+    assert_eq!(kind, "drill");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "drill", "{:?}", h.app.status);
+    let form = drill_form(&mut h);
+    assert!(form.picked_tool && form.missing().is_none());
+    assert_eq!(form.params()["tool"], json!(2));
+}

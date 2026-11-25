@@ -63,6 +63,15 @@ pub(crate) struct ThreadForm {
 }
 
 impl ThreadForm {
+    /// Takes the tool numbered `number`, just made with Add Tool opened from this form: the
+    /// tools that can cut it again, with that one picked.
+    pub(super) fn take_tool(&mut self, app: &SolveApp, number: u32) {
+        self.tools = manufacture_tools(&app.session.doc, "thread");
+        if let Some(at) = self.tools.iter().position(|t| t.number == number) {
+            self.tool = at;
+        }
+    }
+
     /// For the setup the viewport draws, its largest group of holes and the first thread mill.
     pub fn new(app: &SolveApp) -> ThreadForm {
         let (setups, setup) = setups(app);
@@ -280,6 +289,7 @@ impl ThreadForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_thread");
+        let mut new_tool = false;
         let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_thread"), "cam_thread", &title)
             .placed(pivot, at)
             .fields()
@@ -287,6 +297,10 @@ impl ThreadForm {
             .show(ctx, ready, |ui| {
                 if let Some(missing) = missing {
                     ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_thread_missing"));
+                    // With no tool to cut with, one can be made here and the form comes back with it.
+                    if self.tools.is_empty() {
+                        new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
+                    }
                     return;
                 }
                 // An operation stays in its setup and keeps its holes: rows to read, not to choose.
@@ -314,6 +328,7 @@ impl ThreadForm {
                     }
                 }
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_thread_tool", &mut self.tool, &tool_labels);
+                new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
                 if ui_kit::row(ui, tr("manufacture.thread_diameter"), |ui| ui_kit::length_field(ui, &mut self.diameter, units, decimals)).changed() {
                     self.typed_diameter = true;
                 }
@@ -343,6 +358,11 @@ impl ThreadForm {
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });
+        if new_tool {
+            let (kind, setup) = ("thread_mill", self.setups.get(self.setup).map(|s| s.id.clone()));
+            super::new_tool_for(app, super::Dialog::Thread(self), kind, setup.as_deref());
+            return None;
+        }
         match action {
             ui_kit::Action::Ok => self.accept(app),
             ui_kit::Action::None if !closed => Some(self),

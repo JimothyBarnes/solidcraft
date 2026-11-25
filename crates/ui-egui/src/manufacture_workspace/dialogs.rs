@@ -93,6 +93,23 @@ pub(crate) enum Shown<'a> {
 }
 
 impl Dialog {
+    /// The tool numbered `number` was made with Add Tool opened from this form: an operation's
+    /// form picks it.
+    fn tool_made(&mut self, app: &SolveApp, number: u32) {
+        match self {
+            Dialog::Face(form) => form.take_tool(app, number),
+            Dialog::Drill(form) => form.take_tool(app, number),
+            Dialog::Contour(form) => form.take_tool(app, number),
+            Dialog::Pocket(form) => form.take_tool(app, number),
+            Dialog::Chamfer(form) => form.take_tool(app, number),
+            Dialog::Bore(form) => form.take_tool(app, number),
+            Dialog::Slot(form) => form.take_tool(app, number),
+            Dialog::Engrave(form) => form.take_tool(app, number),
+            Dialog::Thread(form) => form.take_tool(app, number),
+            _ => {}
+        }
+    }
+
     /// Whether the form takes what is clicked on the model (`super::picking`).
     fn takes_picks(&self) -> bool {
         match self {
@@ -389,6 +406,22 @@ pub(crate) struct ToolForm {
 }
 
 impl ToolForm {
+    /// Add Tool opened from an operation's form: set to `kind` (a word of [`KINDS`]), a face mill 50
+    /// mm across (2 in), and with cutting data for the stock material of the setup `setup` when it
+    /// has one, so that the operation finds its speed and feed.
+    pub fn for_kind(app: &SolveApp, kind: &str, setup: Option<&str>) -> ToolForm {
+        let mut form = ToolForm::new(app);
+        form.kind = KINDS.iter().position(|known| known.0 == kind).unwrap_or(0);
+        (form.flutes, form.tip_angle) = (form.usual_flutes(), form.usual_tip_angle());
+        if kind == "face_mill" {
+            let inch = imperial(&app.session.doc.units);
+            (form.diameter, form.corner_radius, form.flute_length) = if inch { (50.8, 0.79375, 6.35) } else { (50.0, 1.0, 6.0) };
+        }
+        let data = manufacture_data(&app.session.doc).unwrap_or_default();
+        form.material = data.setups.iter().find(|s| Some(s.id.as_str()) == setup).and_then(|s| s.material.clone()).unwrap_or_default();
+        form
+    }
+
     /// A flat end mill at the first free tool number: 10 mm, or half an inch in an inch design.
     pub fn new(app: &SolveApp) -> ToolForm {
         let used: Vec<u32> = manufacture_data(&app.session.doc).map(|d| d.tools.iter().map(|t| t.number).collect()).unwrap_or_default();
@@ -583,7 +616,13 @@ impl ToolForm {
         let params = self.params(&app.session.doc.units);
         let command = if self.editing.is_some() { "cam.tool.edit" } else { "cam.tool.create" };
         match app.run(command, params) {
-            Ok(_) => None,
+            Ok(_) => {
+                // A form that opened Add Tool takes the tool made when it comes back.
+                if self.editing.is_none() {
+                    app.manufacture_workspace.made_tool = Some(self.number);
+                }
+                None
+            }
             Err(why) => {
                 self.error = Some(why);
                 Some(self)
@@ -1117,6 +1156,15 @@ fn kept_operation(app: &SolveApp, id: &str) -> Result<(SetupChoice, String, u32,
 }
 
 impl FaceForm {
+    /// Takes the tool numbered `number`, just made with Add Tool opened from this form: the
+    /// tools that can cut it again, with that one picked.
+    pub(super) fn take_tool(&mut self, app: &SolveApp, number: u32) {
+        self.tools = manufacture_tools(&app.session.doc, "face");
+        if let Some(at) = self.tools.iter().position(|t| t.number == number) {
+            self.tool = at;
+        }
+    }
+
     /// For the setup the viewport draws and the first tool that can face.
     pub fn new(app: &SolveApp) -> FaceForm {
         let (setups, setup) = setups(app);
@@ -1254,6 +1302,7 @@ impl FaceForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_face");
+        let mut new_tool = false;
         let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_face"), "cam_face", &title)
             .placed(pivot, at)
             .fields()
@@ -1261,6 +1310,10 @@ impl FaceForm {
             .show(ctx, ready, |ui| {
                 if let Some(missing) = missing {
                     ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_face_missing"));
+                    // With no tool to cut with, one can be made here and the form comes back with it.
+                    if self.tools.is_empty() {
+                        new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
+                    }
                     return;
                 }
                 // An operation stays in its setup: the row is a choice only for a new one.
@@ -1273,6 +1326,7 @@ impl FaceForm {
                     }
                 }
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_face_tool", &mut self.tool, &tool_labels);
+                new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
                 ui_kit::choice_row(ui, tr_label("Pattern"), "manufacture_face_pattern", &mut self.pattern, &patterns);
                 if ui_kit::row(ui, tr("manufacture.face_stepover"), |ui| ui_kit::length_field(ui, &mut self.stepover, units, decimals)).changed() {
                     self.typed_stepover = true;
@@ -1296,6 +1350,11 @@ impl FaceForm {
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });
+        if new_tool {
+            let (kind, setup) = ("face_mill", self.setups.get(self.setup).map(|s| s.id.clone()));
+            new_tool_for(app, Dialog::Face(self), kind, setup.as_deref());
+            return None;
+        }
         match action {
             ui_kit::Action::Ok => self.accept(app),
             ui_kit::Action::None if !closed => Some(self),
@@ -1369,6 +1428,16 @@ pub(crate) struct DrillForm {
 }
 
 impl DrillForm {
+    /// Takes the tool numbered `number`, just made with Add Tool opened from this form: the
+    /// tools that can cut it again, with that one picked.
+    pub(super) fn take_tool(&mut self, app: &SolveApp, number: u32) {
+        self.tools = manufacture_tools(&app.session.doc, "drill");
+        if let Some(at) = self.tools.iter().position(|t| t.number == number) {
+            self.tool = at;
+            self.picked_tool = true;
+        }
+    }
+
     /// For the setup the viewport draws, its largest group of holes and the tool that suits them.
     pub fn new(app: &SolveApp) -> DrillForm {
         let (setups, setup) = setups(app);
@@ -1632,6 +1701,7 @@ impl DrillForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_drill");
+        let mut new_tool = false;
         let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_drill"), "cam_drill", &title)
             .placed(pivot, at)
             .fields()
@@ -1639,6 +1709,10 @@ impl DrillForm {
             .show(ctx, ready, |ui| {
                 if let Some(missing) = missing {
                     ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_drill_missing"));
+                    // With no tool to cut with, one can be made here and the form comes back with it.
+                    if self.tools.is_empty() {
+                        new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
+                    }
                     return;
                 }
                 if let (Some(kept), Some(setup)) = (&kept_holes, setup_labels.first()) {
@@ -1666,6 +1740,7 @@ impl DrillForm {
                 }
                 let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_drill_tool", &mut self.tool, &tool_labels);
+                new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
                 self.picked_tool |= self.tool != tool;
                 // A tap is wider than the hole it threads, and cuts with its own cycle at its pitch.
                 let tap = self.tools.get(self.tool).and_then(|tool| tool.pitch);
@@ -1714,6 +1789,12 @@ impl DrillForm {
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });
+        if new_tool {
+            let (kind, setup) =
+                (if word(&CYCLES, self.cycle) == "ream" { "reamer" } else { "drill" }, self.setups.get(self.setup).map(|s| s.id.clone()));
+            new_tool_for(app, Dialog::Drill(self), kind, setup.as_deref());
+            return None;
+        }
         match action {
             ui_kit::Action::Ok => self.accept(app),
             ui_kit::Action::None if !closed => Some(self),
@@ -1970,6 +2051,15 @@ pub(crate) fn start(app: &mut SolveApp, id: &str) -> bool {
     true
 }
 
+/// Opens Add Tool, set to `kind` with cutting data for the stock of the setup `setup`, in the
+/// place of the operation's form `form`, which comes back when Add Tool closes: with the tool
+/// made picked, or as it was.
+pub(super) fn new_tool_for(app: &mut SolveApp, form: Dialog, kind: &str, setup: Option<&str>) {
+    app.manufacture_workspace.dialog = Some(Dialog::Tool(ToolForm::for_kind(app, kind, setup)));
+    app.manufacture_workspace.resume = Some(Box::new(form));
+    app.manufacture_workspace.made_tool = None;
+}
+
 /// Opens the form that changes a tool, a setup or an operation (the Browser's Edit, or a double
 /// click on its row). What has no form, or is of a kind its form does not show, says so on the
 /// status line.
@@ -2031,9 +2121,22 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Dialog::Posted(done) => done.show(ctx).map(Dialog::Posted),
     };
     // A form that opened another while it ran keeps that one; a form that closes gives way to
-    // the window it was opened from (the tool library), when there is one.
+    // the window it was opened from (the tool library, or an operation's form that asked for a
+    // new tool, which takes the tool made), when there is one.
     if app.manufacture_workspace.dialog.is_none() {
-        app.manufacture_workspace.dialog = kept.or_else(|| app.manufacture_workspace.resume.take().map(|window| *window));
+        app.manufacture_workspace.dialog = match kept {
+            Some(kept) => Some(kept),
+            None => {
+                let made = app.manufacture_workspace.made_tool.take();
+                app.manufacture_workspace.resume.take().map(|window| {
+                    let mut window = *window;
+                    if let Some(number) = made {
+                        window.tool_made(app, number);
+                    }
+                    window
+                })
+            }
+        };
     }
     // The viewport picks only while a form that takes picks is open.
     if !app.manufacture_workspace.dialog.as_ref().is_some_and(Dialog::takes_picks) {

@@ -55,6 +55,8 @@ pub struct State {
     /// The window that comes back when the open form closes: the tool library, while a form it
     /// opened (Add Tool, a tool's own) is open.
     pub(crate) resume: Option<Box<dialogs::Dialog>>,
+    /// The number of the tool Add Tool just made, for the operation's form it was opened from.
+    pub(crate) made_tool: Option<u32>,
 }
 
 pub fn active(app: &SolveApp) -> bool {

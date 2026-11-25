@@ -1,0 +1,26 @@
+{
+  "en": {
+    "manufacture.new_tool": "New tool…"
+  },
+  "ar": {
+    "manufacture.new_tool": "أداة جديدة…"
+  },
+  "he": {
+    "manufacture.new_tool": "כלי חדש…"
+  },
+  "ja": {
+    "manufacture.new_tool": "新しい工具…"
+  },
+  "vi": {
+    "manufacture.new_tool": "Dao mới…"
+  },
+  "zh": {
+    "manufacture.new_tool": "新建刀具…"
+  },
+  "de": {
+    "manufacture.new_tool": "Neues Werkzeug…"
+  },
+  "ko": {
+    "manufacture.new_tool": "새 공구…"
+  }
+}

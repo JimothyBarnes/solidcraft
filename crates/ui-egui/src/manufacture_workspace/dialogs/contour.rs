@@ -108,6 +108,16 @@ pub(crate) struct ContourForm {
 }
 
 impl ContourForm {
+    /// Takes the tool numbered `number`, just made with Add Tool opened from this form: the
+    /// tools that can cut it again, with that one picked.
+    pub(super) fn take_tool(&mut self, app: &SolveApp, number: u32) {
+        self.tools = manufacture_tools(&app.session.doc, "contour");
+        if let Some(at) = self.tools.iter().position(|t| t.number == number) {
+            self.tool = at;
+            self.picked_tool = true;
+        }
+    }
+
     /// For the setup the viewport draws and the first tool that can cut a wall.
     pub fn new(app: &SolveApp) -> ContourForm {
         let (setups, setup) = setups(app);
@@ -492,6 +502,7 @@ impl ContourForm {
         }
         let (pivot, at) = crate::shell::floating_editor_anchor(app, ctx);
         let (title, ok) = window_words(&self.editing, "cmd.cam_op_contour");
+        let mut new_tool = false;
         let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_manufacture_contour"), "cam_contour", &title)
             .placed(pivot, at)
             .fields()
@@ -499,6 +510,10 @@ impl ContourForm {
             .show(ctx, ready, |ui| {
                 if let Some(missing) = missing {
                     ui_kit::text(ui, missing, ui_kit::Text::Note("manufacture_contour_missing"));
+                    // With no tool to cut with, one can be made here and the form comes back with it.
+                    if self.tools.is_empty() {
+                        new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
+                    }
                     return;
                 }
                 // An operation stays in its setup: the row is a choice only for a new one.
@@ -546,6 +561,7 @@ impl ContourForm {
                 }
                 let tool = self.tool;
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_contour_tool", &mut self.tool, &tool_labels);
+                new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
                 self.picked_tool |= self.tool != tool;
                 ui_kit::choice_row(ui, tr("manufacture.contour_direction"), "manufacture_contour_direction", &mut self.direction, &directions);
                 if ui_kit::row(ui, tr("manufacture.contour_bottom"), |ui| ui_kit::length_field(ui, &mut self.bottom, units, decimals)).changed() {
@@ -619,6 +635,11 @@ impl ContourForm {
                 }
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
             });
+        if new_tool {
+            let (kind, setup) = ("flat_end_mill", self.setups.get(self.setup).map(|s| s.id.clone()));
+            super::new_tool_for(app, super::Dialog::Contour(self), kind, setup.as_deref());
+            return None;
+        }
         match action {
             ui_kit::Action::Ok => self.accept(app),
             ui_kit::Action::None if !closed => Some(self),
