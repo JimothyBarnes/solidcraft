@@ -65,8 +65,8 @@ pub use pocket::{
     PocketOp, PocketShape, Pocketed,
 };
 pub use post::{
-    Arcs, BUILTIN_POSTS, Comments, Cycles, LineNumbers, MachineKind, Modal, Numbers, POST_FORMAT, Post, Posted, ProgramContext, ProgramTool,
-    Sequences,
+    Arcs, BUILTIN_POSTS, Comments, Cycles, Line, LineNumbers, MAX_POST_PROPERTIES, MAX_PROPERTY_TEXT, MachineKind, Modal, Numbers, POST_FORMAT, Post,
+    Posted, ProgramContext, ProgramTool, Property, PropertyChoice, PropertyKind, Sequences,
 };
 pub use sheet::{MAX_SHEET_PIECES, MAX_SHEET_ROWS, SetupSheet, SheetOperation, SheetTool};
 pub use sim::{BodyHit, BodyPart, CutReport, Gouge, HeightField, MAX_FIELD_CELLS, MAX_LISTED, MIN_CELL, RapidHit, Simulation, ToolShape};

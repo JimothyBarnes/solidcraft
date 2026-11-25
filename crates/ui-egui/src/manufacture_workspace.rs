@@ -57,6 +57,8 @@ pub struct State {
     pub(crate) resume: Option<Box<dialogs::Dialog>>,
     /// The number of the tool Add Tool just made, for the operation's form it was opened from.
     pub(crate) made_tool: Option<u32>,
+    /// A post folder other than SolidCraft's own, for Post Process to list and add to (a test's).
+    pub(crate) post_folder: Option<String>,
 }
 
 pub fn active(app: &SolveApp) -> bool {

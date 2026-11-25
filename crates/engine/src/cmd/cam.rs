@@ -6,9 +6,9 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use solidcraft_cam::{
-    BUILTIN_POSTS, Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferEdges, ChamferOp, ContourOp, ContourSide, DrillOp, FaceOp, LengthUnit,
-    MANUFACTURE_DATA_OWNER, MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Post, Posted, ProgramContext,
-    ProgramTool, SafeHeights, Setup, SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
+    Bounds, BoxAnchor, BoxOffsets, BoxSide, ChamferEdges, ChamferOp, ContourOp, ContourSide, DrillOp, FaceOp, LengthUnit, MANUFACTURE_DATA_OWNER,
+    MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Posted, ProgramContext, ProgramTool, SafeHeights, Setup,
+    SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
 use solidcraft_cam::{HeightFrom, HeightRef, Heights};
 use solidcraft_doc::plugin_data::DATA;
@@ -123,7 +123,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, units?: mm | inch (default the design's), date?: text to write on it, path?: also write it to this .html file, overwrite?: replace an existing file (default false) → html: one page for the shop with the stock, the work origin, the tools (how far each sticks out, the lowest its tip goes), the operations in order with speeds, feeds and times, the setup from above, and what to check (the operations' and the simulation's notes, a tool that goes deeper than it sticks out)"),
     CommandSpec::new("cam.post", "Post Process", crate::checked!("cam.post", post)).icon("cam_post").noundo().read_only()
         .contract(&TypedContract::<CamPostParams>::new()).output(output_schema_for::<CamPosted>)
-        .params("setup: id, post: rs274 | fanuc_mill | haas_mill, program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false), optional_stop?: write the post's optional stop (M1) before every tool change but the first, where the post has one (default true), comments?: write the tools the program takes, each operation's name and each tool's name as comments (default true) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
+        .params("setup: id, post: rs274 | fanuc_mill | haas_mill | the path of a post file (cam.posts.list), program_number?: default 1, program_name?, units?: mm | inch, path?: also write it to this file, overwrite?: replace an existing file (default false), optional_stop?: write the post's optional stop (M1) before every tool change but the first, where the post has one (default true), comments?: write the tools the program takes, each operation's name and each tool's name as comments (default true), properties?: {id: value} for the post's own properties (default each one's default) → text: the program, read back and compared move by move with what was written; never safe to run unproven: prove it on the machine (air cut, single block) first"),
 ];
 
 /// The built-in owner of `plugins/solidcraft-cam/`.
@@ -1930,17 +1930,6 @@ pub(super) fn write_file(cmd: &str, path: &str, bytes: &[u8], overwrite: bool, w
     result.map_err(|e| bad(cmd, format!("could not write {what}: {e}")))
 }
 
-/// The built-in posts for a form to offer: (id, name).
-pub fn manufacture_posts() -> Vec<(String, String)> {
-    BUILTIN_POSTS.iter().filter_map(|(id, _)| Post::builtin(id).ok().map(|post| ((*id).to_string(), post.name))).collect()
-}
-
-/// Whether the built-in post `id` has an optional stop to write before tool changes, for a
-/// form to offer the choice only where it means something.
-pub fn manufacture_post_stops(id: &str) -> bool {
-    Post::builtin(id).is_ok_and(|post| post.optional_stop.is_some())
-}
-
 /// One of the design's tools for a form to offer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolChoice {
@@ -2002,7 +1991,7 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
 }
 
 /// An engine error in a view's own words: what is wrong, without the command's name.
-fn said(e: crate::EngineError) -> String {
+pub(super) fn said(e: crate::EngineError) -> String {
     match e {
         crate::EngineError::BadParams { msg, .. } => msg,
         other => other.to_string(),
@@ -2821,11 +2810,7 @@ pub fn manufacture_program(s: &Session, params: &Value) -> std::result::Result<P
 fn posted_program(s: &Session, cmd: &str, p: &CamPostParams) -> Result<(Posted, Vec<String>)> {
     let d = load(s, cmd)?;
     let setup = d.setups.iter().find(|x| x.id == p.setup).ok_or_else(|| bad(cmd, format!("the design has no setup '{}'", p.setup)))?;
-    let posts: Vec<&str> = BUILTIN_POSTS.iter().map(|(id, _)| *id).collect();
-    if !posts.contains(&p.post.as_str()) {
-        return Err(bad(cmd, format!("no post '{}' (built in: {})", p.post, posts.join(", "))));
-    }
-    let post = Post::builtin(&p.post).map_err(|e| bad(cmd, e.to_string()))?;
+    let post = super::cam_posts::named(cmd, &p.post)?;
     let units = match p.units.as_deref() {
         None | Some("mm") => LengthUnit::Millimetre,
         Some("inch") => LengthUnit::Inch,
@@ -2877,6 +2862,7 @@ fn posted_program(s: &Session, cmd: &str, p: &CamPostParams) -> Result<(Posted, 
         } else {
             Vec::new()
         },
+        properties: p.properties.clone(),
     };
     let posted = post.write(&program, &ctx).map_err(|e| bad(cmd, e.to_string()))?;
     Ok((posted, notes))

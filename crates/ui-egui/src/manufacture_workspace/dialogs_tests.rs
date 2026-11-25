@@ -2289,7 +2289,7 @@ fn post_process_offers_the_stop_between_tools_where_the_post_has_one() {
     h.frames(2);
     assert_eq!(post_form(&mut h).params()["optional_stop"], json!(false));
     // The NIST post has no word for an optional stop: there is nothing to tick.
-    let reference = manufacture_posts().iter().position(|(id, _)| id == "rs274").unwrap();
+    let reference = post_form(&mut h).post_index("rs274").unwrap();
     post_form(&mut h).post = reference;
     h.frames(3);
     assert!(h.widget(tr("manufacture.post_optional_stop")).is_none());
@@ -2347,7 +2347,7 @@ fn post_process_shows_the_program_it_would_save() {
     post_form(&mut h).units = 1;
     h.frames(2);
     assert!(h.widget("G17 G40 G49 G80 G90 G94 G20").is_some());
-    let reference = manufacture_posts().iter().position(|(id, _)| id == "rs274").unwrap();
+    let reference = post_form(&mut h).post_index("rs274").unwrap();
     post_form(&mut h).post = reference;
     h.frames(2);
     assert!(h.widget("(T1 20 mm Flat end mill - DIA 0.7874)").is_some());
@@ -3420,4 +3420,104 @@ fn contour_goes_round_chains_of_edges_clicked_on_the_model() {
     assert_eq!((open(&h), contour_form(&mut h).geometry), ("contour", 1));
     press(&mut h, "OK");
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"]["edges"], kept["edges"]);
+}
+
+/// The Haas-style post as a shop keeps its own: another id and name, who made it, a version,
+/// and a note for the operator said at the program's start.
+fn shop_post(version: &str) -> String {
+    // The built-in Haas post's own file, what a shop starts its own from.
+    let mut post: Value = serde_json::from_str(include_str!("../../../cam/posts/haas_mill.json")).unwrap();
+    post["id"] = json!("shop_haas");
+    post["name"] = json!("Our VF-4SS");
+    post["vendor"] = json!("A shop");
+    post["version"] = json!(version);
+    post["properties"].as_array_mut().unwrap().push(json!({"id": "note", "label": "Note for the operator", "kind": "text", "default": ""}));
+    post["sequences"]["program_start"].as_array_mut().unwrap().push(json!({"line": "({note})", "when": "note"}));
+    serde_json::to_string_pretty(&post).unwrap()
+}
+
+#[test]
+fn post_process_offers_the_post_folders_posts_with_their_properties() {
+    let mut h = harness();
+    faced(&mut h);
+    let dir = std::env::temp_dir().join(format!("solidcraft-ui-posts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let folder = dir.join("posts").to_string_lossy().to_string();
+    h.app.manufacture_workspace.post_folder = Some(folder.clone());
+    let file = dir.join("vf4ss-post.json").to_string_lossy().to_string();
+    std::fs::write(&file, shop_post("2")).unwrap();
+    ribbon(&mut h, "cam.post");
+    // The Haas post built in: who made it, its own property ticked by default, and the folder.
+    let made = solidcraft_ui_text::format("manufacture.post_vendor_version", &[("vendor", "SolidCraft"), ("version", "1")]);
+    assert!(h.widget(&made).is_some());
+    assert!(h.widget(&folder).is_some());
+    let table = "Table forward at the end (G28 Y0.)";
+    // The program as the form would save it, worked out again as the form changes.
+    let program = |h: &mut Harness| post_form(h).worked.get().map(|(_, program)| program.text.clone()).unwrap_or_default();
+    assert!(h.widget(table).is_some() && program(&mut h).contains("\nG28 Y0.\n"));
+    assert!(post_form(&mut h).params().get("properties").is_none(), "nothing differs from the post's defaults");
+    // Unticked, the program leaves the table where it is.
+    press(&mut h, table);
+    assert_eq!(post_form(&mut h).params()["properties"], json!({"table_home": false}));
+    h.frames(2);
+    assert!(!program(&mut h).contains("G28 Y0."));
+    // Add post file: the file the prompt gives is copied into the folder and picked, and its own
+    // properties are offered from their defaults.
+    let slot = crate::picker_test_support::Slot::default();
+    crate::picker_test_support::open(&mut h.app, &slot);
+    press(&mut h, tr("manufacture.post_add"));
+    *slot.borrow_mut() = Some(Some(file.clone()));
+    h.frames(5);
+    assert_eq!(open(&h), "post");
+    let kept = std::path::Path::new(&folder).join("shop_haas.json").to_string_lossy().to_string();
+    assert_eq!(post_form(&mut h).entry().map(|entry| entry.post.clone()), Some(kept.clone()));
+    assert!(h.widget(&solidcraft_ui_text::format("manufacture.post_added", &[("name", "Our VF-4SS")])).is_some());
+    assert!(h.widget("A shop, version 2").is_some() && h.widget("Note for the operator").is_some());
+    h.frames(2);
+    assert!(post_form(&mut h).params().get("properties").is_none() && program(&mut h).contains("\nG28 Y0.\n"), "its own defaults");
+    // A note typed: said at the program's start, in capitals as the post writes comments.
+    h.step(&json!({"click": {"handle": "dialog:Note for the operator"}})).unwrap();
+    h.step(&json!({"text": "Soft jaws, op 1"})).unwrap();
+    h.frames(3);
+    assert_eq!(post_form(&mut h).params()["properties"], json!({"note": "Soft jaws, op 1"}));
+    assert!(h.widget("(SOFT JAWS OP 1)").is_some());
+    // A newer version added again replaces it, and says which version it replaced.
+    std::fs::write(&file, shop_post("3")).unwrap();
+    press(&mut h, tr("manufacture.post_add"));
+    *slot.borrow_mut() = Some(Some(file.clone()));
+    h.frames(5);
+    assert!(h.widget(&solidcraft_ui_text::format("manufacture.post_replaced", &[("name", "Our VF-4SS"), ("old", "2")])).is_some());
+    assert!(h.widget("A shop, version 3").is_some());
+    // A file that is no post is not added, and the form says why.
+    let broken = dir.join("broken.json").to_string_lossy().to_string();
+    std::fs::write(&broken, "{}").unwrap();
+    press(&mut h, tr("manufacture.post_add"));
+    *slot.borrow_mut() = Some(Some(broken.clone()));
+    h.frames(5);
+    let why = post_form(&mut h).error.clone().unwrap_or_default();
+    assert!(why.contains("missing field"), "{why:?}");
+    // One put in the folder by hand is listed with why when the form opens again.
+    std::fs::copy(&broken, std::path::Path::new(&folder).join("broken.json")).unwrap();
+    press(&mut h, "Cancel");
+    ribbon(&mut h, "cam.post");
+    let unread = solidcraft_engine::cmd::manufacture_post_library(Some(&folder)).unread;
+    let said = solidcraft_ui_text::format("manufacture.post_unread", &[("file", "broken.json"), ("why", &unread[0].why)]);
+    assert!(h.widget(&said).is_some(), "{said}");
+    press(&mut h, "Cancel");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn post_process_without_a_post_folder_offers_the_posts_built_in() {
+    let mut h = harness();
+    faced(&mut h);
+    ribbon(&mut h, "cam.post");
+    let form = post_form(&mut h);
+    assert_eq!((form.post_index("fanuc_mill"), form.post_index("haas_mill"), form.post_index("rs274")), (Some(0), Some(1), Some(2)));
+    assert!(h.widget(tr("manufacture.post_no_folder")).is_some());
+    // Nowhere to add a post to: the button does nothing.
+    press(&mut h, tr("manufacture.post_add"));
+    assert!(!h.app.file_picker_busy() && open(&h) == "post");
+    press(&mut h, "Cancel");
 }

@@ -446,10 +446,11 @@ fn a_program_is_posted_to_a_file_and_never_over_one_by_surprise() {
 
 #[test]
 fn forms_are_offered_the_posts_and_the_tools_that_can_do_the_work() {
-    let posts = crate::cmd::manufacture_posts();
-    let ids: Vec<&str> = posts.iter().map(|(id, _)| id.as_str()).collect();
+    let library = crate::cmd::manufacture_post_library(None);
+    let ids: Vec<&str> = library.posts.iter().map(|post| post.post.as_str()).collect();
     assert_eq!(ids, ["fanuc_mill", "haas_mill", "rs274"]);
-    assert!(posts.iter().all(|(_, name)| !name.is_empty()));
+    assert!(library.posts.iter().all(|post| !post.name.is_empty() && post.vendor == "SolidCraft" && post.file.is_none()));
+    assert!(library.folder.is_none() && library.unread.is_empty());
     let mut s = drilling();
     run(&mut s, "cam.tool.create", json!({"tool": mill20()}));
     let numbers = |s: &Session, operation: &str| crate::cmd::manufacture_tools(&s.doc, operation).iter().map(|t| t.number).collect::<Vec<_>>();
@@ -2449,7 +2450,8 @@ fn a_program_stops_if_asked_before_every_tool_change_but_the_first() {
     let fanuc = posted(&mut s, json!({"setup": "setup-1", "post": "fanuc_mill"}));
     assert_eq!(fanuc.lines().filter(|line| line.ends_with(" M1")).count(), 1, "{fanuc}");
     // A form is told which posts have one.
-    assert_eq!(["haas_mill", "fanuc_mill", "rs274"].map(crate::cmd::manufacture_post_stops), [true, true, false]);
+    let stops = |id: &str| crate::cmd::manufacture_post_library(None).posts.iter().any(|post| post.id == id && post.optional_stop);
+    assert_eq!(["haas_mill", "fanuc_mill", "rs274"].map(stops), [true, true, false]);
     assert!(refused(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill", "optional_stop": "yes"})).contains("parameters"));
 }
 
@@ -3293,4 +3295,86 @@ fn an_inside_contour_goes_round_the_floor_edge_of_a_pocket_picked_on_the_model()
     // Openings found and edges picked at once: refused before the model is read.
     let why = refused(&mut s, "cam.op.edit", json!({"id": "op-1", "contour": {"side": "inside", "edges": [[50, 20, 14]], "openings": [[0, 0]]}}));
     assert!(why.contains("not both"), "{why}");
+}
+
+/// The Haas-style post as a shop might keep its own: another id, a vendor and a version, and a
+/// note for the operator at the program's start.
+fn shop_post(version: &str) -> String {
+    let (_, json) = solidcraft_cam::BUILTIN_POSTS.iter().find(|(id, _)| *id == "haas_mill").unwrap();
+    let mut post: Value = serde_json::from_str(json).unwrap();
+    post["id"] = json!("shop_haas");
+    post["name"] = json!("Our VF-4SS");
+    post["vendor"] = json!("A shop");
+    post["version"] = json!(version);
+    post["properties"].as_array_mut().unwrap().push(json!({"id": "note", "label": "Note for the operator", "kind": "text", "default": ""}));
+    post["sequences"]["program_start"].as_array_mut().unwrap().push(json!({"line": "({note})", "when": "note"}));
+    serde_json::to_string_pretty(&post).unwrap()
+}
+
+#[test]
+fn post_files_in_the_post_folder_are_listed_added_and_posted_with() {
+    let mut s = shop();
+    let dir = std::env::temp_dir().join(format!("solidcraft-cam-posts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let folder = dir.join("posts").to_string_lossy().to_string();
+    let downloads = dir.join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let file = downloads.join("vf4ss-post.json").to_string_lossy().to_string();
+    std::fs::write(&file, shop_post("1.0")).unwrap();
+    // No folder yet: only the posts built in.
+    let listed = run(&mut s, "cam.posts.list", json!({"folder": folder}));
+    assert_eq!(listed["posts"].as_array().unwrap().len(), 3);
+    assert_eq!((listed["folder"].clone(), listed["unread"].clone()), (json!(folder), json!([])));
+    // Added: copied into the folder (made for it) as its id names it, the file's own text.
+    let added = run(&mut s, "cam.posts.add", json!({"file": file, "folder": folder}));
+    let kept = std::path::Path::new(&folder).join("shop_haas.json").to_string_lossy().to_string();
+    assert_eq!(added, json!({"post": kept, "id": "shop_haas", "name": "Our VF-4SS", "vendor": "A shop", "version": "1.0"}));
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), shop_post("1.0"));
+    // Listed after the posts built in, with who made it and what it offers.
+    let library = crate::cmd::manufacture_post_library(Some(&folder));
+    let ours = &library.posts[3];
+    assert_eq!(
+        (ours.post.as_str(), ours.file.as_deref(), ours.vendor.as_str(), ours.version.as_str()),
+        (kept.as_str(), Some(kept.as_str()), "A shop", "1.0")
+    );
+    assert_eq!(ours.properties.iter().map(|p| (p.id.as_str(), p.kind.as_str())).collect::<Vec<_>>(), [("table_home", "bool"), ("note", "text")]);
+    assert_eq!(run(&mut s, "cam.posts.list", json!({"folder": folder}))["posts"][3]["post"], json!(kept));
+    // Posted with by its path, its properties set: the note said, the table left where it is.
+    let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": kept, "properties": {"note": "Soft jaws, op 1", "table_home": false}}));
+    let text = posted["text"].as_str().unwrap();
+    assert!(text.starts_with("%\nO00001 (SETUP 1)\n(SOFT JAWS OP 1)\n"), "{text}");
+    assert!(text.ends_with("G28 G91 Z0.\nG90\nM30\n%\n"), "{text}");
+    assert_eq!(posted["post"], json!(kept));
+    // A newer version replaces it only when asked to, and says which it replaced.
+    std::fs::write(&file, shop_post("1.1")).unwrap();
+    let again = refused(&mut s, "cam.posts.add", json!({"file": file, "folder": folder}));
+    assert!(again.contains("has shop_haas.json already (version 1.0); add it with replace"), "{again}");
+    let replaced = run(&mut s, "cam.posts.add", json!({"file": file, "folder": folder, "replace": true}));
+    assert_eq!((replaced["version"].clone(), replaced["replaced"].clone()), (json!("1.1"), json!("1.0")));
+    // Adding the folder's own file changes nothing.
+    assert_eq!(run(&mut s, "cam.posts.add", json!({"file": kept, "folder": folder}))["replaced"], json!(null));
+    // A file in the folder that is no post is listed with why; other files are not posts.
+    std::fs::write(std::path::Path::new(&folder).join("broken.json"), "{\"format\": 1}").unwrap();
+    std::fs::write(std::path::Path::new(&folder).join("readme.txt"), "posts go here").unwrap();
+    let library = crate::cmd::manufacture_post_library(Some(&folder));
+    assert_eq!(library.posts.len(), 4);
+    assert_eq!(library.unread.len(), 1);
+    assert!(library.unread[0].file.ends_with("broken.json") && library.unread[0].why.contains("missing field"), "{:?}", library.unread);
+    // Refused, with why: a property the post has not, a value it does not take, a post that is
+    // neither built in nor a file, a file that is no post, a file that is not there.
+    let bad = |s: &mut Session, params: Value| refused(s, "cam.post", params);
+    assert!(
+        bad(&mut s, json!({"setup": "setup-1", "post": kept, "properties": {"coolant": true}}))
+            .contains("no property 'coolant' (it has table_home, note)")
+    );
+    assert!(bad(&mut s, json!({"setup": "setup-1", "post": "haas_mill", "properties": {"table_home": "yes"}})).contains("yes or no"));
+    let unknown = bad(&mut s, json!({"setup": "setup-1", "post": "mazak"}));
+    assert!(unknown.contains("no post 'mazak' (built in: fanuc_mill, haas_mill, rs274; a post file is named by its path"), "{unknown}");
+    let broken = std::path::Path::new(&folder).join("broken.json").to_string_lossy().to_string();
+    assert!(bad(&mut s, json!({"setup": "setup-1", "post": broken})).contains("missing field"));
+    assert!(bad(&mut s, json!({"setup": "setup-1", "post": dir.join("gone.json").to_string_lossy()})).contains("could not read the post file"));
+    assert!(refused(&mut s, "cam.posts.add", json!({"file": broken, "folder": folder})).contains("missing field"));
+    assert!(refused(&mut s, "cam.posts.add", json!({"file": "post.txt", "folder": folder})).contains("a post file is a .json file"));
+    assert_eq!(run(&mut s, "cam.posts.list", json!({"folder": ""}))["unread"][0]["why"], json!("invalid post folder path"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

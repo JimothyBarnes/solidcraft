@@ -59,6 +59,10 @@ pub struct ReadBack {
     pub machine_retracts: usize,
     /// Whether the program ended by sending the table home in Y (`G91 G28 Y0`, after Z).
     pub table_home: bool,
+    /// Where the tool is at the end, in mm in the work coordinate system: with a rapid in X and
+    /// Y made at machine home (the first part of a move that has not come down yet) counted, and
+    /// Z as the last move left it.
+    pub end: Vec3,
 }
 
 /// Reads `program`. Errors name the 1-based line.
@@ -86,7 +90,7 @@ pub fn read(program: &str, settings: &ReadSettings) -> Result<ReadBack> {
         }
     }
     m.toolpath.validate()?;
-    Ok(ReadBack { toolpath: m.toolpath, units: m.units, notes: m.notes, machine_retracts: m.machine_retracts, table_home: m.table_home })
+    Ok(ReadBack { toolpath: m.toolpath, units: m.units, notes: m.notes, machine_retracts: m.machine_retracts, table_home: m.table_home, end: m.at })
 }
 
 fn is_tape_mark(raw: &str) -> bool {

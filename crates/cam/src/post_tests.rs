@@ -924,3 +924,136 @@ fn a_comment_before_a_hole_ends_the_cycle_before_it() {
         assert_eq!(posted.read_back.toolpath.moves, plain.read_back.toolpath.moves, "{id}");
     }
 }
+
+/// The Fanuc-style post with three properties of a shop's own: how the program ends, a warm-up
+/// time said in a comment where it is not zero, and a note for whoever runs it.
+fn shop_post() -> serde_json::Value {
+    use serde_json::json;
+    let mut post: serde_json::Value = serde_json::from_str(BUILTIN_POSTS.iter().find(|(id, _)| *id == "fanuc_mill").unwrap().1).unwrap();
+    post["id"] = json!("shop_fanuc");
+    post["vendor"] = json!("A shop");
+    post["version"] = json!("3.1");
+    post["properties"] = json!([
+        { "id": "end_code", "label": "How the program ends", "kind": "choice", "default": "M30",
+          "choices": [{ "value": "M30", "label": "End and rewind" }, { "value": "M2", "label": "End" }] },
+        { "id": "warm_up", "label": "Warm-up (s)", "kind": "number", "default": 0, "min": 0, "max": 600 },
+        { "id": "note", "label": "Note for the operator", "kind": "text", "default": "" }
+    ]);
+    post["sequences"]["program_start"] = json!(["%", "O{program_number} ({program_name})", { "line": "({note})", "when": "note" }]);
+    post["sequences"]["safe_start"] = json!(["G17 G40 G49 G80 G90 G94 {units_code}", { "line": "(WARM UP {warm_up} S)", "when": "warm_up" }]);
+    post["sequences"]["program_end"] = json!(["G91 G28 Z0.", "G90", "{end_code}", "%"]);
+    post
+}
+
+#[test]
+fn a_posts_properties_keep_its_lines_or_leave_them_out_and_fill_them() {
+    use serde_json::json;
+    let post = Post::from_json(&shop_post().to_string()).unwrap();
+    assert_eq!((post.vendor.as_str(), post.version.as_str(), post.properties.len()), ("A shop", "3.1", 3));
+    // As the post's defaults write it: the program ends with M30, and says nothing more.
+    let plain = post.write(&bracket(), &ctx()).unwrap();
+    let lines: Vec<&str> = plain.text.lines().map(unnumbered).collect();
+    assert_eq!(lines[lines.len() - 2..], ["M30", "%"]);
+    assert!(!plain.text.contains("WARM UP") && !plain.text.contains("(NOTE"));
+    // Set otherwise: M2, the warm-up said, the note cleaned as every comment is (no parenthesis,
+    // `;` or `%` gets into it) and in capitals as the post writes comments.
+    let set = |values: serde_json::Value| ProgramContext { properties: serde_json::from_value(values).unwrap(), ..ctx() };
+    let given = set(json!({ "end_code": "M2", "warm_up": 90, "note": "Check vise (jaw) pressure; 50%" }));
+    let posted = post.write(&bracket(), &given).unwrap();
+    let lines: Vec<&str> = posted.text.lines().map(unnumbered).collect();
+    assert_eq!(lines[lines.len() - 2..], ["M2", "%"]);
+    assert_eq!(lines[2], "(CHECK VISE JAW PRESSURE 50)");
+    assert!(lines.contains(&"(WARM UP 90 S)"));
+    // The same moves, read back as before.
+    assert_eq!(posted.read_back.toolpath.moves.len(), plain.read_back.toolpath.moves.len());
+    // A value the post does not offer is refused, with what it does offer.
+    let refused = |values: serde_json::Value| post.write(&bracket(), &set(values)).unwrap_err().to_string();
+    assert!(refused(json!({ "nope": true })).contains("no property 'nope' (it has end_code, warm_up, note)"));
+    assert!(refused(json!({ "end_code": "M0" })).contains("one of M30, M2"));
+    assert!(refused(json!({ "warm_up": 601 })).contains("a number from 0 to 600"));
+    assert!(refused(json!({ "warm_up": "90" })).contains("a number from 0 to 600"));
+    assert!(refused(json!({ "note": 5 })).contains("text of at most 100"));
+    assert!(refused(json!({ "note": "x".repeat(101) })).contains("text of at most 100"));
+}
+
+#[test]
+fn the_haas_post_brings_the_table_forward_at_the_end_unless_told_not_to() {
+    use serde_json::json;
+    let post = Post::builtin("haas_mill").unwrap();
+    assert_eq!((post.vendor.as_str(), post.version.as_str()), ("SolidCraft", "1"));
+    let home = post.write(&bracket(), &ctx()).unwrap();
+    assert!(home.text.contains("\nG28 Y0.\n") && home.read_back.table_home);
+    let stay = ProgramContext { properties: [("table_home".to_string(), json!(false))].into(), ..ctx() };
+    let stay = post.write(&bracket(), &stay).unwrap();
+    assert!(!stay.text.contains("G28 Y0.") && !stay.read_back.table_home, "{}", stay.text);
+    assert!(stay.text.ends_with("G28 G91 Z0.\nG90\nM30\n%\n"));
+}
+
+#[test]
+fn bad_post_properties_and_lines_are_refused_when_read() {
+    use serde_json::json;
+    let with = |pointer: &str, value: serde_json::Value| {
+        let mut v = shop_post();
+        match v.pointer_mut(pointer) {
+            Some(slot) => *slot = value,
+            None => panic!("no {pointer}"),
+        }
+        Post::from_json(&v.to_string()).map(|_| ()).map_err(|e| e.to_string())
+    };
+    let refused = |pointer: &str, value: serde_json::Value, why: &str| {
+        let e = with(pointer, value.clone()).unwrap_err();
+        assert!(e.contains(why), "{pointer} = {value}: {e}");
+    };
+    assert!(with("/vendor", json!("A shop")).is_ok());
+    // Lines: a text property only inside a comment, a yes/no only in a when, a when that names
+    // a property as its kind allows, and a line is text or {line, when}.
+    refused("/sequences/safe_start", json!(["G21 {note}"]), "only inside a comment");
+    refused("/sequences/safe_start", json!(["(NOTE) G21 {note}"]), "only inside a comment");
+    refused("/sequences/safe_start", json!([{ "line": "G21", "when": "nope" }]), "no property 'nope'");
+    refused("/sequences/safe_start", json!([{ "line": "G21", "when": "end_code" }]), "end_code is a choice");
+    refused("/sequences/safe_start", json!([{ "line": "G21", "when": "end_code=M5" }]), "'M5' is not one of end_code's choices");
+    refused("/sequences/safe_start", json!([{ "line": "G21", "when": "warm_up=5" }]), "only a choice is compared");
+    refused("/sequences/safe_start", json!([{ "line": "G21" }]), "it needs both");
+    refused("/sequences/safe_start", json!([{ "line": "G21", "when": "warm_up", "script": "x" }]), "'script' is not one of them");
+    refused("/sequences/safe_start", json!([5]), "a line is text");
+    assert!(with("/sequences/safe_start", json!([{ "line": "G21", "when": "!warm_up" }, { "line": "G21", "when": "end_code!=M2" }])).is_ok());
+    // A choice that would make a move is refused when the post is read, naming the choice.
+    let mut moving = shop_post();
+    moving["properties"][0]["choices"][1]["value"] = json!("G0 X1");
+    let e = Post::from_json(&moving.to_string()).unwrap_err().to_string();
+    assert!(e.contains("program_end (with end_code = \"G0 X1\") makes moves"), "{e}");
+    // So is one that only goes across at machine home: the first part of a move.
+    refused("/sequences/program_end", json!(["G91 G28 Z0.", "G90", "G0 X1", "M30", "%"]), "program_end makes moves");
+    // A property itself.
+    refused("/properties/0/id", json!("tool"), "placeholder has that name");
+    refused("/properties/0/id", json!("End"), "an id is 1 to 32");
+    refused("/properties/1/id", json!("end_code"), "there twice");
+    refused("/properties/0/label", json!(""), "a label is 1 to 100");
+    refused("/properties/0/default", json!("M5"), "default: one of M30, M2");
+    refused("/properties/0/choices", json!([]), "1 to 50 choices");
+    refused("/properties/0/choices/1/value", json!("M30"), "each has its own value");
+    refused("/properties/0/choices/1/value", json!("M2 (END)"), "printable ASCII without");
+    refused("/properties/1/max", json!(1e9), "min and max between");
+    refused("/properties/1/min", json!(700), "min not above max");
+    refused("/properties/1/default", json!(-1), "default: a number from 0 to 600");
+    refused("/properties/2/default", json!(true), "default: text");
+    refused("/properties/2/kind", json!("bool"), "default: yes or no");
+    refused("/properties/2/kind", json!("number"), "a number needs min and max");
+    refused("/properties/2/kind", json!("maybe"), "unknown variant");
+    refused("/version", json!("1".repeat(33)), "version (at most 32)");
+    let many: Vec<serde_json::Value> =
+        (0..=MAX_POST_PROPERTIES).map(|i| json!({ "id": format!("p{i}"), "label": "P", "kind": "bool", "default": true })).collect();
+    refused("/properties", json!(many), "at most 50 properties");
+}
+
+#[test]
+fn a_post_file_with_its_new_parts_reads_back_as_it_was_written() {
+    let post = Post::from_json(&shop_post().to_string()).unwrap();
+    let again = Post::from_json(&serde_json::to_string(&post).unwrap()).unwrap();
+    assert_eq!(again, post);
+    // A post without them writes none of them.
+    let plain = Post::builtin("rs274").unwrap();
+    let json = serde_json::to_value(&plain).unwrap();
+    assert!(json.get("properties").is_none());
+    assert_eq!(json["sequences"]["program_end"][0], plain.sequences.program_end[0].text());
+}

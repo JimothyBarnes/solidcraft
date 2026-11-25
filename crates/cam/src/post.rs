@@ -129,12 +129,234 @@ pub struct Cycles {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sequences {
-    pub program_start: Vec<String>,
-    pub safe_start: Vec<String>,
-    pub tool_change_before: Vec<String>,
-    pub tool_change_after: Vec<String>,
-    pub operation_start: Vec<String>,
-    pub program_end: Vec<String>,
+    pub program_start: Vec<Line>,
+    pub safe_start: Vec<Line>,
+    pub tool_change_before: Vec<Line>,
+    pub tool_change_after: Vec<Line>,
+    pub operation_start: Vec<Line>,
+    pub program_end: Vec<Line>,
+}
+
+/// One fixed line: written always (a post file gives it as text), or only when one of the post's
+/// properties says so (`{"line": "G28 Y0.", "when": "table_home"}`; decision 0039).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, try_from = "serde_json::Value")]
+pub enum Line {
+    Always(String),
+    When {
+        line: String,
+        /// `id`: kept when the property is on (a yes/no that is yes, a number that is not zero,
+        /// a text that is not empty); `!id`: when it is off; `id=value` and `id!=value`: when a
+        /// choice is, or is not, that value.
+        when: String,
+    },
+}
+
+impl Line {
+    /// The line's text, placeholders not yet filled.
+    pub fn text(&self) -> &str {
+        match self {
+            Line::Always(text) | Line::When { line: text, .. } => text,
+        }
+    }
+}
+
+impl From<&str> for Line {
+    fn from(text: &str) -> Line {
+        Line::Always(text.to_string())
+    }
+}
+
+impl TryFrom<serde_json::Value> for Line {
+    type Error = String;
+
+    fn try_from(value: serde_json::Value) -> std::result::Result<Line, String> {
+        const SHAPE: &str = "a line is text, or {\"line\": text, \"when\": a property}";
+        match value {
+            serde_json::Value::String(text) => Ok(Line::Always(text)),
+            serde_json::Value::Object(map) => {
+                let (mut line, mut when) = (None, None);
+                for (key, value) in map {
+                    match (key.as_str(), value) {
+                        ("line", serde_json::Value::String(text)) => line = Some(text),
+                        ("when", serde_json::Value::String(text)) => when = Some(text),
+                        (other, _) => return Err(format!("{SHAPE}; '{other}' is not one of them, or is not text")),
+                    }
+                }
+                match (line, when) {
+                    (Some(line), Some(when)) => Ok(Line::When { line, when }),
+                    _ => Err(format!("{SHAPE}; it needs both")),
+                }
+            }
+            _ => Err(SHAPE.into()),
+        }
+    }
+}
+
+/// The most properties a post may offer.
+pub const MAX_POST_PROPERTIES: usize = 50;
+/// The most choices one property may offer.
+const MAX_PROPERTY_CHOICES: usize = 50;
+/// The longest text a text property may hold, in characters.
+pub const MAX_PROPERTY_TEXT: usize = 100;
+/// The largest number a number property may hold, either way.
+const MAX_PROPERTY_NUMBER: f64 = 1e6;
+
+/// What kind of value a property holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PropertyKind {
+    /// Yes or no: only for a line's `when`.
+    Bool,
+    /// A number between `min` and `max`, written with `decimals` places.
+    Number,
+    /// One of `choices`: its `value` is written, its `label` shown.
+    Choice,
+    /// Text for a comment: written only inside one, cleaned as comments are.
+    Text,
+}
+
+/// One of a choice property's values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PropertyChoice {
+    /// What the post's lines get: `M8`, `G28 Y0.`.
+    pub value: String,
+    /// What Post Process shows.
+    pub label: String,
+}
+
+/// A choice a post offers whoever posts with it (decision 0039): set in Post Process, given to
+/// `cam.post` as `properties`, and used by the post's lines by name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Property {
+    /// How the post's lines name it: `{id}` and `"when": "id"`.
+    pub id: String,
+    /// What Post Process shows.
+    pub label: String,
+    pub kind: PropertyKind,
+    /// The value when none is given.
+    pub default: serde_json::Value,
+    /// A choice's values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<PropertyChoice>,
+    /// A number's least and greatest values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// A number's decimal places, 0 to 4 (default 0: written as a whole number).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,
+    /// More words on what it does, for whoever posts.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// A property's value as the post's lines use it.
+#[derive(Clone, Debug, PartialEq)]
+enum Setting {
+    Flag(bool),
+    /// As written, and whether it is not zero.
+    Number(String, bool),
+    Choice(String),
+    /// Cleaned for a comment.
+    Text(String),
+}
+
+impl Property {
+    fn check(&self) -> std::result::Result<(), String> {
+        let id = &self.id;
+        let mut chars = self.id.chars();
+        if self.id.len() > 32
+            || !chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(format!("property '{id}': an id is 1 to 32 of a-z, 0-9 and _, starting with a letter"));
+        }
+        if PLACEHOLDERS.contains(&id.as_str()) {
+            return Err(format!("property '{id}': the post's own placeholder has that name"));
+        }
+        let shown = |text: &str| !text.trim().is_empty() && text.chars().count() <= 100 && !text.chars().any(char::is_control);
+        if !shown(&self.label) || self.description.chars().count() > 2000 {
+            return Err(format!("property '{id}': a label is 1 to 100 characters, a description at most 2000"));
+        }
+        let number_parts = self.min.is_some() || self.max.is_some() || self.decimals.is_some();
+        match self.kind {
+            PropertyKind::Bool | PropertyKind::Text if number_parts || !self.choices.is_empty() => {
+                return Err(format!("property '{id}': min, max, decimals and choices are for numbers and choices"));
+            }
+            PropertyKind::Number => {
+                let (Some(min), Some(max)) = (self.min, self.max) else {
+                    return Err(format!("property '{id}': a number needs min and max"));
+                };
+                if !(min.abs() <= MAX_PROPERTY_NUMBER && max.abs() <= MAX_PROPERTY_NUMBER && min <= max) {
+                    return Err(format!("property '{id}': min and max between -{MAX_PROPERTY_NUMBER} and {MAX_PROPERTY_NUMBER}, min not above max"));
+                }
+                if self.decimals.unwrap_or(0) > 4 || !self.choices.is_empty() {
+                    return Err(format!("property '{id}': a number has 0 to 4 decimals and no choices"));
+                }
+            }
+            PropertyKind::Choice => {
+                if number_parts || self.choices.is_empty() || self.choices.len() > MAX_PROPERTY_CHOICES {
+                    return Err(format!("property '{id}': a choice has 1 to {MAX_PROPERTY_CHOICES} choices and no min, max or decimals"));
+                }
+                let mut values = BTreeSet::new();
+                for choice in &self.choices {
+                    let v = &choice.value;
+                    if v.trim().is_empty() || v.len() > 64 || !v.chars().all(|c| c == ' ' || (c.is_ascii_graphic() && !"(){}%;".contains(c))) {
+                        return Err(format!("property '{id}': choice '{v}': a value is 1 to 64 of printable ASCII without ( ) {{ }} % ;"));
+                    }
+                    if !shown(&choice.label) || !values.insert(v.as_str()) {
+                        return Err(format!("property '{id}': choice '{v}': each has its own value and a label of 1 to 100 characters"));
+                    }
+                }
+            }
+            PropertyKind::Bool | PropertyKind::Text => {}
+        }
+        self.setting(&self.default, &Comments { upper_case: false, max_length: 256 })
+            .map(|_| ())
+            .map_err(|e| format!("property '{id}': default: {e}"))
+    }
+
+    /// The values worth checking the post's lines with: every value a yes/no or a choice can
+    /// have, a number's least and greatest.
+    fn values(&self) -> Vec<serde_json::Value> {
+        match self.kind {
+            PropertyKind::Bool => vec![true.into(), false.into()],
+            PropertyKind::Number => [self.min, self.max].into_iter().flatten().map(serde_json::Value::from).collect(),
+            PropertyKind::Choice => self.choices.iter().map(|c| serde_json::Value::from(c.value.as_str())).collect(),
+            PropertyKind::Text => vec!["TEXT".into()],
+        }
+    }
+
+    fn setting(&self, value: &serde_json::Value, comments: &Comments) -> std::result::Result<Setting, String> {
+        match self.kind {
+            PropertyKind::Bool => value.as_bool().map(Setting::Flag).ok_or_else(|| "yes or no (true or false)".into()),
+            PropertyKind::Number => {
+                let (min, max) = (self.min.unwrap_or(0.0), self.max.unwrap_or(0.0));
+                let v = value.as_f64().filter(|v| (min..=max).contains(v)).ok_or_else(|| format!("a number from {min} to {max}"))?;
+                let decimals = self.decimals.unwrap_or(0);
+                let text = if decimals == 0 { format!("{}", v.round()) } else { format_decimal(v, decimals, false) };
+                let text = if text == "-0" { "0".to_string() } else { text };
+                let nonzero = text.parse::<f64>().is_ok_and(|v| v != 0.0);
+                Ok(Setting::Number(text, nonzero))
+            }
+            PropertyKind::Choice => {
+                let v = value.as_str().filter(|v| self.choices.iter().any(|c| c.value == *v));
+                let values = self.choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>().join(", ");
+                v.map(|v| Setting::Choice(v.to_string())).ok_or_else(|| format!("one of {values}"))
+            }
+            PropertyKind::Text => {
+                let v = value
+                    .as_str()
+                    .filter(|v| v.chars().count() <= MAX_PROPERTY_TEXT)
+                    .ok_or_else(|| format!("text of at most {MAX_PROPERTY_TEXT} characters"))?;
+                Ok(Setting::Text(clean_comment(v, comments)))
+            }
+        }
+    }
 }
 
 /// A post: everything controller-specific about writing G-code, as data.
@@ -145,6 +367,15 @@ pub struct Post {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// Who made the post: a machine maker, a shop, SolidCraft (decision 0039).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vendor: String,
+    /// Which version of it this is, as its maker numbers them.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// The choices it offers whoever posts with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<Property>,
     pub machine_kind: MachineKind,
     pub numbers: Numbers,
     pub line_numbers: Option<LineNumbers>,
@@ -209,6 +440,8 @@ pub struct ProgramContext {
     /// in the order they are first taken, and named on the line that changes to it; a tool that
     /// is not here is changed to without a word.
     pub tools: Vec<ProgramTool>,
+    /// Values for the post's properties, by id; a property not here has its default.
+    pub properties: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for ProgramContext {
@@ -221,6 +454,7 @@ impl Default for ProgramContext {
             optional_stop: true,
             comments: Vec::new(),
             tools: Vec::new(),
+            properties: BTreeMap::new(),
         }
     }
 }
@@ -256,8 +490,10 @@ impl Post {
     }
 
     /// Reads and checks a post file. Placeholders are `{program_number}`, `{program_name}`,
-    /// `{units_code}` (G20/G21), `{work_offset}` (G54…G59) and `{tool}` (only in the tool-change
-    /// lines and the tool length offset). Every fixed line must read without making a move.
+    /// `{units_code}` (G20/G21), `{work_offset}` (G54…G59), `{tool}` (only in the tool-change
+    /// lines and the tool length offset) and the id of each of the post's properties (a text one
+    /// only inside a comment; a yes/no one only in a line's `when`). Every fixed line must read
+    /// without making a move, whatever the properties are set to.
     pub fn from_json(json: &str) -> Result<Post> {
         let post: Post = serde_json::from_str(json).map_err(|e| Error::BadPost(e.to_string()))?;
         post.check()?;
@@ -274,6 +510,22 @@ impl Post {
         }
         if self.name.chars().count() > 100 || self.description.chars().count() > 2000 {
             return bad("name or description too long".into());
+        }
+        if self.vendor.chars().count() > 100
+            || self.version.chars().count() > 32
+            || format!("{}{}", self.vendor, self.version).chars().any(char::is_control)
+        {
+            return bad("vendor (at most 100 characters) or version (at most 32) too long, or not one line".into());
+        }
+        if self.properties.len() > MAX_POST_PROPERTIES {
+            return bad(format!("at most {MAX_POST_PROPERTIES} properties"));
+        }
+        let mut ids = BTreeSet::new();
+        for property in &self.properties {
+            property.check().or_else(bad)?;
+            if !ids.insert(property.id.as_str()) {
+                return bad(format!("property '{}' is there twice", property.id));
+            }
         }
         let n = self.numbers;
         if !(1..=6).contains(&n.length_mm) || !(1..=6).contains(&n.length_inch) || n.feed_mm > 4 || n.feed_inch > 4 || n.speed > 3 || n.dwell > 3 {
@@ -309,44 +561,113 @@ impl Post {
         if !self.optional_stop.as_deref().is_none_or(|word| matches!(word, "M1" | "M01")) {
             return bad("optional_stop must be M1 or M01, the optional program stop".into());
         }
-        if self.xy_before_z && !self.sequences.tool_change_before.iter().any(|line| line.contains("G28") || line.contains("G53")) {
+        if self.xy_before_z && !self.sequences.tool_change_before.iter().any(|line| line.text().contains("G28") || line.text().contains("G53")) {
             return bad(
                 "xy_before_z needs tool_change_before to take the tool to machine home (G28 or G53): only from there is Z left for a line of its own"
                     .into(),
             );
         }
         let s = &self.sequences;
-        let sample =
-            Fill { program_number: Some("1".into()), program_name: "TEST".into(), units_code: "G21", work_offset: "G54".into(), tool: Some(1) };
-        let no_tool = Fill { tool: None, ..sample.clone() };
-        let groups: [(&str, &[String], &Fill); 6] = [
-            ("program_start", &s.program_start, &no_tool),
-            ("safe_start", &s.safe_start, &no_tool),
-            ("tool_change_before", &s.tool_change_before, &sample),
-            ("tool_change_after", &s.tool_change_after, &sample),
-            ("operation_start", &s.operation_start, &no_tool),
-            ("program_end", &s.program_end, &no_tool),
+        let groups: [(&str, &[Line], bool); 6] = [
+            ("program_start", &s.program_start, false),
+            ("safe_start", &s.safe_start, false),
+            ("tool_change_before", &s.tool_change_before, true),
+            ("tool_change_after", &s.tool_change_after, true),
+            ("operation_start", &s.operation_start, false),
+            ("program_end", &s.program_end, false),
         ];
-        let tlo = self.tool_length_offset.iter().cloned().collect::<Vec<_>>();
-        for (name, lines, fill) in groups.into_iter().chain([("tool_length_offset", tlo.as_slice(), &sample)]) {
+        let tlo = self.tool_length_offset.iter().map(|line| Line::from(line.as_str())).collect::<Vec<_>>();
+        let groups = groups.into_iter().chain([("tool_length_offset", tlo.as_slice(), true)]);
+        for (name, lines, _) in groups.clone() {
             if lines.len() > 50 {
                 return bad(format!("{name}: at most 50 lines"));
             }
-            let fill = if self.program_number_digits.is_none() { &Fill { program_number: None, ..fill.clone() } } else { fill };
-            let mut text = String::new();
-            for line in lines {
-                if line.chars().count() > 200 {
-                    return bad(format!("{name}: a line longer than 200 characters"));
-                }
-                text.push_str(&render(line, fill).map_err(|e| Error::BadPost(format!("{}: {name}: {e}", self.id)))?);
-                text.push('\n');
+            if let Some(line) = lines.iter().find(|line| line.text().chars().count() > 200) {
+                return bad(format!("{name}: a line longer than 200 characters: {}", line.text().chars().take(40).collect::<String>()));
             }
-            let r = read(&text, &ReadSettings::default()).map_err(|e| Error::BadPost(format!("{}: {name} does not read: {e}", self.id)))?;
-            if !r.toolpath.moves.is_empty() {
-                return bad(format!("{name} makes moves; fixed lines may only set modes"));
+            for line in lines {
+                if let Line::When { when, .. } = line {
+                    self.condition_check(when).map_err(|e| Error::BadPost(format!("{}: {name}: {e}", self.id)))?;
+                }
+            }
+        }
+        // The lines as every property's default writes them, then with one property at a time
+        // set to each value it can take (a number at either end): a choice that makes a move is
+        // refused here, not when a program is posted with it.
+        let defaults = self.settings(&BTreeMap::new())?;
+        let mut cases: Vec<(String, BTreeMap<String, Setting>)> = vec![(String::new(), defaults.clone())];
+        for property in &self.properties {
+            for value in property.values() {
+                if let Ok(setting) = property.setting(&value, &self.comments)
+                    && defaults.get(&property.id) != Some(&setting)
+                {
+                    let mut case = defaults.clone();
+                    case.insert(property.id.clone(), setting);
+                    cases.push((format!(" (with {} = {value})", property.id), case));
+                }
+            }
+        }
+        for (with, settings) in cases {
+            let sample = Fill {
+                program_number: self.program_number_digits.map(|_| "1".into()),
+                program_name: "TEST".into(),
+                units_code: "G21",
+                work_offset: "G54".into(),
+                tool: Some(1),
+                settings,
+            };
+            let no_tool = Fill { tool: None, ..sample.clone() };
+            for (name, lines, tool) in groups.clone() {
+                let fill = if tool { &sample } else { &no_tool };
+                let mut text = String::new();
+                for line in lines {
+                    let kept = keeps(line, fill).map_err(|e| Error::BadPost(format!("{}: {name}{with}: {e}", self.id)))?;
+                    if kept {
+                        text.push_str(&render(line.text(), fill).map_err(|e| Error::BadPost(format!("{}: {name}{with}: {e}", self.id)))?);
+                        text.push('\n');
+                    }
+                }
+                let r = read(&text, &ReadSettings::default()).map_err(|e| Error::BadPost(format!("{}: {name}{with} does not read: {e}", self.id)))?;
+                // Not a move, nor the first part of one: a rapid across at machine home is not
+                // the toolpath's either.
+                if !r.toolpath.moves.is_empty() || r.end != Vec3::default() {
+                    return bad(format!("{name}{with} makes moves; fixed lines may only set modes"));
+                }
             }
         }
         Ok(())
+    }
+
+    /// Whether a line's `when` names one of the post's properties in a way its kind allows.
+    fn condition_check(&self, when: &str) -> std::result::Result<(), String> {
+        let (id, value) = condition(when);
+        let property = self.properties.iter().find(|p| p.id == id).ok_or_else(|| format!("when \"{when}\": the post has no property '{id}'"))?;
+        match (property.kind, value) {
+            (PropertyKind::Choice, Some(value)) if property.choices.iter().any(|c| c.value == value) => Ok(()),
+            (PropertyKind::Choice, Some(value)) => Err(format!("when \"{when}\": '{value}' is not one of {id}'s choices")),
+            (PropertyKind::Choice, None) => Err(format!("when \"{when}\": {id} is a choice: \"{id}=value\" or \"{id}!=value\"")),
+            (_, Some(_)) => Err(format!("when \"{when}\": only a choice is compared with a value: \"{id}\" or \"!{id}\"")),
+            (_, None) => Ok(()),
+        }
+    }
+
+    /// The properties' values as the lines use them: `given` where it has one, the default where
+    /// not. A value of the wrong kind, or for a property the post does not have, is refused.
+    fn settings(&self, given: &BTreeMap<String, serde_json::Value>) -> Result<BTreeMap<String, Setting>> {
+        if let Some(id) = given.keys().find(|id| !self.properties.iter().any(|p| &p.id == *id)) {
+            let ids = self.properties.iter().map(|p| p.id.as_str()).collect::<Vec<_>>();
+            let has = if ids.is_empty() { "none".to_string() } else { ids.join(", ") };
+            return Err(Error::BadValue(format!("the {} post has no property '{id}' (it has {has})", self.id)));
+        }
+        self.properties
+            .iter()
+            .map(|p| {
+                let value = given.get(&p.id).unwrap_or(&p.default);
+                p.setting(value, &self.comments)
+                    .map(|setting| (p.id.clone(), setting))
+                    .map_err(|e| Error::BadValue(format!("{} ({}): {e}", p.label, p.id)))
+            })
+            .collect()
     }
 
     /// Writes `toolpath` as a program, reads it back and checks it against what was meant.
@@ -372,15 +693,52 @@ struct Fill {
     units_code: &'static str,
     work_offset: String,
     tool: Option<u32>,
+    /// The post's properties, by id.
+    settings: BTreeMap<String, Setting>,
+}
+
+/// A `when`'s property and, for a choice, the value it is compared with: `id`, `!id`,
+/// `id=value`, `id!=value`. The `!` of the first and last is left for [`keeps`].
+fn condition(when: &str) -> (&str, Option<&str>) {
+    let when = when.trim();
+    match when.split_once('=') {
+        Some((id, value)) => (id.trim().trim_end_matches('!').trim(), Some(value.trim())),
+        None => (when.trim_start_matches('!').trim(), None),
+    }
+}
+
+/// Whether `line` is written with these properties.
+fn keeps(line: &Line, fill: &Fill) -> std::result::Result<bool, String> {
+    let Line::When { when, .. } = line else { return Ok(true) };
+    let (id, value) = condition(when);
+    let negated = when.trim().starts_with('!') || when.contains("!=");
+    let on = match (fill.settings.get(id), value) {
+        (Some(Setting::Flag(on)), None) => *on,
+        (Some(Setting::Number(_, nonzero)), None) => *nonzero,
+        (Some(Setting::Text(text)), None) => !text.is_empty(),
+        (Some(Setting::Choice(chosen)), Some(value)) => chosen == value,
+        (None, _) => return Err(format!("when \"{when}\": no property '{id}'")),
+        _ => return Err(format!("when \"{when}\": only a choice is compared with a value, and a choice always is")),
+    };
+    Ok(on != negated)
 }
 
 /// `line` with its placeholders filled; an unknown or unavailable placeholder is an error.
 fn render(line: &str, fill: &Fill) -> std::result::Result<String, String> {
     let mut out = String::new();
     let mut rest = line;
+    // Whether the text so far has opened a comment it has not closed.
+    let mut in_comment = false;
     while let Some(open) = rest.find(['{', '}']) {
         let (before, after) = rest.split_at(open);
         out.push_str(before);
+        for c in before.chars() {
+            match c {
+                '(' => in_comment = true,
+                ')' => in_comment = false,
+                _ => {}
+            }
+        }
         if after.starts_with('}') {
             return Err("a '}' with no '{'".into());
         }
@@ -392,13 +750,41 @@ fn render(line: &str, fill: &Fill) -> std::result::Result<String, String> {
             "units_code" => fill.units_code.to_string(),
             "work_offset" => fill.work_offset.clone(),
             "tool" => fill.tool.map(|t| t.to_string()).ok_or("{tool} only in tool-change lines and the tool length offset")?,
-            other => return Err(format!("unknown placeholder {{{other}}} (known: {})", PLACEHOLDERS.join(", "))),
+            other => match fill.settings.get(other) {
+                Some(Setting::Number(text, _) | Setting::Choice(text)) => text.clone(),
+                Some(Setting::Text(text)) if in_comment => text.clone(),
+                Some(Setting::Text(_)) => return Err(format!("{{{other}}} is text: only inside a comment, as ({{{other}}})")),
+                Some(Setting::Flag(_)) => return Err(format!("{{{other}}} is yes or no: it goes in a line's when, not in its text")),
+                None => {
+                    let known = PLACEHOLDERS.iter().copied().chain(fill.settings.keys().map(String::as_str)).collect::<Vec<_>>();
+                    return Err(format!("unknown placeholder {{{other}}} (known: {})", known.join(", ")));
+                }
+            },
         };
         out.push_str(&value);
         rest = after.get(close + 1..).unwrap_or("");
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Text safe inside a comment: printable ASCII, with a space for anything else, for a
+/// parenthesis, for `%` (a program's first and last line, and nowhere between) and for `;` (the
+/// end of a block on a control's screen); runs of spaces as one, none at either end, cut to
+/// length. And never a message: a comment whose first printing characters are `MSG,`, spaced or
+/// in small letters, is one for the operator's display (NIST IR 6556 3.3.4), so a comma that
+/// follows nothing but letters loses its place to a space.
+fn clean_comment(text: &str, comments: &Comments) -> String {
+    let mut cleaned: String = text.chars().map(|c| if c.is_ascii_graphic() && !matches!(c, '(' | ')' | '%' | ';') { c } else { ' ' }).collect();
+    if let Some(at) = cleaned.find(|c: char| !(c.is_ascii_alphabetic() || c == ' '))
+        && cleaned.get(at..=at) == Some(",")
+    {
+        cleaned.replace_range(at..=at, " ");
+    }
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = if comments.upper_case { cleaned.to_ascii_uppercase() } else { cleaned };
+    let cut: String = cleaned.chars().take(comments.max_length.saturating_sub(2)).collect();
+    cut.trim_end().to_string()
 }
 
 /// `value` with `decimals` places, always with a decimal point (on Fanuc-style controls `X1`
@@ -464,6 +850,8 @@ struct Writer<'a> {
     position_known: bool,
     /// The canned cycle in force, if any.
     cycle: Option<CycleKey>,
+    /// The post's properties as this program has them.
+    settings: BTreeMap<String, Setting>,
     written: Vec<Move>,
     notes: Vec<String>,
 }
@@ -510,6 +898,7 @@ impl<'a> Writer<'a> {
             tools,
             position_known: false,
             cycle: None,
+            settings: post.settings(&ctx.properties)?,
             written: Vec::new(),
             notes: Vec::new(),
         })
@@ -522,26 +911,13 @@ impl<'a> Writer<'a> {
             units_code: if self.ctx.units == LengthUnit::Inch { "G20" } else { "G21" },
             work_offset: format!("G{}", 53 + u32::from(self.ctx.work_offset)),
             tool,
+            settings: self.settings.clone(),
         }
     }
 
-    /// Text safe inside a comment: printable ASCII, with a space for anything else, for a
-    /// parenthesis, for `%` (a program's first and last line, and nowhere between) and for `;`
-    /// (the end of a block on a control's screen); runs of spaces as one, none at either end,
-    /// cut to length. And never a message: a comment whose first printing characters are
-    /// `MSG,`, spaced or in small letters, is one for the operator's display (NIST IR 6556
-    /// 3.3.4), so a comma that follows nothing but letters loses its place to a space.
+    /// Text safe inside a comment ([`clean_comment`]).
     fn comment_text(&self, text: &str) -> String {
-        let mut cleaned: String = text.chars().map(|c| if c.is_ascii_graphic() && !matches!(c, '(' | ')' | '%' | ';') { c } else { ' ' }).collect();
-        if let Some(at) = cleaned.find(|c: char| !(c.is_ascii_alphabetic() || c == ' '))
-            && cleaned.get(at..=at) == Some(",")
-        {
-            cleaned.replace_range(at..=at, " ");
-        }
-        let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-        let cleaned = if self.post.comments.upper_case { cleaned.to_ascii_uppercase() } else { cleaned };
-        let cut: String = cleaned.chars().take(self.post.comments.max_length.saturating_sub(2)).collect();
-        cut.trim_end().to_string()
+        clean_comment(text, &self.post.comments)
     }
 
     /// Writes each of `comments`, cleaned already, on a line of its own. The line that moves
@@ -597,11 +973,13 @@ impl<'a> Writer<'a> {
         }
     }
 
-    fn sequence(&mut self, lines: &[String], tool: Option<u32>) -> Result<()> {
+    fn sequence(&mut self, lines: &[Line], tool: Option<u32>) -> Result<()> {
         let fill = self.fill(tool);
         for line in lines {
-            let text = render(line, &fill).map_err(|e| Error::BadPost(format!("{}: {e}", self.post.id)))?;
-            self.emit(text);
+            if keeps(line, &fill).map_err(|e| Error::BadPost(format!("{}: {e}", self.post.id)))? {
+                let text = render(line.text(), &fill).map_err(|e| Error::BadPost(format!("{}: {e}", self.post.id)))?;
+                self.emit(text);
+            }
         }
         Ok(())
     }

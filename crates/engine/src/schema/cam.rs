@@ -897,7 +897,8 @@ pub struct CamSetupSheet {
 pub struct CamPostParams {
     /// The setup's id.
     pub setup: String,
-    /// A built-in post: `rs274`, `fanuc_mill` or `haas_mill`.
+    /// A built-in post (`rs274`, `fanuc_mill`, `haas_mill`) or the path of a post file
+    /// (`cam.posts.list` lists them).
     pub post: String,
     /// Default 1.
     #[serde(default)]
@@ -923,6 +924,111 @@ pub struct CamPostParams {
     /// line that changes to it.
     #[serde(default)]
     pub comments: Option<bool>,
+    /// Values for the post's own properties, by id (`cam.posts.list` gives them); a property not
+    /// given has its default.
+    #[serde(default)]
+    pub properties: std::collections::BTreeMap<String, Value>,
+}
+
+/// List the posts: the ones built in and every post file in the post folder.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamPostsListParams {
+    /// The post folder (default: `cam/posts` in SolidCraft's per-user data folder).
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
+/// One of a choice property's values.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CamPostChoice {
+    /// What the post writes.
+    pub value: String,
+    pub label: String,
+}
+
+/// A property a post offers whoever posts with it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CamPostProperty {
+    pub id: String,
+    pub label: String,
+    /// `bool`, `number`, `choice` or `text`.
+    pub kind: String,
+    pub default: Value,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<CamPostChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// A number's decimal places.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// A post in the post library.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CamPostEntry {
+    /// What `cam.post` takes as `post`: a built-in post's id, or the post file's path.
+    pub post: String,
+    pub id: String,
+    pub name: String,
+    /// Who made it.
+    pub vendor: String,
+    pub version: String,
+    pub description: String,
+    /// The post file; none for a post built in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Whether it has an optional stop to write before tool changes (`cam.post`'s `optional_stop`).
+    pub optional_stop: bool,
+    pub properties: Vec<CamPostProperty>,
+}
+
+/// A `.json` file in the post folder that is not a post this build reads, and why.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CamPostUnread {
+    pub file: String,
+    pub why: String,
+}
+
+/// The post library: the posts built in, then the post folder's.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CamPostLibrary {
+    /// The folder listed, if any.
+    pub folder: Option<String>,
+    pub posts: Vec<CamPostEntry>,
+    pub unread: Vec<CamPostUnread>,
+}
+
+/// Copy a post file into the post folder, as `<its id>.json`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CamPostsAddParams {
+    /// The post file.
+    pub file: String,
+    /// The post folder (default: as `cam.posts.list`).
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// Replace the folder's post file of the same id (default false): a newer version of it.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// A post file copied into the post folder.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamPostAdded {
+    /// Its path in the folder: what `cam.post` takes as `post`.
+    pub post: String,
+    pub id: String,
+    pub name: String,
+    pub vendor: String,
+    pub version: String,
+    /// The version of the post file it replaced, where it replaced one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<String>,
 }
 
 /// A posted program and what reading it back found. The program is never "safe to run": it says

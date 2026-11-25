@@ -16,9 +16,9 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    CamLibraryToolStatus, CamLibraryTools, HoleBottom, HoleGroup, OperationPreview, Placement, ProgramPreview, Simulated, ToolAt, ToolChoice,
-    manufacture_data, manufacture_holes, manufacture_library, manufacture_post_stops, manufacture_posts, manufacture_preview, manufacture_program,
-    manufacture_setup_preview, manufacture_tools,
+    CamLibraryToolStatus, CamLibraryTools, CamPostEntry, CamPostLibrary, CamPostProperty, HoleBottom, HoleGroup, OperationPreview, Placement,
+    ProgramPreview, Simulated, ToolAt, ToolChoice, manufacture_data, manufacture_holes, manufacture_library, manufacture_post_folder,
+    manufacture_post_library, manufacture_preview, manufacture_program, manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
@@ -1846,10 +1846,22 @@ fn minutes_seconds(minutes: f64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// The post folder Post Process lists and adds to: `cam/posts` in SolidCraft's data folder (decision
+/// 0039 of the CAM work), or the one a test gives; a test given none has none, and leaves the
+/// person's own alone.
+fn post_folder(app: &SolveApp) -> Option<String> {
+    match &app.manufacture_workspace.post_folder {
+        Some(folder) => Some(folder.clone()),
+        None if cfg!(test) => None,
+        None => manufacture_post_folder(),
+    }
+}
+
 /// Post Process: a setup's program, for one controller, saved to a file.
 pub(crate) struct PostForm {
     setups: Vec<SetupChoice>,
-    posts: Vec<(String, String)>,
+    /// The posts built in, then the post folder's.
+    library: CamPostLibrary,
     pub setup: usize,
     pub post: usize,
     pub units: usize,
@@ -1858,6 +1870,13 @@ pub(crate) struct PostForm {
     pub program_name: String,
     /// Whether the post's optional stop is written before tool changes, where it has one.
     pub optional_stop: bool,
+    /// The post's own properties as set here, by id: those not here have their defaults. They
+    /// are the post's alone, so another post picked starts from its own defaults.
+    pub properties: std::collections::BTreeMap<String, Value>,
+    /// The post `properties` belong to (what `cam.post` takes as `post`).
+    properties_of: String,
+    /// What adding a post file to the folder said.
+    pub added: Option<String>,
     /// The program these choices would save, or why there would be none.
     worked: Worked<ProgramPreview>,
     pub error: Option<String>,
@@ -1867,28 +1886,43 @@ impl PostForm {
     /// For the setup the viewport draws, in the design's units, for the Haas-style post.
     pub fn new(app: &SolveApp) -> PostForm {
         let (setups, setup) = setups(app);
-        let posts = manufacture_posts();
-        let post = posts.iter().position(|(id, _)| id == "haas_mill").unwrap_or(0);
+        let library = manufacture_post_library(post_folder(app).as_deref());
+        let post = library.posts.iter().position(|post| post.post == "haas_mill").unwrap_or(0);
         let units = usize::from(imperial(&app.session.doc.units));
         PostForm {
             setups,
-            posts,
+            library,
             setup,
             post,
             units,
             program_number: 1,
             program_name: String::new(),
             optional_stop: true,
+            properties: std::collections::BTreeMap::new(),
+            properties_of: String::new(),
+            added: None,
             worked: Worked::new(),
             error: None,
         }
     }
 
+    /// The post picked.
+    pub fn entry(&self) -> Option<&CamPostEntry> {
+        self.library.posts.get(self.post)
+    }
+
+    /// Where the post library has `post` (an id or a file), for a test to pick it.
+    #[cfg(test)]
+    pub fn post_index(&self, post: &str) -> Option<usize> {
+        self.library.posts.iter().position(|entry| entry.post == post)
+    }
+
     /// The `cam.post` parameters, without the file.
     pub fn params(&self) -> Value {
+        let entry = self.entry();
         let mut params = json!({
             "setup": self.setups.get(self.setup).map_or("", |s| s.id.as_str()),
-            "post": self.posts.get(self.post).map_or("", |p| p.0.as_str()),
+            "post": entry.map_or("", |p| p.post.as_str()),
             "units": word(&UNITS, self.units),
             "program_number": self.program_number,
             "optional_stop": self.optional_stop,
@@ -1896,7 +1930,78 @@ impl PostForm {
         if !self.program_name.trim().is_empty() {
             params["program_name"] = json!(self.program_name.trim());
         }
+        // Only what differs from the post's own defaults, and only for the post picked.
+        let set: serde_json::Map<String, Value> = entry
+            .filter(|entry| entry.post == self.properties_of)
+            .into_iter()
+            .flat_map(|entry| &entry.properties)
+            .filter_map(|property| {
+                self.properties.get(&property.id).filter(|value| **value != property.default).map(|value| (property.id.clone(), value.clone()))
+            })
+            .collect();
+        if !set.is_empty() {
+            params["properties"] = Value::Object(set);
+        }
         params
+    }
+
+    /// The posts listed again, the folder read afresh, and `pick` picked where it is listed.
+    fn reload(&mut self, app: &SolveApp, pick: Option<&str>) {
+        let picked = pick.map(str::to_string).or_else(|| self.entry().map(|entry| entry.post.clone()));
+        self.library = manufacture_post_library(post_folder(app).as_deref());
+        self.post = picked.and_then(|post| self.library.posts.iter().position(|entry| entry.post == post)).unwrap_or(0);
+    }
+
+    /// The post's labels for the Post row: its name, and where two have one name, who made each
+    /// and which version, or its file.
+    fn post_labels(&self) -> Vec<String> {
+        let posts = &self.library.posts;
+        posts
+            .iter()
+            .map(|entry| {
+                let shared = posts.iter().filter(|other| other.name == entry.name).count() > 1;
+                let more = [entry.vendor.as_str(), entry.version.as_str()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+                let file = entry.file.as_deref().map(|file| file.rsplit(['/', '\\']).next().unwrap_or(file));
+                match (shared, more.is_empty(), file) {
+                    (false, _, _) => entry.name.clone(),
+                    (true, false, _) => format!("{} ({more})", entry.name),
+                    (true, true, Some(file)) => format!("{} ({file})", entry.name),
+                    (true, true, None) => entry.name.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// Asks for a post file, then copies it into the post folder (in place of the folder's
+    /// own of that post, a newer version) and picks it. The form comes back as it was when no
+    /// file is chosen, and with the reason when the file is no post.
+    fn add_post(self, app: &mut SolveApp) -> Option<PostForm> {
+        if app.file_picker_busy() {
+            return Some(self);
+        }
+        app.pick_open_for(&["json"], move |app, path| {
+            let mut form = self;
+            if let Some(path) = path {
+                let mut params = json!({"file": path, "replace": true});
+                if let Some(folder) = &form.library.folder {
+                    params["folder"] = json!(folder);
+                }
+                match app.run("cam.posts.add", params) {
+                    Ok(added) => {
+                        form.reload(app, added["post"].as_str());
+                        let name = added["name"].as_str().unwrap_or_default();
+                        form.added = Some(match added["replaced"].as_str() {
+                            Some(old) => solidcraft_ui_text::format("manufacture.post_replaced", &[("name", name), ("old", old)]),
+                            None => solidcraft_ui_text::format("manufacture.post_added", &[("name", name)]),
+                        });
+                        form.error = None;
+                    }
+                    Err(why) => form.error = Some(why),
+                }
+            }
+            app.manufacture_workspace.dialog = Some(Dialog::Post(form));
+        });
+        None
     }
 
     /// The file name offered: the design's and the setup's names, with letters, digits and `_`
@@ -1936,7 +2041,15 @@ impl PostForm {
 
     fn show(mut self, app: &mut SolveApp, ctx: &egui::Context) -> Option<PostForm> {
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
-        let post_labels: Vec<&str> = self.posts.iter().map(|p| p.1.as_str()).collect();
+        let post_labels = self.post_labels();
+        let post_labels: Vec<&str> = post_labels.iter().map(String::as_str).collect();
+        // Another post picked starts from its own defaults.
+        let picked = self.entry().map(|entry| entry.post.clone()).unwrap_or_default();
+        if picked != self.properties_of {
+            self.properties.clear();
+            self.properties_of = picked;
+        }
+        let mut add = false;
         let units = labels(&UNITS);
         let has_setup = !self.setups.is_empty();
         // The program as these choices would save it, worked out again when they or the design
@@ -1959,14 +2072,39 @@ impl PostForm {
                     return;
                 }
                 ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_post_setup", &mut self.setup, &setup_labels);
-                ui_kit::choice_row(ui, tr("manufacture.post_controller"), "manufacture_post_controller", &mut self.post, &post_labels);
+                let post_row = ui_kit::choice_row(ui, tr("manufacture.post_controller"), "manufacture_post_controller", &mut self.post, &post_labels);
+                if let Some(entry) = self.library.posts.get(self.post) {
+                    if !entry.description.is_empty() {
+                        post_row.on_hover_text(&entry.description);
+                    }
+                    if let Some(made) = made_by(entry) {
+                        ui_kit::value_row(ui, tr("manufacture.post_made_by"), &made);
+                    }
+                }
                 ui_kit::choice_row(ui, tr("ui.units"), "manufacture_post_units", &mut self.units, &units);
                 ui_kit::row(ui, tr("manufacture.post_program_number"), |ui| ui_kit::whole_number_field(ui, &mut self.program_number, 0..=99_999, ""));
                 let usual_name = self.setups.get(self.setup).map_or("", |s| s.name.as_str());
                 ui_kit::text_row(ui, tr("manufacture.post_program_name"), &mut self.program_name, usual_name);
                 // The stop between tools, for the posts that have a word for it.
-                if self.posts.get(self.post).is_some_and(|post| manufacture_post_stops(&post.0)) {
+                if self.library.posts.get(self.post).is_some_and(|post| post.optional_stop) {
                     ui_kit::checkbox(ui, tr("manufacture.post_optional_stop"), &mut self.optional_stop);
+                }
+                // The post's own properties, as its maker named them.
+                let properties = self.library.posts.get(self.post).map(|entry| entry.properties.clone()).unwrap_or_default();
+                for property in &properties {
+                    property_row(ui, property, &mut self.properties);
+                }
+                // The post folder, where a machine maker's or a shop's posts go.
+                let folder = self.library.folder.clone();
+                ui_kit::value_row(ui, tr("manufacture.post_folder"), folder.as_deref().unwrap_or(tr("manufacture.post_no_folder")));
+                add = ui_kit::icon_label_button(ui, tr("manufacture.post_add"), "import", folder.is_some(), false).clicked();
+                if let Some(added) = &self.added {
+                    ui_kit::text(ui, added, ui_kit::Text::Note("manufacture_post_added"));
+                }
+                for unread in &self.library.unread {
+                    let file = unread.file.rsplit(['/', '\\']).next().unwrap_or(&unread.file);
+                    let said = solidcraft_ui_text::format("manufacture.post_unread", &[("file", file), ("why", &unread.why)]);
+                    ui_kit::text(ui, &said, ui_kit::Text::Note("manufacture_post_unread"));
                 }
                 ui_kit::status_line(ui, tr("manufacture.post_warning"), ui_kit::StatusTone::Warning);
                 refusal(ui, self.error.as_deref().or(self.worked.trouble()));
@@ -1983,9 +2121,76 @@ impl PostForm {
             });
         match action {
             ui_kit::Action::Ok if ready => self.accept(app),
+            ui_kit::Action::None if !closed && add => self.add_post(app),
             ui_kit::Action::None if !closed => Some(self),
             _ => None,
         }
+    }
+}
+
+/// Who made a post and which version it is, as Post Process says it; nothing where its file
+/// says neither.
+fn made_by(entry: &CamPostEntry) -> Option<String> {
+    match (entry.vendor.is_empty(), entry.version.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(entry.vendor.clone()),
+        (true, false) => Some(solidcraft_ui_text::format("manufacture.post_version_only", &[("version", &entry.version)])),
+        (false, false) => {
+            Some(solidcraft_ui_text::format("manufacture.post_vendor_version", &[("vendor", &entry.vendor), ("version", &entry.version)]))
+        }
+    }
+}
+
+/// A row for one of a post's properties: a tick for yes or no, a number field, a list of its
+/// choices, or a line of text. A value the same as the default is kept as given; `params`
+/// sends only those that differ.
+fn property_row(ui: &mut egui::Ui, property: &CamPostProperty, set: &mut std::collections::BTreeMap<String, Value>) {
+    let value = set.get(&property.id).cloned().unwrap_or_else(|| property.default.clone());
+    let label = property.label.as_str();
+    let response = match property.kind.as_str() {
+        "bool" => {
+            let mut on = value.as_bool().unwrap_or(false);
+            let response = ui_kit::checkbox(ui, label, &mut on);
+            if response.changed() {
+                set.insert(property.id.clone(), json!(on));
+            }
+            Some(response)
+        }
+        "number" => {
+            let (min, max) = (property.min.unwrap_or(0.0), property.max.unwrap_or(0.0));
+            let mut number = value.as_f64().unwrap_or(min).clamp(min, max);
+            let speed = 10f64.powi(-i32::from(property.decimals.unwrap_or(0)));
+            let response = ui_kit::row(ui, label, |ui| ui_kit::number_field(ui, &mut number, min..=max, speed, ""));
+            if response.changed() {
+                set.insert(property.id.clone(), json!(number));
+            }
+            Some(response)
+        }
+        "choice" => {
+            let labels: Vec<&str> = property.choices.iter().map(|choice| choice.label.as_str()).collect();
+            let mut index = property.choices.iter().position(|choice| Some(choice.value.as_str()) == value.as_str()).unwrap_or(0);
+            let response = ui_kit::choice_row(ui, label, &format!("manufacture_post_property_{}", property.id), &mut index, &labels);
+            if let Some(choice) = property.choices.get(index)
+                && Some(choice.value.as_str()) != value.as_str()
+            {
+                set.insert(property.id.clone(), json!(choice.value));
+            }
+            Some(response)
+        }
+        _ => {
+            let mut text = value.as_str().unwrap_or_default().to_string();
+            let (_, changed) = ui_kit::text_row(ui, label, &mut text, "");
+            if changed {
+                let text: String = text.chars().take(solidcraft_engine::cmd::MAX_POST_PROPERTY_TEXT).collect();
+                set.insert(property.id.clone(), json!(text));
+            }
+            None
+        }
+    };
+    if let Some(response) = response
+        && !property.description.is_empty()
+    {
+        response.on_hover_text(&property.description);
     }
 }
 

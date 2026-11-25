@@ -3,6 +3,8 @@
   "id": "rs274",
   "name": "RS274/NGC (reference)",
   "description": "Generic RS274/NGC as defined by NIST IR 6556. The test reference: every code it writes is in that standard. Our own post, not a controller vendor's. Holes use G81, G82 and G83 as NIST defines them (G98 returns to the height at the start of each line; G83 rapids out to that clear height between pecks). G73 is not in the standard, so chip-break holes are written as plain moves. NIST leaves G83's re-entry clearance to the control: the 0.5 mm here only draws and simulates the pecks. Tapped holes use G84 as NIST defines it: the spindle already turning clockwise, feed in, reverse, feed out, the feed the pitch times the speed.",
+  "vendor": "SolidCraft",
+  "version": "1",
   "machine_kind": "mill",
   "numbers": { "length_mm": 4, "length_inch": 5, "feed_mm": 1, "feed_inch": 2, "speed": 0, "dwell": 3, "strip_trailing_zeros": true },
   "line_numbers": null,
