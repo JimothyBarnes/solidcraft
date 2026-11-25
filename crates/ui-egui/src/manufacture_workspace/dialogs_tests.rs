@@ -3555,6 +3555,51 @@ fn pocket_cuts_inside_chains_of_edges_clicked_on_the_model() {
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["edges"], kept["edges"]);
 }
 
+#[test]
+fn chamfer_breaks_chains_of_edges_clicked_on_the_model_each_at_its_own_height() {
+    let mut h = harness();
+    // The plate (100 x 80 x 20) with a boss 20 x 20 standing 5 on its top (X 10 to 30, Y 10 to
+    // 30) and a pocket 30 x 20, 6 deep (X 50 to 80, Y 30 to 50), and a 10 mm chamfer mill.
+    h.app.run("solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"})).unwrap();
+    h.app
+        .run("solid.box", json!({"length": 20, "width": 20, "height": 5, "corner": [10, 10, 20], "operation": "join", "targets": ["Plate"]}))
+        .unwrap();
+    h.app
+        .run("solid.box", json!({"length": 30, "width": 20, "height": 6, "corner": [50, 30, 14], "operation": "cut", "targets": ["Plate"]}))
+        .unwrap();
+    add_tool(&mut h, "chamfer_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    from_the_corner(&mut h);
+    ribbon(&mut h, "cam.op.chamfer");
+    // Edges picked on the model: none yet, and the form says how to pick them, not why nothing
+    // can be cut.
+    chamfer_form(&mut h).geometry = 1;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.contour_chains_none")).is_some() && h.widget(tr("manufacture.chamfer_chains_hint")).is_some());
+    assert!(h.widget(tr("manufacture.chamfer_note")).is_none());
+    // The boss's top front edge and the pocket's front rim: each broken at its own height (Z -1
+    // and Z -6 in the WCS).
+    click_model(&mut h, [20.0, 10.0, 25.0]);
+    click_model(&mut h, [65.0, 30.0, 20.0]);
+    let form = chamfer_form(&mut h);
+    assert_eq!(form.chains.len(), 2, "{:?}", h.app.status);
+    let numbers = form.worked.get().map(|(_, p)| p.numbers.clone()).unwrap();
+    assert_eq!(numbers["heights"], json!([-1.0, -6.0]), "{numbers}");
+    assert!(
+        h.widget(&solidcraft_ui_text::format("manufacture.contour_chains_value", &[("count", "2"), ("closed", "2"), ("length", "180.00 mm")]))
+            .is_some()
+    );
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"].clone();
+    assert_eq!((kept["edges"].clone(), kept["chains"].as_array().map(Vec::len)), (json!("chains"), Some(2)), "{kept}");
+    // Changed from its row it keeps its chains.
+    row_menu(&mut h, "Chamfer 1 (T1)", "manufacture.edit");
+    assert_eq!((open(&h), chamfer_form(&mut h).geometry), ("chamfer", 1));
+    press(&mut h, "OK");
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["chamfer"]["chains"], kept["chains"]);
+}
+
 /// The Haas-style post as a shop keeps its own: another id and name, who made it, a version,
 /// and a note for the operator said at the program's start.
 fn shop_post(version: &str) -> String {

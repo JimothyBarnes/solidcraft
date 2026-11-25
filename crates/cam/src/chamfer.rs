@@ -56,6 +56,9 @@ pub enum ChamferEdges {
     /// the rims of the openings it names by a point in each ([`ChamferOp::openings`]), with the
     /// edges of whatever stands in those.
     Picked,
+    /// Closed chains of edges picked on the model (decision 0042 of the CAM work), each broken at
+    /// its own height on the side away from the part ([`ChamferOp::chains`]).
+    Chains,
 }
 
 /// A chamfer operation's parameters, as the design keeps them. Every one has a default.
@@ -81,6 +84,11 @@ pub struct ChamferOp {
     /// in the WCS.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openings: Vec<[f64; 2]>,
+    /// With edges picked on the model (`chains`): a point on an edge of each closed chain to
+    /// break, in model coordinates. The engine reads the chains, and which side of each the part
+    /// is on, each time the toolpath is worked out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chains: Vec<[f64; 3]>,
     #[serde(default)]
     pub direction: CutDirection,
     /// The radius of the quarter turns on to the wall and off it, mm; `None` for the wider of a
@@ -102,9 +110,12 @@ pub struct Chamfered {
     pub rpm: f64,
     pub feed: f64,
     pub plunge_feed: f64,
-    /// The Z of the edge that is chamfered, and of the tool's tip as it goes round, in the WCS.
+    /// The Z of the edge that is chamfered, and of the tool's tip as it goes round, in the WCS:
+    /// of the first round, where the edges are at several heights.
     pub top: f64,
     pub z: f64,
+    /// The Z of the edge each round breaks, in their order.
+    pub heights: Vec<f64>,
     /// The chamfer's width seen from above and how far down the wall it goes, mm.
     pub width: f64,
     pub leg: f64,
@@ -118,6 +129,28 @@ pub struct Chamfered {
     pub leads: Vec<f64>,
     /// Things worth showing beside the toolpath.
     pub notes: Vec<String>,
+}
+
+/// A closed chain of the part's edges a chamfer of edges picked breaks (decision 0042 of the CAM
+/// work), as the engine reads it from the model, X and Y in the WCS.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChamferChain {
+    /// The Z of the edge: the chamfer's upper edge.
+    pub top: f64,
+    /// The wall under it, as the model has it at the chamfer's lower edge.
+    pub wall: ChamferWall,
+}
+
+/// Which side of a chain the part is on, and so which side the tool goes along.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChamferWall {
+    /// The part is inside the loop (its outside edge, a boss's or an island's top edge): the
+    /// tool goes round its outside.
+    Outside(Loop2),
+    /// The loop is an opening's wall (a pocket's or a hole's rim): its air, the wall as the
+    /// outer loop and whatever stands in it as holes. The tool goes round inside along the wall,
+    /// keeping off what stands there.
+    Inside(Region2),
 }
 
 /// What a chamfer comes to with one tool: the numbers the toolpath and the outline's height
@@ -161,6 +194,16 @@ impl ChamferOp {
         } else if self.outside || !self.openings.is_empty() {
             return bad("`outside` and `openings` say which edges are picked: they go with edges: picked".into());
         }
+        if self.edges == ChamferEdges::Chains {
+            if self.chains.is_empty() || self.chains.len() > MAX_CHAMFER_OUTLINES || !self.chains.iter().flatten().all(|v| v.abs() <= MAX_COORDINATE) {
+                return bad(format!("the edges picked: 1 to {MAX_CHAMFER_OUTLINES} points, each within {MAX_COORDINATE} mm"));
+            }
+            if self.top.is_some() {
+                return bad("edges picked on the model are each broken at their own height: a chamfer of them takes no top".into());
+            }
+        } else if !self.chains.is_empty() {
+            return bad("`chains` are edges picked on the model: they go with edges: chains".into());
+        }
         if !self.rpm.is_none_or(|r| r > 0.0 && r <= MAX_SPINDLE_RPM) {
             return bad(format!("rpm must be above 0 and at most {MAX_SPINDLE_RPM}"));
         }
@@ -197,6 +240,24 @@ impl ChamferOp {
             return bad(format!("the chamfer is cut {} mm up the tool, past tool {}'s {} mm of flutes", leg + below, tool.number, g.flute_length));
         }
         Ok(Shape { width, leg, below, offset })
+    }
+
+    /// How far below an edge it breaks the chamfer's lower edge is, and the tool's tip, mm.
+    pub fn depths(&self, tool: &Tool) -> Result<(f64, f64)> {
+        let shape = self.shape(tool)?;
+        Ok((shape.leg, shape.leg + shape.below))
+    }
+
+    /// How far from a wall the tool reaches as it goes along it, its arcs on and off included, mm:
+    /// what beside an edge must be open from the tool's tip up.
+    pub fn reach(&self, tool: &Tool) -> Result<f64> {
+        let shape = self.shape(tool)?;
+        Ok(2.0 * shape.offset + shape.width + 2.0 * self.lead_radius(tool, &shape))
+    }
+
+    /// The radius of the arcs on to a wall and off it.
+    fn lead_radius(&self, tool: &Tool, shape: &Shape) -> f64 {
+        self.lead.unwrap_or((LEAD_SHARE * tool.geometry.diameter).max(shape.width + LEAD_CLEAR))
     }
 
     /// The Z, in the WCS, of the chamfer's lower edge: the part's outline there is the wall the
@@ -236,6 +297,9 @@ impl ChamferOp {
         openings: &[Region2],
     ) -> Result<Chamfered> {
         let shape = self.shape(tool)?;
+        if self.edges == ChamferEdges::Chains {
+            return bad("a chamfer of edges picked on the model goes along the chains read from the model, not an outline".into());
+        }
         if self.edges == ChamferEdges::Outside && !openings.is_empty() {
             return bad("openings are for a chamfer of all the edges: the outside edge alone is the part's own outline".into());
         }
@@ -249,8 +313,7 @@ impl ChamferOp {
             return bad(format!("the openings to chamfer: at most {MAX_CHAMFER_OUTLINES}, of {MAX_OFFSET_SEGMENTS} segments together"));
         }
         let top = self.top.unwrap_or(placement.model.max.z);
-        let z = top - shape.leg - shape.below;
-        let (retract, clearance) = (placement.retract_z, placement.clearance_z);
+        let retract = placement.retract_z;
         if !(retract - top > SAME_HEIGHT) {
             return bad(format!("the retract height ({retract} mm) must be above the chamfered edge ({top} mm)"));
         }
@@ -274,8 +337,7 @@ impl ChamferOp {
         }
         // The tool goes down where the arc on to the wall begins: nowhere beside the stock, as the
         // edge is above anything a contour has left round the part.
-        let g = tool.geometry;
-        let lead = self.lead.unwrap_or((LEAD_SHARE * g.diameter).max(shape.width + LEAD_CLEAR));
+        let lead = self.lead_radius(tool, &shape);
         let nowhere = (Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 0.0, y: 0.0 });
         let mut rounds: Vec<Round> = moved.iter().map(|region| round(&region.outer, &moved, self.direction, nowhere, lead)).collect::<Result<_>>()?;
         // Inside each opening: along its wall, and round whatever stands in it.
@@ -291,26 +353,137 @@ impl ChamferOp {
                 rounds.extend(along.map(|hole| round_within(region, hole, self.direction, lead, true)).filter(|r| !r.segs.is_empty()));
             }
         }
+        let mut said = Vec::new();
+        if narrow > 0 {
+            said.push(format!("{narrow} opening(s) too narrow for the tool to go round inside left sharp"));
+        }
+        if islands > 0 && self.edges == ChamferEdges::Outside {
+            said.push(format!(
+                "{islands} edge(s) inside the part's outline (an island standing in a pocket) left sharp: a chamfer goes round the outside only"
+            ));
+        }
+        let nothing = if round_the_part {
+            "the outline left nothing to go round".to_string()
+        } else {
+            format!("tool {} does not fit in any opening that is picked: there is nothing to go round", tool.number)
+        };
+        let rounds: Vec<(Round, f64)> = rounds.into_iter().map(|r| (r, top)).collect();
+        self.cut_rounds(start, tool, placement, material, &shape, lead, &rounds, said, nothing)
+    }
+
+    /// The toolpath of a chamfer of edges picked on the model (decision 0042 of the CAM work), from
+    /// `start` for `tool` in a setup placed at `placement`, with its stock `material`: along each
+    /// of `chains`, as the engine read them, at its own height, on the side away from the part;
+    /// the heights in the order their first chain is in, under one tool change, the tool up at
+    /// the retract height between rounds.
+    pub fn toolpath_chains(
+        &self,
+        start: Option<Vec3>,
+        tool: &Tool,
+        placement: &Placement,
+        material: Option<&str>,
+        chains: &[ChamferChain],
+    ) -> Result<Chamfered> {
+        let shape = self.shape(tool)?;
+        if self.edges != ChamferEdges::Chains {
+            return bad("chains read from the model are for a chamfer of edges picked on the model (edges: chains)".into());
+        }
+        let segments = |c: &ChamferChain| match &c.wall {
+            ChamferWall::Outside(l) => l.segs.len(),
+            ChamferWall::Inside(air) => std::iter::once(&air.outer).chain(&air.holes).map(|l| l.segs.len()).sum(),
+        };
+        if chains.is_empty() || chains.len() > MAX_CHAMFER_OUTLINES || chains.iter().map(segments).sum::<usize>() > MAX_OFFSET_SEGMENTS {
+            return bad(format!("the edges picked to chamfer: 1 to {MAX_CHAMFER_OUTLINES} chains, of {MAX_OFFSET_SEGMENTS} segments together"));
+        }
+        if !chains.iter().all(|c| c.top.abs() <= MAX_COORDINATE) {
+            return bad(format!("the height of each edge picked must be finite and within {MAX_COORDINATE} mm"));
+        }
+        let lead = self.lead_radius(tool, &shape);
+        let nowhere = (Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 0.0, y: 0.0 });
+        let mut tops: Vec<f64> = Vec::new();
+        for c in chains {
+            if !tops.iter().any(|top| (top - c.top).abs() <= SAME_HEIGHT) {
+                tops.push(c.top);
+            }
+        }
+        let mut rounds: Vec<(Round, f64)> = Vec::new();
+        let mut narrow = 0;
+        for &top in &tops {
+            let here = chains.iter().filter(|c| (c.top - top).abs() <= SAME_HEIGHT);
+            // Round the outside edges of one height together: two too near for the tool between
+            // them are gone round as one, and the way in to each keeps clear of the others.
+            let outside: Vec<Region2> = here
+                .clone()
+                .filter_map(|c| match &c.wall {
+                    ChamferWall::Outside(l) => Some(Region2 { outer: l.ccw(), holes: Vec::new() }),
+                    ChamferWall::Inside(_) => None,
+                })
+                .collect();
+            if !outside.is_empty() {
+                let moved = moved_at_least(&outside, -shape.offset).map_err(|e| Error::BadValue(format!("the edges picked at Z {top}: {e}")))?;
+                for region in &moved {
+                    rounds.push((round(&region.outer, &moved, self.direction, nowhere, lead)?, top));
+                }
+            }
+            // Inside each rim: along its wall alone, keeping off whatever stands in the opening.
+            for air in here.filter_map(|c| match &c.wall {
+                ChamferWall::Inside(air) => Some(air),
+                ChamferWall::Outside(_) => None,
+            }) {
+                let air = Region2 { outer: air.outer.ccw(), holes: air.holes.iter().map(|island| island.ccw().reversed()).collect() };
+                let within =
+                    moved_at_least(std::slice::from_ref(&air), shape.offset).map_err(|e| Error::BadValue(format!("a rim picked at Z {top}: {e}")))?;
+                if within.is_empty() {
+                    narrow += 1;
+                }
+                rounds.extend(within.iter().map(|region| round_within(region, None, self.direction, lead, true)).filter(|r| !r.segs.is_empty()).map(|r| (r, top)));
+            }
+        }
+        let said = if narrow > 0 { vec![format!("{narrow} rim(s) picked too narrow for the tool to go round inside left sharp")] } else { Vec::new() };
+        let nothing = format!("tool {} does not fit along any edge picked: there is nothing to go round", tool.number);
+        self.cut_rounds(start, tool, placement, material, &shape, lead, &rounds, said, nothing)
+    }
+
+    /// The toolpath of `rounds`, each with the Z of the edge it breaks, under one tool change,
+    /// and its numbers: `said` is what is worth saying of the rounds, and `nothing` why there is
+    /// no toolpath when there are none.
+    #[allow(clippy::too_many_arguments)]
+    fn cut_rounds(
+        &self,
+        start: Option<Vec3>,
+        tool: &Tool,
+        placement: &Placement,
+        material: Option<&str>,
+        shape: &Shape,
+        lead: f64,
+        rounds: &[(Round, f64)],
+        said: Vec<String>,
+        nothing: String,
+    ) -> Result<Chamfered> {
+        let g = tool.geometry;
+        let (retract, clearance) = (placement.retract_z, placement.clearance_z);
+        let depth = shape.leg + shape.below;
         // The tool's own chip load, with nothing added for a thin chip: the cut is narrow, but it
         // is made near the tip, on a small diameter where the tool is weakest, and it is a
         // finishing cut. (A radial engagement of the whole diameter is how that is said.)
         let f = op_feeds(tool, Engagement { axial: shape.leg.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
         let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
 
-        let Some(first) = rounds.first().map(|r| r.entry) else {
-            return bad(if round_the_part {
-                "the outline left nothing to go round".into()
-            } else {
-                format!("tool {} does not fit in any opening that is picked: there is nothing to go round", tool.number)
-            });
+        let Some(first) = rounds.first().map(|(r, _)| r.entry) else {
+            return bad(nothing);
         };
+        let highest = rounds.iter().map(|(_, top)| *top).fold(f64::NEG_INFINITY, f64::max);
+        if !(retract - highest > SAME_HEIGHT) {
+            return bad(format!("the retract height ({retract} mm) must be above the chamfered edge ({highest} mm)"));
+        }
         let mut moves = vec![Move::ToolChange { tool: tool.number }, Move::Spindle { rpm: f.rpm, direction: SpindleDirection::Clockwise }];
         if tool.coolant != Coolant::Off {
             moves.push(Move::Coolant { mode: tool.coolant });
         }
         moves.push(Move::Rapid { to: at(first, clearance) });
         let mut last = first;
-        for r in &rounds {
+        for (r, top) in rounds {
+            let z = top - depth;
             // Down where the arc begins, on to the wall by it, once round, and off by the other.
             moves.push(Move::Rapid { to: at(r.entry, retract) });
             moves.push(Move::Linear { to: at(r.entry, z), feed: f.plunge_feed });
@@ -341,15 +514,8 @@ impl ChamferOp {
         toolpath.validate()?;
 
         let mut notes = f.notes;
-        if narrow > 0 {
-            notes.push(format!("{narrow} opening(s) too narrow for the tool to go round inside left sharp"));
-        }
-        if islands > 0 && self.edges == ChamferEdges::Outside {
-            notes.push(format!(
-                "{islands} edge(s) inside the part's outline (an island standing in a pocket) left sharp: a chamfer goes round the outside only"
-            ));
-        }
-        if lead > 0.0 && rounds.iter().any(|r| r.leads.is_none()) {
+        notes.extend(said);
+        if lead > 0.0 && rounds.iter().any(|(r, _)| r.leads.is_none()) {
             notes.push("there is no room for the arcs in and out at a part's wall: the tool goes straight down on to the edge".into());
         }
         Ok(Chamfered {
@@ -357,14 +523,15 @@ impl ChamferOp {
             rpm: f.rpm,
             feed: f.feed,
             plunge_feed: f.plunge_feed,
-            top,
-            z,
+            top: rounds.first().map_or(highest, |(_, top)| *top),
+            z: rounds.first().map_or(highest, |(_, top)| *top) - depth,
+            heights: rounds.iter().map(|(_, top)| *top).collect(),
             width: shape.width,
             leg: shape.leg,
             offset: shape.offset,
-            round: rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum::<f64>()).sum(),
-            entries: rounds.iter().map(|r| [r.entry.x, r.entry.y]).collect(),
-            leads: rounds.iter().map(Round::lead).collect(),
+            round: rounds.iter().map(|(r, _)| r.segs.iter().map(Seg2Geom::length).sum::<f64>()).sum(),
+            entries: rounds.iter().map(|(r, _)| [r.entry.x, r.entry.y]).collect(),
+            leads: rounds.iter().map(|(r, _)| r.lead()).collect(),
             notes,
         })
     }

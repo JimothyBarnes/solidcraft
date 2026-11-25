@@ -3384,6 +3384,47 @@ fn a_pocket_is_cut_inside_chains_of_edges_picked_on_the_model() {
     assert!(why.contains("not both"), "{why}");
 }
 
+#[test]
+fn a_chamfer_breaks_chains_of_edges_picked_each_at_its_own_height() {
+    use std::f64::consts::PI;
+    // The plate with a boss 20 x 20 standing 5 on its top (X 10 to 30, Y 10 to 30 of the plate)
+    // and a pocket 30 x 20, 6 deep (X 50 to 80, Y 30 to 50). The model is 25 high and the stock
+    // 1 more, so in the WCS the boss's top is Z -1 and the plate's top (the pocket's rim) Z -6.
+    let mut s = plate();
+    boxed(&mut s, [10.0, 10.0, 20.0], [20.0, 20.0, 5.0], "join");
+    boxed(&mut s, [50.0, 30.0, 14.0], [30.0, 20.0, 6.0], "cut");
+    run(&mut s, "cam.tool.create", json!({"tool": chamfer10()}));
+    // The boss's top front edge and the pocket's front rim, one click each.
+    let chains = json!({"edges": "chains", "chains": [[20, 10, 25], [65, 30, 20]]});
+    run(&mut s, "cam.op.chamfer", json!({"setup": "setup-1", "tool": 6, "chamfer": chains}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    // Each at its own height: 1 outside the boss (80 and four quarter circles of 1), then 1
+    // inside the rim (28 x 18), the tip 1.5 below each.
+    assert_eq!(n["heights"], json!([-1.0, -6.0]), "{n}");
+    assert!((n["round"].as_f64().unwrap() - (80.0 + 2.0 * PI + 92.0)).abs() < 1e-6, "{n}");
+    assert_eq!((t["min"][2].as_f64(), n["z"].as_f64()), (Some(-7.5), Some(-2.5)));
+    // Simulated: the chamfers are cut where they were meant, nothing else is cut into.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.25}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // The boss's foot has no wall going down from it: refused, saying why.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "chains", "chains": [[20, 10, 20]]}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("is not the top edge of a wall that goes straight down"), "{why}");
+    // A boss 1 high: the tool's point goes 1.5 below its top, into the plate beside it.
+    boxed(&mut s, [10.0, 50.0, 20.0], [10.0, 10.0, 1.0], "join");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "chains", "chains": [[15, 50, 21]]}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("something of the part stands within") && why.contains("the tool would cut into it"), "{why}");
+    // Each edge is at its own height: a top in the heights is refused.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": chains, "heights": {"top": {"from": "z", "offset": -1}}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("takes no top"), "{why}");
+    // Chains with another choice of edges: refused before the model is read.
+    let why = refused(&mut s, "cam.op.edit", json!({"id": "op-1", "chamfer": {"edges": "all", "chains": [[20, 10, 25]]}}));
+    assert!(why.contains("they go with edges: chains"), "{why}");
+}
+
 /// The Haas-style post as a shop might keep its own: another id, a vendor and a version, and a
 /// note for the operator at the program's start.
 fn shop_post(version: &str) -> String {

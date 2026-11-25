@@ -892,6 +892,63 @@ fn chain_pockets(
     .map_err(said)
 }
 
+/// The chains a chamfer of edges picked breaks, as read lately ([`chamfer_chains`]): by a number for
+/// the bodies' geometry, the plane, the points and the tool's numbers.
+static CHAMFER_CHAINS: std::sync::Mutex<Vec<(u64, Vec<solidcraft_cam::ChamferChain>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The closed chains of level edges `picks` name (points on edges, in model coordinates) for a
+/// chamfer along them (decision 0042 of the CAM work), in the setup's WCS: each at its own
+/// height, with the side of it the part is on, read a hair below the chamfer's lower edge
+/// (`leg` below the edge); the air beside each checked open from the tool's tip (`tip` below
+/// the edge) up, `reach` from it. Refused, with the reason: a chain that does not close, one
+/// with no upright wall under it, and one with something in the tool's way.
+fn chamfer_chains(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    picks: &[[f64; 3]],
+    (leg, tip, reach): (f64, f64, f64),
+) -> std::result::Result<Vec<solidcraft_cam::ChamferChain>, String> {
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    let points: Vec<solidcore_record::Vec3> = picks.iter().map(|at| solidcore_record::Vec3 { x: at[0], y: at[1], z: at[2] }).collect();
+    let flat: Vec<f64> = picks.iter().flatten().copied().collect();
+    with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let chains = read_or_kept(&CHAINS, reading_key(bodies, &plane, &flat), || {
+            super::cam_chains::chains(&named, &plane, &points).map_err(|e| bad(cmd, e))
+        })?;
+        if chains.is_empty() {
+            return Err(bad(cmd, "no edges are picked"));
+        }
+        if let Some(open) = chains.iter().find(|c| !c.closed) {
+            let end = open.segs.last().map(|seg| seg.end()).unwrap_or(solidcore_record::Vec2 { x: 0.0, y: 0.0 });
+            return Err(bad(
+                cmd,
+                format!(
+                    "the chain of edges picked does not close: it ends at X {:.3} Y {:.3} (where two edges go on, or none): a chamfer along an open chain is not cut yet, so pick edges that go all the way round",
+                    end.x, end.y
+                ),
+            ));
+        }
+        let mut asked = flat.clone();
+        asked.extend([leg, tip, reach, p.model.max.z]);
+        read_or_kept(&CHAMFER_CHAINS, reading_key(bodies, &plane, &asked), || {
+            let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
+            let mut found = Vec::with_capacity(chains.len());
+            for chain in &chains {
+                let start = chain.segs.first().map(|seg| seg.start()).unwrap_or(solidcore_record::Vec2 { x: 0.0, y: 0.0 });
+                let what = format!("the chain at X {:.3} Y {:.3} Z {:.3}", start.x, start.y, chain.z);
+                let ring = solidcore_record::Loop2 { segs: chain.segs.clone() }.ccw();
+                let wall = finder.chamfer_wall(&ring, chain.z - leg - CHAMFER_WALL_BELOW, chain.z - tip, reach, &what).map_err(|e| bad(cmd, e))?;
+                found.push(solidcraft_cam::ChamferChain { top: chain.z, wall });
+            }
+            Ok(found)
+        })
+    })
+    .map_err(said)
+}
+
 /// A chain of edges picked on the model, as a form shows it (decision 0038 of the CAM work).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PickedChain {
@@ -1931,58 +1988,68 @@ fn work(
                 chamfer.top = Some(top);
             }
             let chamfer = &chamfer;
-            // The wall is read a hair below the chamfer's lower edge, where the model has it
-            // whether or not it has the chamfer.
-            let wall = chamfer.wall_height(tool, &placement).map_err(failed)?;
-            // Picked edges leave the outside one out unless it is one of them: the part's
-            // outline is read only when it is gone round.
-            let picked = chamfer.edges == ChamferEdges::Picked;
-            let outline = if !picked || chamfer.outside {
-                outline_at(s, cmd, setup, &placement, Some(wall - CHAMFER_WALL_BELOW)).map_err(|e| bad(cmd, of(op, e)))?.1
+            let done = if chamfer.edges == ChamferEdges::Chains {
+                // Edges picked on the model, each broken at its own height (decision 0042 of the
+                // CAM work).
+                chamfer.validate(tool).map_err(failed)?;
+                let (leg, tip) = chamfer.depths(tool).map_err(failed)?;
+                let reach = chamfer.reach(tool).map_err(failed)?;
+                let chains = chamfer_chains(s, cmd, setup, &placement, &chamfer.chains, (leg, tip, reach)).map_err(|e| bad(cmd, of(op, e)))?;
+                chamfer.toolpath_chains(start, tool, &placement, material, &chains).map_err(failed)?
             } else {
-                Vec::new()
-            };
-            let done = if chamfer.edges == ChamferEdges::All || (picked && !chamfer.openings.is_empty()) {
-                // The rims of the openings in the part's top too, each read at the same height
-                // and open as far down as the tool's point goes.
-                let tip = chamfer.tip_height(tool, &placement).map_err(failed)?;
-                let (openings, left_out) = rims_of(s, cmd, setup, &placement, wall - CHAMFER_WALL_BELOW, tip).map_err(|e| bad(cmd, of(op, e)))?;
-                // Picked: the rims named by a point in each, in the chamfer's own order.
-                let (openings, left_out) = if picked {
-                    let mut named = Vec::with_capacity(chamfer.openings.len());
-                    for at in &chamfer.openings {
-                        let point = solidcore_record::Vec2 { x: at[0], y: at[1] };
-                        let Some(rim) = openings.iter().find(|rim| in_rim(rim, point)) else {
-                            return Err(bad(
-                                cmd,
-                                of(
-                                    op,
-                                    format!(
-                                        "there is no opening at X {} Y {} whose rim the tool can break: none in the part's top there, or one not open as far down as the tool's point goes",
-                                        at[0], at[1]
-                                    ),
-                                ),
-                            ));
-                        };
-                        named.push(rim.clone());
-                    }
-                    (named, 0)
+                // The wall is read a hair below the chamfer's lower edge, where the model has it
+                // whether or not it has the chamfer.
+                let wall = chamfer.wall_height(tool, &placement).map_err(failed)?;
+                // Picked edges leave the outside one out unless it is one of them: the part's
+                // outline is read only when it is gone round.
+                let picked = chamfer.edges == ChamferEdges::Picked;
+                let outline = if !picked || chamfer.outside {
+                    outline_at(s, cmd, setup, &placement, Some(wall - CHAMFER_WALL_BELOW)).map_err(|e| bad(cmd, of(op, e)))?.1
                 } else {
-                    (openings, left_out)
+                    Vec::new()
                 };
-                let mut done = chamfer.toolpath_round(start, tool, &placement, material, &outline, &openings).map_err(failed)?;
-                if left_out > 0 {
-                    done.notes.push(format!(
-                        "{left_out} opening(s) with something in the way of the tool's point, which goes {:.2} mm below the edge, left sharp",
-                        done.top - tip
-                    ));
+                if chamfer.edges == ChamferEdges::All || (picked && !chamfer.openings.is_empty()) {
+                    // The rims of the openings in the part's top too, each read at the same height
+                    // and open as far down as the tool's point goes.
+                    let tip = chamfer.tip_height(tool, &placement).map_err(failed)?;
+                    let (openings, left_out) = rims_of(s, cmd, setup, &placement, wall - CHAMFER_WALL_BELOW, tip).map_err(|e| bad(cmd, of(op, e)))?;
+                    // Picked: the rims named by a point in each, in the chamfer's own order.
+                    let (openings, left_out) = if picked {
+                        let mut named = Vec::with_capacity(chamfer.openings.len());
+                        for at in &chamfer.openings {
+                            let point = solidcore_record::Vec2 { x: at[0], y: at[1] };
+                            let Some(rim) = openings.iter().find(|rim| in_rim(rim, point)) else {
+                                return Err(bad(
+                                    cmd,
+                                    of(
+                                        op,
+                                        format!(
+                                            "there is no opening at X {} Y {} whose rim the tool can break: none in the part's top there, or one not open as far down as the tool's point goes",
+                                            at[0], at[1]
+                                        ),
+                                    ),
+                                ));
+                            };
+                            named.push(rim.clone());
+                        }
+                        (named, 0)
+                    } else {
+                        (openings, left_out)
+                    };
+                    let mut done = chamfer.toolpath_round(start, tool, &placement, material, &outline, &openings).map_err(failed)?;
+                    if left_out > 0 {
+                        done.notes.push(format!(
+                            "{left_out} opening(s) with something in the way of the tool's point, which goes {:.2} mm below the edge, left sharp",
+                            done.top - tip
+                        ));
+                    }
+                    done
+                } else {
+                    chamfer.toolpath(start, tool, &placement, material, &outline).map_err(failed)?
                 }
-                done
-            } else {
-                chamfer.toolpath(start, tool, &placement, material, &outline).map_err(failed)?
             };
             let numbers = serde_json::json!({
-                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "z": done.z, "width": done.width,
+                "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "top": done.top, "z": done.z, "heights": done.heights, "width": done.width,
                 "leg": done.leg, "offset": done.offset, "round": done.round, "entries": done.entries, "leads": done.leads
             });
             Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: done.leg })

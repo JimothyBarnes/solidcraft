@@ -1,12 +1,14 @@
 //! Chamfer's form (decision 0018 of the CAM work): the top outside edge of the part broken with
-//! a chamfer mill. It builds the parameters of `cam.op.chamfer` (of `cam.op.edit` for a chamfer
-//! being changed) and shows what they would cut before OK, as the other operations' forms do.
+//! a chamfer mill, or its top edges found or picked; or chains of edges picked on the model, each
+//! at its own height (decision 0042). It builds the parameters of `cam.op.chamfer` (of
+//! `cam.op.edit` for a chamfer being changed) and shows what they would cut before OK, as the
+//! other operations' forms do.
 use serde_json::{Value, json};
-use solidcraft_engine::cmd::{OperationPreview, ToolChoice, manufacture_preview, manufacture_rim_at, manufacture_rims, manufacture_tools};
+use solidcraft_engine::cmd::{OperationPreview, PickedChain, ToolChoice, manufacture_preview, manufacture_rim_at, manufacture_rims, manufacture_tools};
 use solidcraft_engine::doc::display_units::format_length;
 use solidcraft_ui_text::tr;
 
-use super::contour::DIRECTIONS;
+use super::contour::{DIRECTIONS, EDGES_PICKED, GEOMETRIES, chains_said, take_chain};
 use super::{
     Edited, SetupChoice, Worked, kept_operation, labels, minutes_seconds, preview_note, refusal, set_or_clear, setups, speed_and_feed, window_words,
     word,
@@ -34,6 +36,16 @@ pub(crate) struct ChamferForm {
     tools: Vec<ToolChoice>,
     pub setup: usize,
     pub tool: usize,
+    /// What it breaks: the edges found on the model at the part's top, or chains of edges picked
+    /// on it (its place in [`GEOMETRIES`]).
+    pub geometry: usize,
+    /// The geometry as the form last showed it: another one since forgets what was picked.
+    left_geometry: usize,
+    /// The chains of edges picked on the model: the point clicked on each, in model
+    /// coordinates, and the chain it named.
+    pub chains: Vec<([f64; 3], PickedChain)>,
+    /// Why the last click on the model named no chain, if it did not.
+    chain_trouble: Option<String>,
     /// Which of [`EDGES`]: the outside edge alone, or the rims of the openings in the top too;
     /// or [`PICKED_EDGES`], the edges picked on the model.
     pub edges: usize,
@@ -97,6 +109,10 @@ impl ChamferForm {
             tools: manufacture_tools(&app.session.doc, "chamfer"),
             setup,
             tool: 0,
+            geometry: 0,
+            left_geometry: 0,
+            chains: Vec::new(),
+            chain_trouble: None,
             edges: 0,
             picked: (false, Vec::new()),
             rims: Worked::new(),
@@ -141,6 +157,10 @@ impl ChamferForm {
             form.picked = (base["outside"].as_bool().unwrap_or(false), openings.unwrap_or_default());
             form.edges = PICKED_EDGES;
         }
+        // Its chains stay the ones it has: shown by how many points name them.
+        if base["edges"] == "chains" {
+            (form.geometry, form.left_geometry) = (EDGES_PICKED, EDGES_PICKED);
+        }
         form.left_at = form.edges;
         form.direction = DIRECTIONS.iter().position(|d| Some(d.0) == base["direction"].as_str()).unwrap_or(0);
         (form.width, form.typed_width) = number("width").map_or((WIDTH, false), |v| (v, true));
@@ -169,14 +189,22 @@ impl ChamferForm {
     /// its edge, its arcs) stays.
     pub fn params(&self) -> Value {
         let mut chamfer = self.editing.as_ref().map_or_else(|| json!({}), |edited| edited.base.clone());
+        let kept_chains = chamfer.get("chains").cloned();
         // The outside edge alone is what a chamfer is unless it says otherwise: only the other
         // choices are written, and the picked edges only with theirs.
         if let Some(kept) = chamfer.as_object_mut() {
-            ["edges", "outside", "openings"].iter().for_each(|key| {
+            ["edges", "outside", "openings", "chains"].iter().for_each(|key| {
                 kept.remove(*key);
             });
         }
-        if self.edges == PICKED_EDGES {
+        if self.geometry == EDGES_PICKED {
+            // Chains of edges picked: a chamfer being changed keeps its own.
+            chamfer["edges"] = json!("chains");
+            chamfer["chains"] = match (&self.editing, kept_chains) {
+                (Some(_), Some(kept)) => kept,
+                _ => json!(self.chains.iter().map(|(at, _)| *at).collect::<Vec<_>>()),
+            };
+        } else if self.edges == PICKED_EDGES {
             chamfer["edges"] = json!("picked");
             if self.picked.0 {
                 chamfer["outside"] = json!(true);
@@ -207,7 +235,7 @@ impl ChamferForm {
     fn asked(&self) -> Value {
         let mut asked = self.params();
         if let Some(chamfer) = asked["chamfer"].as_object_mut() {
-            ["edges", "outside", "openings"].iter().for_each(|key| {
+            ["edges", "outside", "openings", "chains"].iter().for_each(|key| {
                 chamfer.remove(*key);
             });
         }
@@ -326,7 +354,25 @@ impl ChamferForm {
         self.heights.take_point(app, ctx);
         // What is picked on the model is what is broken (decision 0030 of the CAM work): a
         // choice from the row's list forgets it, and an edge clicked is taken and worked out.
-        let picks = self.editing.is_none() && self.missing().is_none();
+        let chained = self.geometry == EDGES_PICKED;
+        let picks = self.editing.is_none() && self.missing().is_none() && !chained;
+        // Another geometry: what was picked for the other is let go of.
+        if self.editing.is_none() && self.geometry != self.left_geometry {
+            self.clicked.forget(app);
+            picking::stop(app);
+            self.lit.clear();
+            self.chosen = Self::of_choice(self.edges, self.rims.get().map_or(0, |(_, rims)| rims.len()));
+            self.left_geometry = self.geometry;
+        }
+        // Chains of edges picked (decision 0042): each edge clicked names its chain, and a chain
+        // picked again is taken out.
+        if self.editing.is_none() && chained && !self.heights.picking() {
+            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            take_chain(app, ctx, &setup, &mut self.chains, &mut self.chain_trouble);
+        }
+        if picks {
+            picking::faces_again(app);
+        }
         if picks && self.edges != self.left_at {
             self.clicked.forget(app);
             self.left_at = self.edges;
@@ -351,11 +397,23 @@ impl ChamferForm {
         let mut edges = labels(&EDGES);
         edges.extend(picked_label.as_deref());
         let missing = self.missing();
-        let ready = missing.is_none() && self.worked.result.is_ok();
-        let none_picked = self.none_picked();
+        let ready = missing.is_none() && self.worked.result.is_ok() && (self.editing.is_some() || !chained || !self.chains.is_empty());
+        let none_picked = if chained { self.editing.is_none() && self.chains.is_empty() } else { self.none_picked() };
+        let geometries = labels(&GEOMETRIES);
+        let geometry = self.geometry;
+        let chains_said = chains_said(&self.chains, units, decimals);
+        let kept_chains = self.editing.as_ref().and_then(|edited| edited.base["chains"].as_array().map(Vec::len)).map(|count| {
+            solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count.to_string())])
+        });
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         // Where the tool's tip runs: the number to check against what is beside the part.
-        let tip = self.worked.get().and_then(|(_, preview)| preview.numbers.get("z")?.as_f64()).map(|z| format_length(z, units, decimals));
+        // (Edges picked are at their own heights, each with its own.)
+        let tip = self
+            .worked
+            .get()
+            .filter(|_| !chained)
+            .and_then(|(_, preview)| preview.numbers.get("z")?.as_f64())
+            .map(|z| format_length(z, units, decimals));
         // The setup picked is the one the viewport draws, so the chamfer is seen on its own stock.
         if self.drawn_setup != Some(self.setup)
             && let Some(picked) = self.setups.get(self.setup)
@@ -390,9 +448,30 @@ impl ChamferForm {
                 }
                 ui_kit::choice_row(ui, tr("manufacture.field_tool"), "manufacture_chamfer_tool", &mut self.tool, &tool_labels);
                 new_tool = ui_kit::icon_label_button(ui, tr("manufacture.new_tool"), "cam_tool_new", true, false).clicked();
-                ui_kit::choice_row(ui, tr("manufacture.chamfer_edges"), "manufacture_chamfer_edges", &mut self.edges, &edges);
-                if let Some(picking) = picking {
-                    ui_kit::text(ui, picking, ui_kit::Text::Note("manufacture_chamfer_pick"));
+                // What it breaks: edges found on the model, or chains of edges picked on it.
+                if self.editing.is_some() {
+                    ui_kit::value_row(ui, tr("manufacture.contour_geometry"), geometries.get(geometry).copied().unwrap_or_default());
+                } else {
+                    ui_kit::choice_row(ui, tr("manufacture.contour_geometry"), "manufacture_chamfer_geometry", &mut self.geometry, &geometries);
+                }
+                if chained {
+                    match &kept_chains {
+                        Some(kept) => {
+                            ui_kit::value_row(ui, tr("manufacture.contour_chains"), kept);
+                        }
+                        None => {
+                            ui_kit::value_row(ui, tr("manufacture.contour_chains"), &chains_said);
+                            ui_kit::text(ui, tr("manufacture.chamfer_chains_hint"), ui_kit::Text::Note("manufacture_chamfer_chains_hint"));
+                            if let Some(why) = &self.chain_trouble {
+                                ui_kit::text(ui, why, ui_kit::Text::Note("manufacture_chamfer_chain_trouble"));
+                            }
+                        }
+                    }
+                } else {
+                    ui_kit::choice_row(ui, tr("manufacture.chamfer_edges"), "manufacture_chamfer_edges", &mut self.edges, &edges);
+                    if let Some(picking) = picking {
+                        ui_kit::text(ui, picking, ui_kit::Text::Note("manufacture_chamfer_pick"));
+                    }
                 }
                 ui_kit::choice_row(ui, tr("manufacture.contour_direction"), "manufacture_chamfer_direction", &mut self.direction, &directions);
                 if ui_kit::row(ui, tr("manufacture.chamfer_width"), |ui| ui_kit::length_field(ui, &mut self.width, units, decimals)).changed() {
@@ -415,13 +494,17 @@ impl ChamferForm {
                 for note in self.worked.get().map(|(_, preview)| preview.notes.as_slice()).unwrap_or_default() {
                     ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_chamfer_engine_note"));
                 }
+                // Edges picked say what they are in their own hint.
                 let note = match self.edges {
-                    PICKED_EDGES if none_picked => "manufacture.chamfer_none_picked",
-                    PICKED_EDGES => "manufacture.chamfer_picked_note",
-                    1 => "manufacture.chamfer_all_note",
-                    _ => "manufacture.chamfer_note",
+                    _ if chained => None,
+                    PICKED_EDGES if none_picked => Some("manufacture.chamfer_none_picked"),
+                    PICKED_EDGES => Some("manufacture.chamfer_picked_note"),
+                    1 => Some("manufacture.chamfer_all_note"),
+                    _ => Some("manufacture.chamfer_note"),
                 };
-                ui_kit::text(ui, tr(note), ui_kit::Text::Note("manufacture_chamfer_note"));
+                if let Some(note) = note {
+                    ui_kit::text(ui, tr(note), ui_kit::Text::Note("manufacture_chamfer_note"));
+                }
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_chamfer_preview_note"));
                 }

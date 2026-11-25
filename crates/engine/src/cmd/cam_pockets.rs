@@ -369,6 +369,55 @@ impl<'a> Finder<'a> {
         Ok(pocket)
     }
 
+    /// Which side of the closed chain `ring` (in the plane's coordinates, counter-clockwise) the
+    /// bodies are on, for a chamfer of edges picked (decision 0042 of the CAM work), as `what`
+    /// names it: the section of the bodies at the height `at` (a hair below the chamfer's lower
+    /// edge) has a ring of the chain's outline, the outer ring of a piece (the bodies are inside
+    /// it: the tool goes round outside) or a hole's (the tool goes round inside, in its air).
+    /// Checked exactly: the air beside the chain is open from `tip`, the height of the tool's
+    /// point, up: inside a rim, its air; outside an edge, a band `reach` wide round it.
+    pub(super) fn chamfer_wall(&mut self, ring: &Loop2, at: f64, tip: f64, reach: f64, what: &str) -> Result<solidcraft_cam::ChamferWall, String> {
+        let faces = self.faces_above(at - self.hair)?;
+        let mut side = None;
+        for rings in faces {
+            if let Some(k) = rings.iter().position(|r| super::cam_chains::same_outline(r, ring)) {
+                side = Some(match rings.get(k) {
+                    Some(hole) if k > 0 => Some(air_within(faces, hole)),
+                    _ => None,
+                });
+                break;
+            }
+        }
+        let Some(side) = side else {
+            return Err(format!(
+                "{what} is not the top edge of a wall that goes straight down from it: a chamfer breaks an edge whose wall stands upright under it (not a drafted wall, nor where two flat faces meet)"
+            ));
+        };
+        match side {
+            None => {
+                let grown = solidcraft_cam::offset_region(&Region2 { outer: ring.ccw(), holes: Vec::new() }, -reach).map_err(|e| format!("{what}: {e}"))?;
+                let Some(outer) = grown.into_iter().next().map(|region| region.outer) else {
+                    return Err(format!("{what}: nothing to go round"));
+                };
+                let band = Region2 { outer, holes: vec![ring.ccw().reversed()] };
+                if !self.open_above(&band, tip)? {
+                    return Err(format!(
+                        "something of the part stands within {reach:.3} mm of {what}, above where the tool's point goes (Z {tip:.3} mm): the tool would cut into it; a smaller chamfer, the tip less far below it, or a narrower tool"
+                    ));
+                }
+                Ok(solidcraft_cam::ChamferWall::Outside(ring.ccw()))
+            }
+            Some(air) => {
+                if !self.open_above(&air, tip)? {
+                    return Err(format!(
+                        "the opening inside {what} is not open as far down as the tool's point goes (Z {tip:.3} mm): something in it would be cut into; a smaller chamfer, or the tip less far below it"
+                    ));
+                }
+                Ok(solidcraft_cam::ChamferWall::Inside(air))
+            }
+        }
+    }
+
     /// The openings in the bodies' top whose rims a chamfer breaks (decision 0018 of the CAM
     /// work, all the edges): the air in every hole of a cut face of the bodies' section at the
     /// height `at`, with what stands in it as its holes, that is open from `tip`, the height of

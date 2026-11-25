@@ -1,0 +1,26 @@
+{
+  "en": {
+    "manufacture.chamfer_chains_hint": "Click an edge on the model: its whole chain at that height is picked, and a click on a chain picked takes it out. Each is broken at its own height, the tool on the side away from the part: round a boss's top edge, inside a pocket's rim."
+  },
+  "ar": {
+    "manufacture.chamfer_chains_hint": "انقر على حافة في النموذج: تُختار سلسلتها كلها عند ذلك الارتفاع، والنقر على سلسلة مختارة يلغي اختيارها. تُشطف كل سلسلة عند ارتفاعها، والأداة في الجهة البعيدة عن القطعة: حول الحافة العلوية لنتوء، وداخل حافة جيب."
+  },
+  "he": {
+    "manufacture.chamfer_chains_hint": "לחצו על קצה במודל: כל השרשרת שלו בגובה זה נבחרת, ולחיצה על שרשרת שנבחרה מבטלת את בחירתה. כל אחת נשברת בגובה שלה, והכלי בצד הרחוק מהחלק: סביב הקצה העליון של בליטה, ובתוך שפת כיס."
+  },
+  "ja": {
+    "manufacture.chamfer_chains_hint": "モデル上のエッジをクリックすると、その高さにあるチェーン全体が選択されます。選択済みのチェーンをクリックすると外れます。それぞれのチェーンはその高さで面取りされ、工具は部品の反対側を通ります。ボスの上端なら外側を、ポケットの縁なら内側を回ります。"
+  },
+  "vi": {
+    "manufacture.chamfer_chains_hint": "Nhấp vào một cạnh trên mô hình: cả chuỗi của nó ở độ cao đó được chọn, và nhấp vào một chuỗi đã chọn sẽ bỏ chọn nó. Mỗi chuỗi được vát ở độ cao của chính nó, dao ở phía không có chi tiết: quanh cạnh trên của một vấu, bên trong mép của một hốc."
+  },
+  "zh": {
+    "manufacture.chamfer_chains_hint": "在模型上单击一条边：该高度上的整条链都会被选取，单击已选取的链会取消选取。每条链在其自身高度倒角，刀具位于远离零件的一侧：绕凸台的顶边，沿型腔边缘的内侧。"
+  },
+  "de": {
+    "manufacture.chamfer_chains_hint": "Eine Kante am Modell anklicken: ihre ganze Kette auf dieser Höhe wird gewählt, und ein Klick auf eine gewählte Kette nimmt sie heraus. Jede wird auf ihrer eigenen Höhe gefast, das Werkzeug auf der vom Teil abgewandten Seite: um die obere Kante eines Zapfens, innen am Rand einer Tasche."
+  },
+  "ko": {
+    "manufacture.chamfer_chains_hint": "모델에서 모서리를 클릭하면 그 높이에 있는 체인 전체가 선택되고, 선택한 체인을 클릭하면 선택이 해제됩니다. 각 체인은 자신의 높이에서 모따기되며, 공구는 부품 반대쪽으로 지나갑니다. 보스의 윗모서리는 바깥을 돌고, 포켓의 테두리는 안쪽을 돕니다."
+  }
+}

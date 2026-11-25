@@ -702,3 +702,67 @@ fn picked_edges_are_the_only_ones_broken() {
     assert_eq!((op.edges, op.outside, op.openings.clone()), (ChamferEdges::Picked, true, vec![[1.0, 2.0]]));
     assert_eq!(serde_json::from_value::<ChamferOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
 }
+
+#[test]
+fn edges_picked_are_broken_each_at_its_own_height_on_the_side_away_from_the_part() {
+    // On the block (its top at Z 0): a boss 10 x 10 (X -20 to -10, Y -5 to 5) standing to Z 4,
+    // whose top edge is picked, the part inside it; and a pocket X 2 to 22, Y -8 to 8, whose rim
+    // is picked, the part outside it.
+    let boss_wall = rectangle((-20.0, -10.0), (-5.0, 5.0));
+    let pocket = Region2 { outer: rectangle((2.0, 22.0), (-8.0, 8.0)), holes: Vec::new() };
+    let boss = ChamferChain { top: 4.0, wall: ChamferWall::Outside(boss_wall.clone()) };
+    let rim = ChamferChain { top: 0.0, wall: ChamferWall::Inside(pocket.clone()) };
+    let op = ChamferOp { edges: ChamferEdges::Chains, chains: vec![[0.0, 0.0, 0.0]], ..ChamferOp::default() };
+    let along = |chains: &[ChamferChain]| op.toolpath_chains(None, &chamfer10(), &faced_block(), Some("aluminium"), chains);
+    let d = along(&[boss.clone(), rim.clone()]).unwrap();
+    // Round the boss 1 outside it (40 and four quarter circles of 1) with the tip 1.5 below its
+    // top, then 1 inside the pocket's wall (18 x 14) with the tip 1.5 below the block's top.
+    assert_eq!((d.heights.clone(), d.top, d.z), (vec![4.0, 0.0], 4.0, 2.5));
+    assert!(close(d.round, 40.0 + 2.0 * PI + 64.0) && d.notes.is_empty(), "{} {:?}", d.round, d.notes);
+    // One tool change, and every cut at one of the two heights.
+    assert_eq!(d.toolpath.moves.iter().filter(|m| matches!(m, Move::ToolChange { .. })).count(), 1);
+    let mut at = d.toolpath.start;
+    for m in &d.toolpath.moves {
+        at = m.end(at);
+        if matches!(m, Move::Linear { .. } | Move::Arc { .. }) {
+            assert!(close(at.z, 2.5) || close(at.z, -1.5), "{m:?}");
+        }
+    }
+    // Each is cut as a chamfer of that edge alone is: the boss as the part's outline with its
+    // top given, the rim as an opening picked.
+    let boss_alone =
+        ChamferOp { top: Some(4.0), ..ChamferOp::default() }.toolpath(None, &chamfer10(), &faced_block(), Some("aluminium"), &[boss_wall]).unwrap();
+    assert!(same_moves(&along(std::slice::from_ref(&boss)).unwrap().toolpath.moves, &boss_alone.toolpath.moves));
+    let rim_alone = ChamferOp { edges: ChamferEdges::Picked, openings: vec![[10.0, 0.0]], ..ChamferOp::default() }
+        .toolpath_round(None, &chamfer10(), &faced_block(), Some("aluminium"), &[], std::slice::from_ref(&pocket))
+        .unwrap();
+    assert!(same_moves(&along(std::slice::from_ref(&rim)).unwrap().toolpath.moves, &rim_alone.toolpath.moves));
+    // A rim too narrow for the tool: left sharp, and said; alone, there is nothing to go round.
+    let narrow = ChamferChain { top: 0.0, wall: ChamferWall::Inside(Region2 { outer: circle(-25.0, 15.0, 0.75), holes: Vec::new() }) };
+    let d = along(&[boss.clone(), narrow.clone()]).unwrap();
+    assert!(d.notes.iter().any(|n| n.contains("1 rim(s) picked too narrow")), "{:?}", d.notes);
+    let why = |r: Result<Chamfered>| r.unwrap_err().to_string();
+    assert!(why(along(&[narrow])).contains("does not fit along any edge picked"));
+    // What is refused, and why.
+    assert!(why(along(&[])).contains("1 to 1000 chains"));
+    assert!(why(along(&[ChamferChain { top: 6.0, ..boss.clone() }])).contains("retract height"));
+    assert!(why(ChamferOp::default().toolpath_chains(None, &chamfer10(), &faced_block(), Some("aluminium"), &[boss])).contains("edges: chains"));
+    assert!(why(op.toolpath(None, &chamfer10(), &faced_block(), Some("aluminium"), &[block_outline()])).contains("not an outline"));
+    let refused = |odd: ChamferOp| odd.validate(&chamfer10()).unwrap_err().to_string();
+    assert!(refused(ChamferOp { top: Some(0.0), ..op.clone() }).contains("takes no top"));
+    assert!(refused(ChamferOp { chains: Vec::new(), ..op.clone() }).contains("the edges picked: 1 to 1000 points"));
+    assert!(refused(ChamferOp { chains: vec![[f64::NAN, 0.0, 0.0]], ..op.clone() }).contains("the edges picked"));
+    assert!(refused(ChamferOp { chains: vec![[0.0; 3]], ..ChamferOp::default() }).contains("they go with edges: chains"));
+    // As the design keeps it.
+    let kept: ChamferOp = serde_json::from_str(r#"{"edges": "chains", "chains": [[1, 2, 3]]}"#).unwrap();
+    assert_eq!((kept.edges, kept.chains.clone()), (ChamferEdges::Chains, vec![[1.0, 2.0, 3.0]]));
+    assert_eq!(serde_json::from_value::<ChamferOp>(serde_json::to_value(&kept).unwrap()).unwrap(), kept);
+    assert!(serde_json::to_value(ChamferOp::default()).unwrap().get("chains").is_none());
+    // Hostile numbers in what the engine reads never panic.
+    for v in [f64::NAN, f64::INFINITY, -1e300, 0.0, 5e-324, f64::MAX] {
+        let odd = rectangle((v, 2.0), (-8.0, v));
+        let _ = along(&[ChamferChain { top: v, wall: ChamferWall::Outside(odd.clone()) }]);
+        let _ = along(&[ChamferChain { top: 0.0, wall: ChamferWall::Inside(Region2 { outer: odd.clone(), holes: vec![circle(v, v, v)] }) }]);
+        let _ = along(&[ChamferChain { top: 0.0, wall: ChamferWall::Outside(circle(0.0, 0.0, v)) }]);
+    }
+}
