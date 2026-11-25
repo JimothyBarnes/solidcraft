@@ -16,7 +16,7 @@ use solidcraft_ui_text::tr;
 
 use crate::SolveApp;
 use crate::dialogs::{Dialog, Kind};
-use crate::selection::{FACES, SelInput, same_item};
+use crate::selection::{Accept, FACES, SNAP_POINTS, SelInput, VERTICES, same_item};
 
 /// Whether the viewport picks for a Manufacture form.
 pub(crate) fn active(app: &SolveApp) -> bool {
@@ -43,13 +43,43 @@ fn start_taking(app: &mut SolveApp, label: &'static str, accept: crate::selectio
     }
 }
 
-/// Lets go of a picking that takes edges only, so that the form's own picking of faces starts
-/// afresh (Contour, back from its edges to the openings found).
+/// What the picking takes, while the viewport picks for a Manufacture form.
+fn taking(app: &SolveApp) -> Option<Accept> {
+    app.dialog.as_ref().filter(|d| matches!(d.kind, Kind::ManufacturePick)).and_then(|d| d.inputs.first()).map(|input| input.accept)
+}
+
+/// Lets go of a picking that takes other things than faces (edges, points), so that the form's
+/// own picking of faces starts afresh (Contour, back from its edges to the openings found; Drill,
+/// back from its points to holes).
 pub(crate) fn faces_again(app: &mut SolveApp) {
-    let takes = app.dialog.as_ref().filter(|d| matches!(d.kind, Kind::ManufacturePick)).and_then(|d| d.inputs.first()).map(|input| input.accept);
-    if takes.is_some_and(|accept| accept & FACES == 0) {
+    if taking(app).is_some_and(|accept| accept != FACES) {
         stop(app);
     }
+}
+
+/// What a picking of points takes: a vertex of the model, a point an edge or a face offers when
+/// the pointer is on it (a hole's or a boss's centre, an edge's middle and ends, as upstream's
+/// snap points wake them), or a place on a face.
+const SPOTS: Accept = FACES | VERTICES | SNAP_POINTS;
+
+/// For a form that takes points picked on the model (Drill's, decision 0040 of the CAM work):
+/// starts a picking that takes them (in place of another), and takes the point clicked since the
+/// last frame, if one was: a vertex, a centre woken on a round edge, or the place on a face.
+/// Nothing is left lit: the form says what it took, and its toolpath shows it.
+pub(crate) fn clicked_spot(app: &mut SolveApp, ctx: &egui::Context) -> Option<Vec3> {
+    if taking(app).is_some_and(|accept| accept != SPOTS) {
+        stop(app);
+    }
+    if on_model(app, ctx) {
+        start_taking(app, "manufacture.drill_points", SPOTS);
+    }
+    let shown = shown(app)?;
+    let point = shown.iter().rev().find_map(|sel| match sel {
+        Sel::Vertex { point, .. } | Sel::Face { point, .. } => Some(*point),
+        _ => None,
+    });
+    shown.clear();
+    point
 }
 
 /// For a form that takes edges picked on the model (a contour's chains, decision 0038 of the CAM
@@ -57,8 +87,7 @@ pub(crate) fn faces_again(app: &mut SolveApp) {
 /// point of the edge clicked since the last frame, if one was. Nothing is left lit: the form says
 /// what it took, and its toolpath shows it.
 pub(crate) fn clicked_edge(app: &mut SolveApp, ctx: &egui::Context) -> Option<Vec3> {
-    let takes = app.dialog.as_ref().filter(|d| matches!(d.kind, Kind::ManufacturePick)).and_then(|d| d.inputs.first()).map(|input| input.accept);
-    if takes.is_some_and(|accept| accept & crate::selection::EDGES == 0) {
+    if taking(app).is_some_and(|accept| accept & crate::selection::EDGES == 0) {
         stop(app);
     }
     if on_model(app, ctx) {
@@ -202,6 +231,17 @@ impl<K: Clone + PartialEq> Picks<K> {
         }
         let after: Vec<K> = self.faces.iter().map(|(_, thing)| thing.clone()).collect();
         (after != before).then_some(after)
+    }
+
+    /// The things picked and the points their faces were clicked at, in the order they were picked.
+    pub(crate) fn picked(&self) -> Vec<(K, Vec3)> {
+        self.faces
+            .iter()
+            .filter_map(|(sel, thing)| match sel {
+                Sel::Face { point, .. } => Some((thing.clone(), *point)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Keeps only the picks of the things `keep` takes: a form that cuts one group of things
@@ -376,6 +416,12 @@ impl HolePicks {
         };
         self.left_at = *group;
         changed
+    }
+
+    /// Forgets the picks: the form drills something else.
+    pub(crate) fn forget(&mut self, app: &mut SolveApp) {
+        self.clicked.forget(app);
+        self.picks.clear();
     }
 
     /// The holes of `group` that are cut: the ones picked on the model, or every one.

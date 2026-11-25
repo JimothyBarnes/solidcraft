@@ -16,9 +16,10 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    CamLibraryToolStatus, CamLibraryTools, CamPostEntry, CamPostLibrary, CamPostProperty, HoleBottom, HoleGroup, OperationPreview, Placement,
-    ProgramPreview, Simulated, ToolAt, ToolChoice, manufacture_data, manufacture_holes, manufacture_library, manufacture_post_folder,
-    manufacture_post_library, manufacture_preview, manufacture_program, manufacture_setup_preview, manufacture_tools,
+    CamLibraryToolStatus, CamLibraryTools, CamPostEntry, CamPostLibrary, CamPostProperty, HoleBottom, HoleGroup, MANUFACTURE_BREAKTHROUGH,
+    OperationPreview, Placement, ProgramPreview, Simulated, ToolAt, ToolChoice, manufacture_data, manufacture_hole_at, manufacture_hole_depth,
+    manufacture_holes, manufacture_library, manufacture_post_folder, manufacture_post_library, manufacture_preview, manufacture_program,
+    manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
@@ -206,11 +207,14 @@ const CYCLES: [(&str, &str); 4] = [
     ("chip_break", "manufacture.cycle_chip_break"),
     ("ream", "manufacture.cycle_ream"),
 ];
-/// How far past the part a through hole is drilled, at the drill's full diameter, mm.
-const BREAKTHROUGH: f64 = 1.0;
-/// How many pitches further a tap's tip goes through a through hole, so that its full thread
-/// is past the part and not only its chamfer.
-const TAP_LEAD: f64 = 3.0;
+/// What Drill drills (decision 0040 of the CAM work): a group of the holes found on the model,
+/// holes of any size picked on it, or points picked on it.
+const DRILL_GEOMETRIES: [(&str, &str); 3] =
+    [("found", "manufacture.drill_geometry_found"), ("picked", "manufacture.drill_geometry_picked"), ("points", "manufacture.drill_geometry_points")];
+const HOLES_PICKED: usize = 1;
+const POINTS_PICKED: usize = 2;
+/// How near a point clicked must be to a point picked to take it out, mm.
+const SAME_POINT: f64 = 0.5;
 const PATTERNS: [(&str, &str); 2] = [("zig_zag", "manufacture.pattern_zig_zag"), ("one_way", "manufacture.pattern_one_way")];
 const UNITS: [(&str, &str); 2] = [("mm", "manufacture.units_mm"), ("inch", "manufacture.units_inch")];
 const WORK_OFFSETS: [&str; 6] = ["G54", "G55", "G56", "G57", "G58", "G59"];
@@ -1390,16 +1394,31 @@ impl FaceForm {
     }
 }
 
-/// The depth a group of holes is drilled to when none is typed, from their top, and what it is
-/// measured to (decision 0012 of the CAM work): a through hole to the drill's full diameter a
-/// little past the part, a pointed hole to the full diameter at the end of its wall, and a
-/// flat-floored hole to the drill's tip, so that a point never cuts below the floor.
-fn drill_depth(group: &HoleGroup) -> (f64, &'static str) {
-    match group.bottom {
-        HoleBottom::Through => (group.depth + BREAKTHROUGH, "full_diameter"),
-        HoleBottom::Point => (group.depth, "full_diameter"),
-        HoleBottom::Flat => (group.depth, "tip"),
+/// The holes picked on the model, as Drill says them: how many, and of which sizes, the smallest
+/// first ("5 holes: 4 × Ø6.00, 1 × Ø10.00").
+fn picked_said(diameters: &[f64], units: &str, decimals: u8) -> String {
+    if diameters.is_empty() {
+        return tr("manufacture.drill_picked_none").to_string();
     }
+    let mut sizes: Vec<(f64, usize)> = Vec::new();
+    for &d in diameters {
+        match sizes.iter_mut().find(|(size, _)| (size - d).abs() <= 1e-6) {
+            Some((_, count)) => *count += 1,
+            None => sizes.push((d, 1)),
+        }
+    }
+    sizes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let sizes: Vec<String> = sizes
+        .iter()
+        .map(|(d, count)| {
+            solidcraft_ui_text::format(
+                "manufacture.drill_picked_size",
+                &[("count", &count.to_string()), ("diameter", &length_number(*d, units, decimals))],
+            )
+        })
+        .collect();
+    let key = if diameters.len() == 1 { "manufacture.drill_picked_value_one" } else { "manufacture.drill_picked_value" };
+    solidcraft_ui_text::format(key, &[("count", &diameters.len().to_string()), ("sizes", &sizes.join(", "))])
 }
 
 /// A group of holes as Drill offers it, diameter by depth: "4 × Ø6.00 × 20.00 mm, through".
@@ -1414,11 +1433,21 @@ fn group_label(group: &HoleGroup, units: &str, decimals: u8) -> String {
     solidcraft_ui_text::format("manufacture.drill_group", &[("count", &count), ("diameter", &diameter), ("depth", &depth), ("bottom", bottom)])
 }
 
-/// Drill: holes found on the model, a group at a time.
+/// Drill: holes found on the model, a group at a time, or holes of any size or points picked on it.
 pub(crate) struct DrillForm {
     setups: Vec<SetupChoice>,
     tools: Vec<ToolChoice>,
     pub setup: usize,
+    /// What it drills: its place in [`DRILL_GEOMETRIES`].
+    pub geometry: usize,
+    /// The geometry the picks on the model were made for: another one forgets them.
+    left_geometry: usize,
+    /// Holes picked: each with its group and its place in the group.
+    pub picked: super::picking::Picks<(usize, usize)>,
+    /// Holes picked: each to its own bottom, or to the depth typed below its own top.
+    pub own_bottoms: bool,
+    /// Points picked, in model coordinates.
+    pub points: Vec<[f64; 3]>,
     /// The holes the setup picked can drill, in groups, as the engine found them.
     found: Worked<Vec<HoleGroup>>,
     pub group: usize,
@@ -1474,6 +1503,11 @@ impl DrillForm {
             setups,
             tools: manufacture_tools(&app.session.doc, "drill"),
             setup,
+            geometry: 0,
+            left_geometry: 0,
+            picked: super::picking::Picks::new(),
+            own_bottoms: true,
+            points: Vec::new(),
             found: Worked::new(),
             group: 0,
             holes: super::picking::HolePicks::new(),
@@ -1515,8 +1549,49 @@ impl DrillForm {
         (form.rpm, form.typed_rpm) = base["rpm"].as_f64().map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = base["feed"].as_f64().map_or((0.0, false), |v| (v, true));
         form.heights = heights::HeightsForm::kept(app, id, [true; 4]);
+        // Its holes or points picked stay the ones it has.
+        let has = |key: &str| base[key].as_array().is_some_and(|picks| !picks.is_empty());
+        if has("picked") {
+            (form.geometry, form.own_bottoms) = (HOLES_PICKED, form.depth == 0.0);
+        } else if has("points") {
+            form.geometry = POINTS_PICKED;
+        }
+        form.left_geometry = form.geometry;
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
+    }
+
+    /// The holes picked on the model (holes picked) as the holes found have them: each hole's
+    /// group, its centre and the point it was clicked at, in the order they were picked.
+    fn picked_holes(&self) -> Vec<(&HoleGroup, solidcore_record::Vec3)> {
+        self.picked.picked().into_iter().filter_map(|((group, _), point)| self.groups().get(group).map(|g| (g, point))).collect()
+    }
+
+    /// Whether there is something to drill: a group of holes, or holes or points picked.
+    fn has_holes(&self) -> bool {
+        self.editing.is_some()
+            || match self.geometry {
+                HOLES_PICKED => !self.picked_holes().is_empty(),
+                POINTS_PICKED => !self.points.is_empty(),
+                _ => self.picked().is_some(),
+            }
+    }
+
+    /// Takes the point clicked on the model since the last frame, if one was: picked, or taken
+    /// out when one picked is that near.
+    fn take_point(&mut self, app: &mut SolveApp, ctx: &egui::Context) -> bool {
+        let Some(point) = super::picking::clicked_spot(app, ctx) else { return false };
+        // To the micron: a click is no more exact than that.
+        let micron = |v: f64| (v * 1e6).round() / 1e6;
+        let at = [micron(point.x), micron(point.y), micron(point.z)];
+        let near = |p: &[f64; 3]| (p[0] - at[0]).hypot(p[1] - at[1]).hypot(p[2] - at[2]) <= SAME_POINT;
+        match self.points.iter().position(near) {
+            Some(picked) => {
+                self.points.remove(picked);
+            }
+            None => self.points.push(at),
+        }
+        true
     }
 
     /// What is missing before holes can be drilled, if anything.
@@ -1559,11 +1634,7 @@ impl DrillForm {
     /// to: a drill's by the holes' bottom ([`drill_depth`]); a tap's to its tip, a few pitches
     /// past a through hole and one pitch short of a blind one's bottom.
     fn suited_depth(&self, group: &HoleGroup) -> (f64, &'static str) {
-        match (self.tap(), &group.bottom) {
-            (None, _) => drill_depth(group),
-            (Some(pitch), HoleBottom::Through) => (group.depth + BREAKTHROUGH + TAP_LEAD * pitch, "tip"),
-            (Some(pitch), _) => ((group.depth - pitch).max(pitch), "tip"),
-        }
+        manufacture_hole_depth(group, self.tap())
     }
 
     /// The `cam.op.drill` parameters: the group's centres and top, the depth its bottom asks for
@@ -1575,16 +1646,30 @@ impl DrillForm {
             (None, plain @ ("drill" | "ream")) => json!({"type": plain, "dwell": 0.0}),
             (None, pecking) => json!({"type": pecking, "peck": self.peck}),
         };
+        // Holes picked go to their own bottoms unless a depth is typed (to the tip).
+        let own = self.geometry == HOLES_PICKED && self.own_bottoms;
+        let depth = if own { 0.0 } else { self.depth };
+        let micron = |v: f64| (v * 1e6).round() / 1e6;
         let mut drill = match (&self.editing, self.picked()) {
             (Some(edited), _) => {
                 let mut kept = edited.base.clone();
                 // A cycle's dwell stays as kept; the form does not show it.
                 let plain = cycle["type"] == kept["cycle"]["type"] && matches!(cycle["type"].as_str(), Some("drill" | "ream"));
-                kept["depth"] = json!(self.depth);
+                kept["depth"] = json!(depth);
+                if self.geometry == HOLES_PICKED {
+                    kept["depth_to"] = json!("tip");
+                }
                 if !plain {
                     kept["cycle"] = cycle;
                 }
                 kept
+            }
+            (None, _) if self.geometry == HOLES_PICKED => {
+                let picked: Vec<[f64; 3]> = self.picked_holes().iter().map(|(_, p)| [micron(p.x), micron(p.y), micron(p.z)]).collect();
+                json!({"picked": picked, "depth": depth, "depth_to": "tip", "cycle": cycle})
+            }
+            (None, _) if self.geometry == POINTS_PICKED => {
+                json!({"points": self.points, "depth": depth, "depth_to": "tip", "cycle": cycle})
             }
             (None, Some(group)) => {
                 let (suited, to) = self.suited_depth(group);
@@ -1619,15 +1704,29 @@ impl DrillForm {
             if self.group >= self.groups().len() {
                 self.group = 0;
             }
-            if self.suited_to != Some(self.group) {
-                // Another group: its own depth, and the tool that suits it unless one was picked.
-                (self.suited_to, self.typed_depth) = (Some(self.group), false);
-                if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
+            if self.geometry == HOLES_PICKED {
+                // The drill that suits the smallest hole picked, unless one was picked.
+                let smallest = self.picked_holes().iter().map(|(group, _)| group.diameter).min_by(f64::total_cmp);
+                if let Some(diameter) = smallest.filter(|_| !self.picked_tool) {
                     self.tool = self.fitting_tool(diameter);
                 }
             }
-            if let Some(suited) = self.picked().map(|group| self.suited_depth(group).0).filter(|_| !self.typed_depth) {
-                self.depth = suited;
+            if self.geometry != 0 {
+                // A depth below each one's own top: as deep as the tool is wide until one is typed.
+                if !self.typed_depth {
+                    self.depth = self.tools.get(self.tool).map_or(self.depth, |tool| tool.diameter);
+                }
+            } else {
+                if self.suited_to != Some(self.group) {
+                    // Another group: its own depth, and the tool that suits it unless one was picked.
+                    (self.suited_to, self.typed_depth) = (Some(self.group), false);
+                    if let Some(diameter) = self.picked().map(|group| group.diameter).filter(|_| !self.picked_tool) {
+                        self.tool = self.fitting_tool(diameter);
+                    }
+                }
+                if let Some(suited) = self.picked().map(|group| self.suited_depth(group).0).filter(|_| !self.typed_depth) {
+                    self.depth = suited;
+                }
             }
         }
         if !self.typed_peck {
@@ -1662,7 +1761,7 @@ impl DrillForm {
     /// or the command refuses.
     pub fn accept(mut self, app: &mut SolveApp) -> Option<DrillForm> {
         self.refresh(app);
-        if self.missing().is_some() || (self.editing.is_none() && self.picked().is_none()) || self.worked.result.is_err() {
+        if self.missing().is_some() || !self.has_holes() || self.worked.result.is_err() {
             return Some(self);
         }
         let mut params = self.params();
@@ -1682,39 +1781,79 @@ impl DrillForm {
     fn show(mut self, app: &mut SolveApp, ctx: &egui::Context, units: &str, decimals: u8) -> Option<DrillForm> {
         // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
         self.heights.take_point(app, ctx);
-        // What is picked on the model is what is drilled (decision 0030 of the CAM work): a
-        // group chosen from the row's list forgets it, and a hole clicked is taken and worked out.
+        // What is picked on the model is what is drilled (decisions 0030 and 0040 of the CAM work):
+        // a group chosen from the row's list forgets it, and a hole or a point clicked is taken and
+        // worked out. Another geometry forgets what was picked for the last, and its depth.
         let picks = self.editing.is_none();
-        if picks {
+        if picks && self.geometry != self.left_geometry {
+            self.holes.forget(app);
+            self.picked.forget(app);
+            self.points.clear();
+            (self.left_geometry, self.suited_to, self.typed_depth) = (self.geometry, None, false);
+        }
+        if picks && self.geometry == 0 {
             self.holes.follow_row(app, self.group);
         }
         self.refresh(app);
         if picks {
             let found = self.found.get().map(|(key, _)| key);
             let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
-            let groups = self.found.get().map_or(&[][..], |(_, groups)| groups.as_slice());
-            if self.holes.take(app, ctx, found, &setup, groups, &mut self.group) {
+            let changed = match self.geometry {
+                HOLES_PICKED => {
+                    super::picking::faces_again(app);
+                    let on_hole = |app: &SolveApp, point| manufacture_hole_at(&app.session, &setup, point).ok().flatten();
+                    self.picked.take(app, ctx, "Holes", found, on_hole).is_some()
+                }
+                POINTS_PICKED => !self.heights.picking() && self.take_point(app, ctx),
+                _ => {
+                    super::picking::faces_again(app);
+                    let groups = self.found.get().map_or(&[][..], |(_, groups)| groups.as_slice());
+                    self.holes.take(app, ctx, found, &setup, groups, &mut self.group)
+                }
+            };
+            if changed {
                 self.refresh(app);
             }
         }
-        let picking = self.picked().filter(|_| picks).map(|group| self.holes.says(group.holes.len()));
+        let picking = self.picked().filter(|_| picks && self.geometry == 0).map(|group| self.holes.says(group.holes.len()));
+        let geometries = labels(&DRILL_GEOMETRIES);
+        let picked_widths: Vec<f64> = self.picked_holes().iter().map(|(group, _)| group.diameter).collect();
+        let holes_said = picked_said(&picked_widths, units, decimals);
+        let points_said = match self.points.len() {
+            0 => tr("manufacture.drill_picked_none").to_string(),
+            1 => tr("manufacture.drill_points_value_one").to_string(),
+            count => solidcraft_ui_text::format("manufacture.drill_points_value", &[("count", &count.to_string())]),
+        };
+        let picked_hint = tr(if self.picked.missed { "manufacture.hole_pick_missed" } else { "manufacture.drill_picked_hint" });
+        // Nothing picked yet: nothing to work out, and nothing refused.
+        let nothing = !self.has_holes();
         let setup_labels: Vec<&str> = self.setups.iter().map(|s| s.label.as_str()).collect();
         let tool_labels: Vec<String> = self.tools.iter().map(|t| format!("T{} {}", t.number, t.name)).collect();
         let tool_labels: Vec<&str> = tool_labels.iter().map(String::as_str).collect();
         let group_labels: Vec<String> = self.groups().iter().map(|group| group_label(group, units, decimals)).collect();
         let group_labels: Vec<&str> = group_labels.iter().map(String::as_str).collect();
         let cycles = labels(&CYCLES);
-        // The widths the form compares while a tool is being picked.
-        let hole_widths: Vec<f64> = self.groups().iter().map(|group| group.diameter).collect();
+        // The widths the form compares while a tool is being picked: the group's, or the
+        // smallest hole picked.
+        let narrowest = match self.geometry {
+            HOLES_PICKED => picked_widths.iter().copied().min_by(f64::total_cmp),
+            POINTS_PICKED => None,
+            _ => self.groups().get(self.group).map(|group| group.diameter),
+        };
         let tool_widths: Vec<f64> = self.tools.iter().map(|tool| tool.diameter).collect();
         let missing = self.missing();
-        let ready = missing.is_none() && (self.editing.is_some() || self.picked().is_some()) && self.worked.result.is_ok();
-        let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
+        let ready = missing.is_none() && self.has_holes() && self.worked.result.is_ok();
+        let time = self.worked.get().filter(|_| !nothing).map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         // How the depth is measured: for the holes picked, or as the operation being changed keeps it.
-        let past = format_length(BREAKTHROUGH, units, decimals);
+        let past = format_length(MANUFACTURE_BREAKTHROUGH, units, decimals);
         let tap = self.tap();
+        let own = self.geometry == HOLES_PICKED && self.own_bottoms;
         let measured = match &self.editing {
+            _ if own && tap.is_some() => Some(tr("manufacture.drill_depth_own_tap").to_string()),
+            _ if own => Some(solidcraft_ui_text::format("manufacture.drill_depth_own", &[("past", &past)])),
             _ if tap.is_some() => Some(tr("manufacture.drill_depth_tap").to_string()),
+            _ if self.geometry == POINTS_PICKED => Some(tr("manufacture.drill_depth_points").to_string()),
+            _ if self.geometry != 0 => Some(tr("manufacture.drill_depth_tip").to_string()),
             Some(edited) if edited.base["depth_to"] == "full_diameter" => Some(tr("manufacture.drill_depth_point").to_string()),
             Some(_) => Some(tr("manufacture.drill_depth_tip").to_string()),
             None => self.picked().map(|group| match group.bottom {
@@ -1725,9 +1864,10 @@ impl DrillForm {
         };
         // The holes of an operation being changed: how many it has.
         let kept_holes = self.editing.as_ref().map(|edited| {
-            let count = edited.base["holes"].as_array().map_or(0, Vec::len).to_string();
-            solidcraft_ui_text::format("manufacture.drill_holes_kept", &[("count", &count)])
+            let count: usize = ["holes", "picked", "points"].iter().map(|key| edited.base[*key].as_array().map_or(0, Vec::len)).sum();
+            solidcraft_ui_text::format("manufacture.drill_holes_kept", &[("count", &count.to_string())])
         });
+        let holes_row = tr(if self.geometry == POINTS_PICKED { "manufacture.drill_points" } else { "manufacture.drill_holes" });
         // The setup picked is the one the viewport draws, so the holes are seen on its own stock.
         if self.drawn_setup != Some(self.setup)
             && let Some(picked) = self.setups.get(self.setup)
@@ -1754,11 +1894,17 @@ impl DrillForm {
                 if let (Some(kept), Some(setup)) = (&kept_holes, setup_labels.first()) {
                     // An operation stays in its setup and on its holes.
                     ui_kit::value_row(ui, tr("manufacture.field_setup"), setup);
-                    ui_kit::value_row(ui, tr("manufacture.drill_holes"), kept);
+                    ui_kit::value_row(ui, tr("manufacture.drill_geometry"), geometries.get(self.geometry).copied().unwrap_or_default());
+                    ui_kit::value_row(ui, holes_row, kept);
                 } else {
                     ui_kit::choice_row(ui, tr("manufacture.field_setup"), "manufacture_drill_setup", &mut self.setup, &setup_labels);
+                    ui_kit::choice_row(ui, tr("manufacture.drill_geometry"), "manufacture_drill_geometry", &mut self.geometry, &geometries);
                 }
                 if kept_holes.is_some() {
+                } else if self.geometry == POINTS_PICKED {
+                    // Points need no hole: a vertex, a centre or a place on a face.
+                    ui_kit::value_row(ui, holes_row, &points_said);
+                    ui_kit::text(ui, tr("manufacture.drill_points_hint"), ui_kit::Text::Note("manufacture_drill_points_hint"));
                 } else if group_labels.is_empty() {
                     // Why no holes could be looked for, or that there are none to drill from here.
                     match self.found.trouble().filter(|why| !why.is_empty()) {
@@ -1768,6 +1914,9 @@ impl DrillForm {
                         }
                     }
                     return;
+                } else if self.geometry == HOLES_PICKED {
+                    ui_kit::value_row(ui, holes_row, &holes_said);
+                    ui_kit::text(ui, picked_hint, ui_kit::Text::Note("manufacture_drill_picked_hint"));
                 } else {
                     ui_kit::choice_row(ui, tr("manufacture.drill_holes"), "manufacture_drill_holes", &mut self.group, &group_labels);
                     if let Some(picking) = &picking {
@@ -1780,7 +1929,7 @@ impl DrillForm {
                 self.picked_tool |= self.tool != tool;
                 // A tap is wider than the hole it threads, and cuts with its own cycle at its pitch.
                 let tap = self.tools.get(self.tool).and_then(|tool| tool.pitch);
-                let wider = hole_widths.get(self.group).zip(tool_widths.get(self.tool)).is_some_and(|(hole, tool)| *tool > hole + 1e-6);
+                let wider = narrowest.zip(tool_widths.get(self.tool)).is_some_and(|(hole, tool)| *tool > hole + 1e-6);
                 if kept_holes.is_none() && tap.is_none() && wider {
                     ui_kit::status_line(ui, tr("manufacture.drill_tool_wider"), ui_kit::StatusTone::Warning);
                 }
@@ -1795,8 +1944,19 @@ impl DrillForm {
                             ui_kit::row(ui, tr("manufacture.drill_peck"), |ui| ui_kit::length_field(ui, &mut self.peck, units, decimals)).changed();
                     }
                 }
-                self.typed_depth |=
-                    ui_kit::row(ui, tr("manufacture.drill_depth"), |ui| ui_kit::length_field(ui, &mut self.depth, units, decimals)).changed();
+                // Holes picked go each to its own bottom, or a depth typed below each one's top.
+                let own_row = self.geometry == HOLES_PICKED;
+                if own_row
+                    && ui_kit::checkbox(ui, tr("manufacture.drill_own_bottoms"), &mut self.own_bottoms).changed()
+                    && !self.own_bottoms
+                    && self.depth <= 0.0
+                {
+                    self.depth = tool_widths.get(self.tool).copied().unwrap_or(1.0);
+                }
+                if !(own_row && self.own_bottoms) {
+                    self.typed_depth |=
+                        ui_kit::row(ui, tr("manufacture.drill_depth"), |ui| ui_kit::length_field(ui, &mut self.depth, units, decimals)).changed();
+                }
                 if let Some(measured) = &measured {
                     ui_kit::text(ui, measured, ui_kit::Text::Note("manufacture_drill_measured"));
                 }
@@ -1824,7 +1984,7 @@ impl DrillForm {
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_drill_preview_note"));
                 }
-                refusal(ui, self.error.as_deref().or(self.worked.trouble()));
+                refusal(ui, self.error.as_deref().or(self.worked.trouble().filter(|_| !nothing)));
             });
         if new_tool {
             let (kind, setup) =

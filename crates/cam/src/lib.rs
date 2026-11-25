@@ -45,7 +45,7 @@ pub use contour::{
     DEFAULT_TAB_HEIGHT, DEFAULT_TAB_WIDTH, MAX_CONTOUR_LEVELS, MAX_CONTOUR_OPENINGS, MAX_CONTOUR_PASSES, MAX_TABS, Tabs,
 };
 pub use cycle::{CycleMotion, DrillCycle, G98Rule, MAX_CYCLE_DISTANCE, MAX_PECKS, MIN_HOLE_DEPTH, MIN_PECK, PeckRetract};
-pub use drill::{Between, DepthTo, DrillOp, Drilled, HoleOrder, MAX_HOLES};
+pub use drill::{Between, DepthTo, DrillOp, Drilled, HoleAt, HoleOrder, MAX_HOLES};
 pub use engrave::{DEFAULT_ENGRAVE_DEPTH, EngraveOp, Engraved, MAX_ENGRAVE_PIECES, MIN_ENGRAVE_DEPTH};
 pub use face::{DEFAULT_FACE_CLEAR, DEFAULT_FACE_STEPOVER, FaceOp, FacePattern, Faced, MAX_FACE_LEVELS, MAX_FACE_PASSES};
 pub use feeds::GENERIC_MAX_RPM;

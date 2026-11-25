@@ -762,11 +762,11 @@ fn drill_says_what_is_missing_and_when_there_is_nothing_to_drill() {
     let why = drill_form(&mut h).worked.trouble().unwrap_or_default().to_string();
     assert!(why.contains("flute"), "{why:?}");
     assert!(h.widget(&why).is_some());
-    // The depth each kind of bottom asks for.
+    // The depth each kind of bottom asks for (decision 0012), the engine's rule.
     let group = |bottom| HoleGroup { diameter: 6.0, top: -1.0, depth: 20.0, bottom, holes: vec![[0.0, 0.0]] };
-    assert_eq!(drill_depth(&group(HoleBottom::Through)), (21.0, "full_diameter"));
-    assert_eq!(drill_depth(&group(HoleBottom::Point)), (20.0, "full_diameter"));
-    assert_eq!(drill_depth(&group(HoleBottom::Flat)), (20.0, "tip"));
+    assert_eq!(manufacture_hole_depth(&group(HoleBottom::Through), None), (21.0, "full_diameter"));
+    assert_eq!(manufacture_hole_depth(&group(HoleBottom::Point), None), (20.0, "full_diameter"));
+    assert_eq!(manufacture_hole_depth(&group(HoleBottom::Flat), None), (20.0, "tip"));
 }
 
 /// A right click on a Browser row, and a pick from the menu it opens.
@@ -2580,6 +2580,91 @@ fn drill_takes_the_holes_clicked_on_the_model() {
     assert_eq!((drill_form(&mut h).holes.picks.clone(), h.app.dialog.is_none()), (vec![], true));
     press(&mut h, "Cancel");
     assert!(h.app.dialog.is_none());
+}
+
+#[test]
+fn drill_takes_holes_of_any_size_and_points_clicked_on_the_model() {
+    let mut h = harness();
+    // The block's holes (`holed`): three of 6 through it, two of 8 with flat floors 10 deep, and
+    // the fourth of 6 under the counterbore of 12. T1 is a 6 mm drill and T2 an 8 mm one.
+    holed(&mut h);
+    add_tool(&mut h, "drill", 6.0);
+    add_tool(&mut h, "drill", 8.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    from_the_corner(&mut h);
+    ribbon(&mut h, "cam.op.drill");
+    // Holes picked on the model (decision 0040): none yet, and how to pick them.
+    drill_form(&mut h).geometry = 1;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.drill_picked_none")).is_some() && h.widget(tr("manufacture.drill_picked_hint")).is_some());
+    assert!(h.widget(tr("manufacture.drill_own_bottoms")).is_some() && drill_form(&mut h).worked.trouble().is_some());
+    assert!(h.widget(tr("manufacture.drill_depth")).is_none(), "each hole to its own bottom: no depth to type");
+    // A point 2 mm down the far side of the wall of the hole at `x`, `y` of the block.
+    let wall = |x: f64, y: f64, diameter: f64| {
+        let across = std::f64::consts::FRAC_1_SQRT_2 * 0.5 * diameter;
+        [x - across, y + across, 18.0]
+    };
+    // A hole of 8 and one of 6, of two groups: both are drilled, each to its own bottom, with the
+    // drill that suits the smaller.
+    click_model(&mut h, wall(30.0, 10.0, 8.0));
+    click_model(&mut h, wall(50.0, 30.0, 6.0));
+    let form = drill_form(&mut h);
+    let drill = form.params()["drill"].clone();
+    assert_eq!((form.tool, drill["picked"].as_array().map(Vec::len), drill["depth"].as_f64(), drill.get("holes")), (0, Some(2), Some(0.0), None));
+    assert!(h.widget("2 holes: 1 × Ø6.00, 1 × Ø8.00").is_some());
+    // The hole of 6 to the drill's full diameter 1 past the part (Z -1 - 21 - 3 / tan 59°); the
+    // hole of 8 to the tip at its floor (Z -11).
+    let numbers = drill_form(&mut h).worked.get().map(|(_, p)| p.numbers.clone()).unwrap();
+    assert!((numbers["bottom"].as_f64().unwrap() + 22.0 + 3.0 / 59f64.to_radians().tan()).abs() < 1e-9, "{numbers}");
+    assert!(h.widget(&solidcraft_ui_text::format("manufacture.drill_depth_own", &[("past", "1.00 mm")])).is_some());
+    // The block's top is on no hole, and the form says so; a click on the hole of 8 again takes it out.
+    click_model(&mut h, [30.0, 20.0, 20.0]);
+    assert!(drill_form(&mut h).picked.missed && h.widget(tr("manufacture.hole_pick_missed")).is_some());
+    click_model(&mut h, wall(30.0, 10.0, 8.0));
+    assert!(h.widget("1 hole: 1 × Ø6.00").is_some());
+    // Not to its own bottom: a depth typed, below each hole's own top, to the tip.
+    let form = drill_form(&mut h);
+    form.own_bottoms = false;
+    (form.depth, form.typed_depth) = (2.0, true);
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.drill_depth")).is_some());
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let made = data(&mut h)["setups"][0]["operations"][0]["operation"]["drill"].clone();
+    assert_eq!((made["picked"].as_array().map(Vec::len), made["depth"].as_f64(), made["depth_to"].as_str()), (Some(1), Some(2.0), Some("tip")));
+    assert!(h.app.dialog.is_none());
+    // Points picked: a place on the block's top, drilled from there as deep as the drill is wide
+    // until a depth is typed. (Nearer the face's middle the click would take the middle itself, a
+    // point the face offers, as Move's points do.) A click there again takes it out.
+    ribbon(&mut h, "cam.op.drill");
+    drill_form(&mut h).geometry = 2;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.drill_points_hint")).is_some() && h.widget(tr("manufacture.drill_picked_none")).is_some());
+    click_model(&mut h, [20.0, 20.0, 20.0]);
+    let form = drill_form(&mut h);
+    assert_eq!(form.points.len(), 1, "{:?}", h.app.status);
+    let at = form.points[0];
+    assert!((at[0] - 20.0).abs() < 0.2 && (at[1] - 20.0).abs() < 0.2 && (at[2] - 20.0).abs() < 1e-6, "{at:?}");
+    assert_eq!((form.params()["drill"]["points"].clone(), form.params()["drill"]["depth"].as_f64()), (json!([at]), Some(6.0)));
+    assert!(h.widget(tr("manufacture.drill_points_value_one")).is_some() && h.widget(tr("manufacture.drill_depth_points")).is_some());
+    click_model(&mut h, [20.0, 20.0, 20.0]);
+    assert!(drill_form(&mut h).points.is_empty());
+    // Two places, and Create: one Drill of both, each from its own height (the block's top, Z -1).
+    click_model(&mut h, [20.0, 20.0, 20.0]);
+    click_model(&mut h, [40.0, 20.0, 20.0]);
+    assert_eq!(drill_form(&mut h).points.len(), 2);
+    let numbers = drill_form(&mut h).worked.get().map(|(_, p)| p.numbers.clone()).unwrap();
+    assert!((numbers["bottom"].as_f64().unwrap() + 7.0).abs() < 1e-6, "{numbers}");
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let made = data(&mut h)["setups"][0]["operations"][1]["operation"]["drill"].clone();
+    assert_eq!((made["points"].as_array().map(Vec::len), made.get("picked")), (Some(2), None), "{made}");
+    // Changed from its row, it keeps its points: its geometry is said, not offered.
+    row_menu(&mut h, "Drill 2 (T1)", "manufacture.edit");
+    assert_eq!((open(&h), drill_form(&mut h).geometry), ("drill", 2));
+    assert!(h.widget(tr("manufacture.drill_geometry_points")).is_some());
+    press(&mut h, "OK");
+    assert_eq!(data(&mut h)["setups"][0]["operations"][1]["operation"]["drill"]["points"], made["points"]);
 }
 
 #[test]

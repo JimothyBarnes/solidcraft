@@ -74,6 +74,8 @@ fn placed_with(on_top: f64) -> Placement {
 fn op(holes: Vec<[f64; 2]>, depth: f64) -> DrillOp {
     DrillOp {
         holes,
+        picked: vec![],
+        points: vec![],
         order: HoleOrder::Nearest,
         top: None,
         depth,
@@ -253,6 +255,15 @@ fn what_a_tool_or_the_heights_cannot_do_is_refused() {
         (with(&|o| o.rpm = Some(-1.0)), drill10(), "rpm"),
         (with(&|o| o.feed = Some(f64::NAN)), drill10(), "feed"),
         (with(&|o| o.cycle = DrillCycle::Peck { peck: 0.0 }), drill10(), "peck"),
+        // Holes, holes picked and points picked are three ways of saying where: one at a time.
+        (with(&|o| o.picked = vec![[0.0, 0.0, 0.0]]), drill10(), "one of them, not several"),
+        (with(&|o| (o.holes, o.points) = (vec![], vec![[0.0, 0.0, f64::NAN]])), drill10(), "points picked must be finite"),
+        (with(&|o| (o.holes, o.picked) = (vec![], vec![[0.0, 0.0, 0.0]; 10_001])), drill10(), "1 to 10000 holes"),
+        (with(&|o| (o.holes, o.points, o.top) = (vec![], vec![[0.0, 0.0, 0.0]], Some(-1.0))), drill10(), "their own tops"),
+        // A point has no bottom of its own to go to: its depth is the operation's.
+        (with(&|o| (o.holes, o.points, o.depth) = (vec![], vec![[0.0, 0.0, 0.0]], 0.0)), drill10(), "depth"),
+        // Holes picked are found on the model by the engine, not here.
+        (with(&|o| (o.holes, o.picked) = (vec![], vec![[0.0, 0.0, 0.0]])), drill10(), "found there"),
     ];
     for (o, tool, expect) in cases {
         let e = drilled(&o, &tool).unwrap_err().to_string();
@@ -317,4 +328,101 @@ fn a_tap_turns_a_whole_number_of_times_a_minute_and_feeds_one_pitch_a_turn() {
     let ctx = crate::ProgramContext { program_number: 7, program_name: "Tapped".into(), ..crate::ProgramContext::default() };
     let posted = crate::Post::builtin("haas_mill").unwrap().write(&drilled(&tapping, &tap).unwrap().toolpath, &ctx).unwrap();
     assert!(posted.text.contains("\nS318 M3\n") && posted.text.contains("\nG99 G84 X0. Y0. Z-13. R5. F477.\nX20. Y0.\nG80\n"), "{}", posted.text);
+}
+
+/// Three holes of a stepped part, as the engine gives holes picked on the model (decision 0040 of
+/// the CAM work), as listed: one on a step 6 below the part's top (-7), 5 deep to the full
+/// diameter; one from the part's top (-1), 12 deep to the tip; and one at the floor of a pocket
+/// (-11), 4 deep.
+fn stepped() -> [HoleAt; 3] {
+    [
+        HoleAt { at: [10.0, 0.0], top: -7.0, depth: 5.0, depth_to: DepthTo::FullDiameter },
+        HoleAt { at: [0.0, 0.0], top: -1.0, depth: 12.0, depth_to: DepthTo::Tip },
+        HoleAt { at: [20.0, 0.0], top: -11.0, depth: 4.0, depth_to: DepthTo::Tip },
+    ]
+}
+
+#[test]
+fn holes_of_their_own_heights_go_each_to_its_own_bottom_and_cross_at_the_highest_r_plane() {
+    let mut o = op(vec![], 0.0);
+    o.order = HoleOrder::AsGiven;
+    // R 2 above each hole's own top: -5, 1 and -9. The tool goes across at 1, the highest, so that
+    // it never runs into the part above a lower hole; down there first, as the first hole's R is lower.
+    o.r_above = Some(2.0);
+    let point = 5.0 / 59f64.to_radians().tan();
+    let d = o.toolpath_of(&stepped(), None, &drill10(), &placed(), Some("aluminium")).unwrap();
+    assert!(close(d.bottom, -12.0 - point) && d.r == 1.0, "{} {}", d.bottom, d.r);
+    let hole = |x: f64, z: f64, r: f64| Move::Drill { to: p(x, 0.0, z), r, retract: 1.0, cycle: DrillCycle::Peck { peck: 4.0 }, feed: d.feed };
+    assert_eq!(
+        d.toolpath.moves,
+        vec![
+            Move::ToolChange { tool: 3 },
+            Move::Spindle { rpm: d.rpm, direction: SpindleDirection::Clockwise },
+            Move::Coolant { mode: Coolant::Flood },
+            Move::Rapid { to: p(10.0, 0.0, 25.0) },
+            Move::Rapid { to: p(10.0, 0.0, 1.0) },
+            hole(10.0, -12.0 - point, -5.0),
+            hole(0.0, -13.0, 1.0),
+            hole(20.0, -15.0, -9.0),
+            Move::Rapid { to: p(20.0, 0.0, 25.0) },
+            Move::Coolant { mode: Coolant::Off },
+            Move::SpindleStop,
+        ]
+    );
+    // Each hole posts as a canned cycle that returns to its own R plane (G99) or to where it
+    // started (G98), and the program reads back as the toolpath, on both kinds of control.
+    let ctx = crate::ProgramContext { program_number: 8, program_name: "Stepped".into(), ..crate::ProgramContext::default() };
+    for post in ["haas_mill", "fanuc_mill"] {
+        let posted = crate::Post::builtin(post).unwrap().write(&d.toolpath, &ctx).unwrap();
+        assert!(posted.notes.iter().all(|n| !n.contains("plain moves")), "{post}: {:?}", posted.notes);
+        let text = posted.text;
+        assert!(text.contains("G98 G83 X10. Y0. Z-15.004 R-5. Q4. F") && text.contains("G99 G83 X0. Y0. Z-13. R1. Q4. F"), "{post}: {text}");
+        assert!(text.contains("G98 G83 X20. Y0. Z-15. R-9. Q4. F"), "{post}: {text}");
+    }
+    // The same R plane for all (the setup's retract height): as one height of holes always was,
+    // straight down from the clearance height to the first.
+    o.r_above = None;
+    let d = o.toolpath_of(&stepped(), None, &drill10(), &placed(), Some("aluminium")).unwrap();
+    assert_eq!(d.r, 5.0);
+    assert!(matches!(d.toolpath.moves.get(4), Some(Move::Drill { r: 5.0, retract: 5.0, .. })), "{:?}", d.toolpath.moves);
+    // Over clamps: up to the clearance height between holes, from each hole's own R plane.
+    (o.r_above, o.between) = (Some(2.0), Between::Clearance);
+    let d = o.toolpath_of(&stepped(), None, &drill10(), &placed(), Some("aluminium")).unwrap();
+    let drills: Vec<(f64, f64)> =
+        d.toolpath.moves.iter().filter_map(|m| if let Move::Drill { r, retract, .. } = m { Some((*r, *retract)) } else { None }).collect();
+    assert_eq!(drills, vec![(-5.0, 25.0), (1.0, 25.0), (-9.0, 25.0)]);
+    assert!(matches!(d.toolpath.moves.get(4), Some(Move::Drill { .. })));
+}
+
+#[test]
+fn holes_of_their_own_heights_are_refused_by_the_deepest_or_the_highest() {
+    let o = op(vec![], 0.0);
+    let mut holes = stepped();
+    // 41 deep to the tip is past 40 mm of flutes: that hole is named.
+    holes[2].depth = 41.0;
+    let e = o.toolpath_of(&holes, None, &drill10(), &placed(), Some("aluminium")).unwrap_err().to_string();
+    assert!(e.contains("the deepest hole (X 20.000 Y 0.000) goes 41 mm deep") && e.contains("40 mm of flutes"), "{e}");
+    // R 2 above a hole on a boss 24 up is above the clearance height (25).
+    let mut o = op(vec![], 0.0);
+    o.r_above = Some(2.0);
+    let holes = [HoleAt { at: [0.0, 0.0], top: 24.0, depth: 5.0, depth_to: DepthTo::Tip }];
+    let e = o.toolpath_of(&holes, None, &drill10(), &placed(), Some("aluminium")).unwrap_err().to_string();
+    assert!(e.contains("the R plane (26 mm) is above the clearance height (25 mm)"), "{e}");
+    let bad = |h: HoleAt| o.toolpath_of(&[h], None, &drill10(), &placed(), Some("aluminium")).unwrap_err().to_string();
+    let h = HoleAt { at: [0.0, 0.0], top: 0.0, depth: 5.0, depth_to: DepthTo::Tip };
+    assert!(bad(HoleAt { depth: 0.0, ..h }).contains("depth"));
+    assert!(bad(HoleAt { top: f64::NAN, ..h }).contains("finite"));
+    assert!(bad(HoleAt { at: [1e300, 0.0], ..h }).contains("finite"));
+    assert!(o.toolpath_of(&[], None, &drill10(), &placed(), Some("aluminium")).unwrap_err().to_string().contains("1 to 10000 holes"));
+}
+
+#[test]
+fn holes_picked_and_points_are_plain_json_too() {
+    let o: DrillOp = serde_json::from_str(r#"{"picked": [[1, 2, 3]], "cycle": {"type": "drill", "dwell": 0}}"#).unwrap();
+    assert_eq!((o.picked.clone(), o.depth, o.holes.len()), (vec![[1.0, 2.0, 3.0]], 0.0, 0));
+    assert!(o.validate(&drill10()).is_ok());
+    let json = serde_json::to_string(&o).unwrap();
+    assert!(!json.contains("holes") && !json.contains("points") && json.contains("picked"), "{json}");
+    let o: DrillOp = serde_json::from_str(r#"{"points": [[1, 2, 3]], "depth": 2, "cycle": {"type": "drill", "dwell": 0}}"#).unwrap();
+    assert_eq!(serde_json::from_value::<DrillOp>(serde_json::to_value(&o).unwrap()).unwrap(), o);
 }

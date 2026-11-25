@@ -3378,3 +3378,107 @@ fn post_files_in_the_post_folder_are_listed_added_and_posted_with() {
     assert_eq!(run(&mut s, "cam.posts.list", json!({"folder": ""}))["unread"][0]["why"], json!("invalid post folder path"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The drill moves of operation `id`: where each goes down to, its R plane and what it returns to.
+fn drill_moves(s: &mut Session, id: &str) -> Vec<([f64; 3], f64, f64)> {
+    let t = run(s, "cam.op.toolpath", json!({"id": id}));
+    let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
+    let rounded = |v: f64| (v * 1e6).round() / 1e6;
+    t["toolpath"]["moves"]
+        .as_array()
+        .map(|moves| {
+            moves
+                .iter()
+                .filter(|m| m["kind"] == "drill")
+                .map(|m| ([rounded(f(&m["to"][0])), rounded(f(&m["to"][1])), rounded(f(&m["to"][2]))], f(&m["r"]), f(&m["retract"])))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn holes_of_any_size_picked_on_the_model_are_drilled_each_from_its_own_top_to_its_own_bottom() {
+    // The block with its holes (`holed`), its corner at the model's origin and its top at Z 20; in
+    // the WCS its top is Z -1 and its middle X 0 Y 0. One point on the wall of a hole of 6 through
+    // it, one on the floor of a hole of 8 (10 deep, flat), one on the counterbore's wall (12, 4
+    // deep, flat) and one on the wall of the hole of 6 under it, whose top is the counterbore's
+    // floor (Z -5); and the first hole again, lower down its wall.
+    let mut s = holed();
+    let picked = json!([[53.0, 10.0, 12.0], [30.0, 10.0, 10.0], [16.0, 10.0, 18.0], [13.0, 10.0, 8.0], [47.0, 10.0, 5.0]]);
+    let drill = json!({"picked": picked, "r_above": 2, "cycle": {"type": "drill", "dwell": 0}});
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": drill}));
+    // Each by its own bottom (decision 0012): a through hole 1 past the part to the drill's full
+    // diameter (its 118° point is 5 / tan 59° = 3.004 long), a flat floor to the tip. R 2 above
+    // each hole's own top; between holes up to the highest R, 1. The first hole picked twice is
+    // drilled once, and the nearest is drilled next.
+    let point = 5.0 / 59f64.to_radians().tan();
+    let deep = |v: f64| (v * 1e6).round() / 1e6;
+    assert_eq!(
+        drill_moves(&mut s, "op-1"),
+        vec![
+            ([20.0, -10.0, deep(-22.0 - point)], 1.0, 1.0),
+            ([0.0, -10.0, -11.0], 1.0, 1.0),
+            ([-20.0, -10.0, -5.0], 1.0, 1.0),
+            ([-20.0, -10.0, deep(-22.0 - point)], -3.0, 1.0),
+        ]
+    );
+    // The design keeps the points picked, not the holes they found.
+    let data = run(&mut s, "cam.data", json!({}))["data"].clone();
+    let kept = &data["setups"][0]["operations"][0]["operation"]["drill"];
+    assert_eq!((kept["picked"].clone(), kept.get("holes")), (picked.clone(), None), "{kept}");
+    // Posted for the Haas: each hole a canned cycle back to its own R plane, or to the R plane the
+    // tool came across at; the program reads back as its toolpath (cam.post refuses one that doesn't).
+    let haas = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
+    let text = haas["text"].as_str().unwrap();
+    assert!(text.contains("G99 G81 X20. Y-10. Z-25.004 R1. F") && text.contains("G98 G81 X-20. Y-10. Z-25.004 R-3. F"), "{text}");
+    assert!(haas["notes"].as_array().is_none_or(|notes| notes.iter().all(|n| !n.as_str().unwrap_or("").contains("plain moves"))), "{haas}");
+    // A depth given is each hole's own depth below its own top.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": {"picked": picked, "depth": 3, "cycle": {"type": "drill", "dwell": 0}}}));
+    let bottoms: Vec<f64> = drill_moves(&mut s, "op-1").iter().map(|(to, ..)| to[2]).collect();
+    assert_eq!(bottoms, vec![-4.0, -4.0, -4.0, -8.0]);
+    // The heights' own bottom is each hole's, and its offset goes to every one: 0.5 deeper each.
+    let heights = json!({"bottom": {"from": "feature", "offset": -0.5}});
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": heights, "drill": {"picked": picked, "cycle": {"type": "drill", "dwell": 0}}}));
+    let bottoms: Vec<f64> = drill_moves(&mut s, "op-1").iter().map(|(to, ..)| to[2]).collect();
+    assert_eq!(bottoms, vec![deep(-22.5 - point), -11.5, -5.5, deep(-22.5 - point)]);
+    // Another reference is one Z for all of them: Z -8, to each one's full diameter or tip.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {"bottom": {"from": "z", "offset": -8}}}));
+    let bottoms: Vec<f64> = drill_moves(&mut s, "op-1").iter().map(|(to, ..)| to[2]).collect();
+    assert_eq!(bottoms, vec![deep(-8.0 - point), -8.0, -8.0, deep(-8.0 - point)]);
+}
+
+#[test]
+fn a_hole_picked_that_is_not_there_is_refused_by_its_point() {
+    let mut s = holed();
+    // A point on the block's top is on no hole: refused with it, when the toolpath is worked out.
+    let drill = json!({"picked": [[53.0, 10.0, 12.0], [30.0, 20.0, 20.0]], "cycle": {"type": "drill", "dwell": 0}});
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": drill}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("the hole picked at X 30.000 Y 20.000 Z 20.000 is not there now"), "{why}");
+    // Holes, holes picked and points are one at a time, and a point's depth is the operation's.
+    let both = json!({"holes": [[0, 0]], "picked": [[53.0, 10.0, 12.0]], "depth": 5, "cycle": {"type": "drill", "dwell": 0}});
+    assert!(refused(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": both})).contains("one of them, not several"));
+    let points = json!({"points": [[30.0, 20.0, 20.0]], "cycle": {"type": "drill", "dwell": 0}});
+    assert!(refused(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": points})).contains("depth"));
+}
+
+#[test]
+fn points_picked_on_the_model_are_drilled_from_their_own_heights() {
+    // Two places on the block's top (Z -1 in the WCS), between its holes, and one on the floor of
+    // a hole of 8 (10 down): 2 deep each to the drill's tip, as the operation says.
+    let mut s = holed();
+    let drill = json!({"points": [[30.0, 20.0, 20.0], [20.0, 20.0, 20.0], [30.0, 10.0, 10.0]], "depth": 2, "cycle": {"type": "drill", "dwell": 0}});
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": drill}));
+    assert_eq!(drill_moves(&mut s, "op-1"), vec![([0.0, 0.0, -3.0], 5.0, 5.0), ([-10.0, 0.0, -3.0], 5.0, 5.0), ([0.0, -10.0, -13.0], 5.0, 5.0)]);
+    // The 10 mm drill is wider than the hole of 8: going down it, it cuts its wall, a gouge.
+    let gouges = |s: &mut Session| run(s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.5}))["gouge_count"].as_u64();
+    assert_eq!(gouges(&mut s), Some(1));
+    let drill = json!({"points": [[30.0, 20.0, 20.0], [20.0, 20.0, 20.0]], "depth": 2, "cycle": {"type": "drill", "dwell": 0}});
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "drill": drill}));
+    // Where the model has no hole the point is meant to cut into it: the simulation does not
+    // call that a gouge. A place drilled as one of a group's holes is one.
+    assert_eq!(gouges(&mut s), Some(0));
+    let drill = json!({"holes": [[10.0, 0.0]], "depth": 2, "cycle": {"type": "drill", "dwell": 0}});
+    run(&mut s, "cam.op.drill", json!({"setup": "setup-1", "tool": 3, "drill": drill}));
+    assert_eq!(gouges(&mut s), Some(1));
+}

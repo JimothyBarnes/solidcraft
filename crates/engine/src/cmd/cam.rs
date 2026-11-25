@@ -75,7 +75,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: one of the design's numbers, toolpath: {start, moves} in mm and mm/min → id of the new operation"),
     CommandSpec::new("cam.op.drill", "Drill", crate::checked!("cam.op.drill", op_drill)).icon("cam_drill").doc_only()
         .contract(&TypedContract::<CamOpDrillParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a drill, spot drill, reamer, tap or flat end mill, drill: {holes: [[x, y]] in the WCS, depth, cycle ({type: drill, dwell} | {type: peck | chip_break, peck} | {type: ream, dwell}: fed in and fed back out, for a reamer; a tap's is {type: tap, pitch}, its own pitch, and it takes a speed and no feed), order?, top?, depth_to?, r_above?, between?, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
+        .params("setup: id, name?, tool: a drill, spot drill, reamer, tap or flat end mill, drill: {holes: [[x, y]] in the WCS from one top, or picked: [[x, y, z]] a point on the wall or floor of each hole, in model coordinates, holes of any size each from its own top (to its own bottom unless depth is given), or points: [[x, y, z]] in model coordinates, each drilled from its own height; depth, cycle ({type: drill, dwell} | {type: peck | chip_break, peck} | {type: ream, dwell}: fed in and fed back out, for a reamer; a tap's is {type: tap, pitch}, its own pitch, and it takes a speed and no feed), order?, top? (holes only), depth_to?, r_above?: each hole's R plane above its own top, between?: the tool crosses at the highest R plane or the clearance height, rpm?, feed?} → id of the new operation; its toolpath is worked out when asked for"),
     CommandSpec::new("cam.op.face", "Face", crate::checked!("cam.op.face", op_face)).icon("cam_face").doc_only()
         .contract(&TypedContract::<CamOpFaceParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a face mill, flat end mill or bull-nose end mill, face?: {top?, bottom?, stepdown?, stepover?, clear?, pattern?: zig_zag | one_way, rpm?, feed?} → id of the new operation: the stock's top down to the model's top in straight passes along X"),
@@ -513,7 +513,7 @@ const HOLE_PICK_REACH: f64 = 0.5;
 /// further from its axis than its wall and a little more, no higher than its top, and no lower
 /// than a drill's point may reach under its wall's end (the hole's own width). Of several (a
 /// counterbore over a smaller hole) the one whose wall the point is nearest.
-fn hole_picked(groups: &[HoleGroup], at: solidcore_record::Vec3) -> Option<(usize, usize)> {
+pub(super) fn hole_picked(groups: &[HoleGroup], at: solidcore_record::Vec3) -> Option<(usize, usize)> {
     if !(at.x.is_finite() && at.y.is_finite() && at.z.is_finite()) {
         return None;
     }
@@ -1023,7 +1023,7 @@ pub fn manufacture_pocket_at(s: &Session, id: &str, at: solidcore_record::Vec3) 
 }
 
 /// A point of the model in a placed setup's WCS, where what was found on the model is measured.
-fn in_wcs(p: &Placement, at: solidcore_record::Vec3) -> solidcore_record::Vec3 {
+pub(super) fn in_wcs(p: &Placement, at: solidcore_record::Vec3) -> solidcore_record::Vec3 {
     let from = solidcore_record::Vec3 { x: at.x - p.origin.x, y: at.y - p.origin.y, z: at.z - p.origin.z };
     let along = |axis: solidcore_record::Vec3| from.x * axis.x + from.y * axis.y + from.z * axis.z;
     solidcore_record::Vec3 { x: along(p.x_axis), y: along(p.y_axis), z: along(p.z_axis) }
@@ -1685,12 +1685,22 @@ fn work(
         }
         OperationKind::Drill { drill } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
-            let drill = &deep_enough(drill.top, drill.depth, &placement, op)
-                .map_err(|e| bad(cmd, of(op, e)))?
-                .map_or_else(|| drill.clone(), |(top, depth)| DrillOp { top: Some(top), depth, ..drill.clone() });
-            let done = drill.toolpath(start, tool, &placement, material).map_err(failed)?;
+            drill.validate(tool).map_err(failed)?;
+            // Each hole from its own top to its own depth, as the operation's heights have them
+            // (decision 0040 of the CAM work).
+            let each = super::cam_drill::holes_of(drill, &placement, || holes(s, cmd, setup).map_err(said))
+                .and_then(|found| {
+                    let deep = |h: solidcraft_cam::HoleAt| deep_enough(Some(h.top), h.depth, &placement, op);
+                    found
+                        .into_iter()
+                        .map(|h| Ok(deep(h)?.map_or(h, |(top, depth)| solidcraft_cam::HoleAt { top, depth, ..h })))
+                        .collect::<std::result::Result<Vec<_>, String>>()
+                })
+                .map_err(|e| bad(cmd, of(op, e)))?;
+            let done = drill.toolpath_of(&each, start, tool, &placement, material).map_err(failed)?;
             let numbers = serde_json::json!({"rpm": done.rpm, "feed": done.feed, "bottom": done.bottom, "r": done.r, "clearance": done.clearance});
-            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part: 0.0 })
+            let into_part = super::cam_drill::into_part(drill, &each, tool);
+            Ok(Worked { toolpath: done.toolpath, numbers, notes: done.notes, into_part })
         }
         OperationKind::Face { face } => {
             let (tool, placement) = tool_and_placement(s, cmd, d, setup, op, placed)?;
@@ -1951,6 +1961,8 @@ pub fn manufacture_tools(doc: &solidcraft_doc::Document, operation: &str) -> Vec
     let Ok(data) = manufacture_data(doc) else { return Vec::new() };
     let drill = DrillOp {
         holes: vec![[0.0, 0.0]],
+        picked: Vec::new(),
+        points: Vec::new(),
         order: Default::default(),
         top: None,
         depth: 1.0,
