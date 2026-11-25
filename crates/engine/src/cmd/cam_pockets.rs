@@ -325,25 +325,48 @@ impl<'a> Finder<'a> {
     /// down to its floor, and nothing hangs over it. Exactly: the region, shrunk by a hair, as a
     /// prism from above the floor to above the bodies meets none of them.
     fn clear_above(&self, pocket: &Pocket, at: Vec2) -> Result<(), String> {
-        let here = format!("X {} Y {}", at.x, at.y);
+        self.nothing_over(pocket, &format!("the pocket at X {} Y {}", at.x, at.y))
+    }
+
+    /// [`Finder::clear_above`] for the pocket `what` names.
+    fn nothing_over(&self, pocket: &Pocket, what: &str) -> Result<(), String> {
         let (cut, height) = (self.plane.offset(pocket.floor + self.hair), self.top - pocket.floor);
-        let within = solidcraft_cam::offset_region(&pocket.region, self.hair).map_err(|e| format!("the pocket at {here}: {e}"))?;
+        let within = solidcraft_cam::offset_region(&pocket.region, self.hair).map_err(|e| format!("{what}: {e}"))?;
         if within.is_empty() || height <= 2.0 * self.hair {
             return Ok(());
         }
-        let prisms = solidcraft_kernel::extrude(&cut, &within, self.hair, height).map_err(|e| format!("checking the pocket at {here}: {e}"))?;
+        let prisms = solidcraft_kernel::extrude(&cut, &within, self.hair, height).map_err(|e| format!("checking {what}: {e}"))?;
         for &(name, body) in self.bodies {
             for prism in &prisms {
-                let met = solidcraft_kernel::boolean(prism, body, BoolOp::Intersect)
-                    .map_err(|e| format!("checking the pocket at {here} against body '{name}': {e}"))?;
+                let met =
+                    solidcraft_kernel::boolean(prism, body, BoolOp::Intersect).map_err(|e| format!("checking {what} against body '{name}': {e}"))?;
                 if met.is_some() {
                     return Err(format!(
-                        "something of body '{name}' is in the way above the floor of the pocket at {here} (a fillet at the foot of its walls, an undercut or an overhang): it can't be cut straight down"
+                        "something of body '{name}' is in the way above the floor of {what} (a fillet at the foot of its walls, an undercut or an overhang): it can't be cut straight down"
                     ));
                 }
             }
         }
         Ok(())
+    }
+
+    /// The pocket inside the closed chain `wall` (in the plane's coordinates), cut down to `floor`
+    /// (decision 0041 of the CAM work), as `what` names it: the air within the chain a hair above
+    /// the floor, with what of the bodies stands in it there and the chains `islands` as its
+    /// islands (an island of the bodies inside one picked is that one; one picked inside an island
+    /// of the bodies, or of its outline, is that island), and nothing in the way above (checked
+    /// exactly).
+    pub(super) fn inside_chain(&mut self, floor: f64, wall: &Loop2, islands: &[Loop2], what: &str) -> Result<Pocket, String> {
+        let found = air_within(self.faces_above(floor)?, wall);
+        let starts_in = |ring: &Loop2, rings: &[Loop2]| ring.segs.first().is_some_and(|seg| rings.iter().any(|r| r.ccw().contains(seg.start())));
+        let of_the_bodies =
+            |island: &Loop2| starts_in(island, &found.holes) || found.holes.iter().any(|hole| super::cam_chains::same_outline(hole, island));
+        let picked: Vec<Loop2> = islands.iter().filter(|&island| !of_the_bodies(island)).map(|island| island.ccw()).collect();
+        let holes =
+            found.holes.iter().filter(|&hole| !starts_in(hole, &picked)).cloned().chain(picked.iter().map(|island| island.reversed())).collect();
+        let pocket = Pocket { floor, region: Region2 { outer: found.outer, holes }, open: None };
+        self.nothing_over(&pocket, what)?;
+        Ok(pocket)
     }
 
     /// The openings in the bodies' top whose rims a chamfer breaks (decision 0018 of the CAM

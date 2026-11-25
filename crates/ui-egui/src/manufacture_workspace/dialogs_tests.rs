@@ -3485,10 +3485,7 @@ fn contour_goes_round_chains_of_edges_clicked_on_the_model() {
     let numbers = contour_form(&mut h).worked.get().map(|(_, p)| p.numbers.clone()).unwrap();
     assert!((numbers["round"].as_f64().unwrap() - (160.0 + 10.0 * PI)).abs() < 1e-6, "{numbers}");
     assert_eq!(numbers["levels"].as_array().and_then(|l| l.last()).cloned(), Some(json!(-11.0)));
-    assert!(
-        h.widget(&solidcraft_ui_text::format("manufacture.contour_chains_value", &[("count", "1"), ("closed", "1"), ("length", "160.00 mm")]))
-            .is_some()
-    );
+    assert!(h.widget(&solidcraft_ui_text::format("manufacture.contour_chain_closed", &[("length", "160.00 mm")])).is_some());
     // A click on another edge of the same outline takes it out again; a click on the plate's
     // top, on no edge, picks nothing.
     click_model(&mut h, [70.0, 40.0, 20.0]);
@@ -3505,6 +3502,57 @@ fn contour_goes_round_chains_of_edges_clicked_on_the_model() {
     assert_eq!((open(&h), contour_form(&mut h).geometry), ("contour", 1));
     press(&mut h, "OK");
     assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["contour"]["edges"], kept["edges"]);
+}
+
+#[test]
+fn pocket_cuts_inside_chains_of_edges_clicked_on_the_model() {
+    let mut h = harness();
+    // The plate (100 x 80 x 20) with a pocket 60 x 40, 6 deep (X 20 to 80, Y 20 to 60, its floor
+    // at Z 14), an island 10 x 10 standing in it to the plate's top, and a 10 mm end mill.
+    h.app.run("solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"})).unwrap();
+    h.app
+        .run("solid.box", json!({"length": 60, "width": 40, "height": 6, "corner": [20, 20, 14], "operation": "cut", "targets": ["Plate"]}))
+        .unwrap();
+    h.app
+        .run("solid.box", json!({"length": 10, "width": 10, "height": 6, "corner": [30, 30, 14], "operation": "join", "targets": ["Plate"]}))
+        .unwrap();
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    from_the_corner(&mut h);
+    ribbon(&mut h, "cam.op.pocket");
+    let found = pocket_form(&mut h).worked.get().map(|(_, p)| p.numbers.clone()).unwrap();
+    // Edges picked on the model: none yet, and the form says how to pick them.
+    pocket_form(&mut h).geometry = 1;
+    h.frames(3);
+    assert!(h.widget(tr("manufacture.contour_chains_none")).is_some() && h.widget(tr("manufacture.pocket_chains_hint")).is_some());
+    // A click on the foot of the pocket's back wall picks the floor's whole outline, closed: the
+    // pocket inside it is cut as the one found is, round the island, to its floor (Z -7 in the WCS).
+    click_model(&mut h, [50.0, 60.0, 14.0]);
+    let form = pocket_form(&mut h);
+    assert_eq!(form.chains.len(), 1, "{:?}", h.app.status);
+    assert!(form.chains[0].1.closed && (form.chains[0].1.length - 200.0).abs() < 1e-6, "{:?}", form.chains[0]);
+    assert_eq!(form.params()["pocket"]["edges"].as_array().map(Vec::len), Some(1));
+    let numbers = pocket_form(&mut h).worked.get().map(|(_, p)| p.numbers.clone()).unwrap();
+    assert_eq!((numbers["levels"].clone(), numbers["rings"].clone()), (found["levels"].clone(), found["rings"].clone()), "{numbers}");
+    assert_eq!(numbers["levels"], json!([[-3.5, -7.0]]));
+    // Its top edge as well: two chains, one pocket, the same cut; clicked again, taken out.
+    click_model(&mut h, [50.0, 60.0, 20.0]);
+    assert!(
+        h.widget(&solidcraft_ui_text::format("manufacture.contour_chains_value", &[("count", "2"), ("closed", "2"), ("length", "400.00 mm")]))
+            .is_some()
+    );
+    assert_eq!(pocket_form(&mut h).worked.get().map(|(_, p)| p.numbers["rings"].clone()), Some(found["rings"].clone()));
+    click_model(&mut h, [50.0, 60.0, 20.0]);
+    assert_eq!(pocket_form(&mut h).chains.len(), 1);
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"].clone();
+    assert_eq!((kept["edges"].as_array().map(Vec::len), kept.get("pockets").and_then(Value::as_array).map_or(0, Vec::len)), (Some(1), 0), "{kept}");
+    // Changed from its row it keeps its edges.
+    row_menu(&mut h, "Pocket 1 (T1)", "manufacture.edit");
+    assert_eq!((open(&h), pocket_form(&mut h).geometry), ("pocket", 1));
+    press(&mut h, "OK");
+    assert_eq!(data(&mut h)["setups"][0]["operations"][0]["operation"]["pocket"]["edges"], kept["edges"]);
 }
 
 /// The Haas-style post as a shop keeps its own: another id and name, who made it, a version,

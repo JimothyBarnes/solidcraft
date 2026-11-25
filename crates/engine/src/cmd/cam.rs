@@ -87,7 +87,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("setup: id, name?, tool: a flat or bull-nose end mill narrower than the holes, contour: {openings: [[x, y], …] (a point in each hole, in the WCS), bottom?: Z (default the hole's floor, or through the part), top?, stepdown?, leave?, direction?, lead?, ramp_angle?, rpm?, feed?} → id of the new operation, named Bore: an inside contour (as cam.op.contour with side inside) for round holes wider than the tool, cut down a helix along their wall and once round at each level"),
     CommandSpec::new("cam.op.pocket", "Pocket", crate::checked!("cam.op.pocket", op_pocket)).icon("cam_pocket").doc_only()
         .contract(&TypedContract::<CamOpPocketParams>::new()).output(output_schema_for::<CamOpWritten>)
-        .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, top?, stepdown?, stepover?, leave?, finish?: mm left on the walls for a finishing pass along them, rest?: mm, the diameter of a wider tool that cut before (only what it left is cut), direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring; with finish, the walls are cut once more after the last level, at the rings' feed"),
+        .params("setup: id, name?, tool: a flat or bull-nose end mill, pocket: {pockets: [[x, y]] a point on each pocket's floor, or edges: [[x, y, z]] a point on an edge of each closed chain to cut inside (model coordinates: each chain a pocket's wall, cut to its own height or the heights' bottom; one inside another and not below it an island of it), top?, stepdown?, stepover?, leave?, finish?: mm left on the walls for a finishing pass along them, rest?: mm, the diameter of a wider tool that cut before (only what it left is cut), direction?: climb | conventional, ramp_angle?, rpm?, feed?} → id of the new operation: each pocket (read from the model at its point when the toolpath is worked out) cleared in rings from the inside out, the tool ramping down the innermost ring; with finish, the walls are cut once more after the last level, at the rings' feed"),
     CommandSpec::new("cam.op.slot", "Slot", crate::checked!("cam.op.slot", op_slot)).icon("cam_slot").doc_only()
         .contract(&TypedContract::<crate::schema::cam::CamOpSlotParams>::new()).output(output_schema_for::<CamOpWritten>)
         .params("setup: id, name?, tool: a flat or bull-nose end mill no wider than the slots, slot: {slots: [[x, y]] a point in each slot, top?, bottom?: Z (default each slot's floor, or the part's bottom where it goes through), stepdown?, ramp_angle?, rpm?, feed?} → id of the new operation: each slot (read from the model at its point when the toolpath is worked out) milled along its middle line, the tool going down along the line to and fro no steeper than the ramp angle and once along it at each level; a tool narrower than a slot leaves the same on each wall, which the toolpath's notes say"),
@@ -820,6 +820,74 @@ fn picked_chains(
             Some(why) => Err(bad(cmd, why)),
             None => Ok((bottom, loops)),
         }
+    })
+    .map_err(said)
+}
+
+/// The pockets inside chains picked, as read lately ([`chain_pockets`]): by a number for the
+/// bodies' geometry, the plane, the points and the bottom.
+static CHAIN_POCKETS: std::sync::Mutex<Vec<(u64, Vec<(String, super::cam_pockets::Pocket)>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The pockets inside the closed chains of level edges `picks` name (points on edges, in model
+/// coordinates) for Pocket (decision 0041 of the CAM work), in the setup's WCS, each with what it
+/// is called: each chain that is a wall ([`super::cam_chains::walls`]) is cut inside, down to
+/// `bottom` when given, else to its own height, round its islands and what of the part stands
+/// in it. Refused, with the reason: a chain that does not close, one at the part's top with no
+/// bottom given, and (checked exactly) anything of the part in the way above a pocket's floor.
+fn chain_pockets(
+    s: &Session,
+    cmd: &str,
+    setup: &Setup,
+    p: &Placement,
+    picks: &[[f64; 3]],
+    bottom: Option<f64>,
+) -> std::result::Result<Vec<(String, super::cam_pockets::Pocket)>, String> {
+    let plane = solidcore_record::Plane { origin: p.origin, x: p.x_axis, y: p.y_axis };
+    let points: Vec<solidcore_record::Vec3> = picks.iter().map(|at| solidcore_record::Vec3 { x: at[0], y: at[1], z: at[2] }).collect();
+    let flat: Vec<f64> = picks.iter().flatten().copied().collect();
+    with_bodies(s, cmd, setup, |bodies| {
+        let named: Vec<(&str, &solidcraft_kernel::Body)> = bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+        let chains = read_or_kept(&CHAINS, reading_key(bodies, &plane, &flat), || {
+            super::cam_chains::chains(&named, &plane, &points).map_err(|e| bad(cmd, e))
+        })?;
+        if chains.is_empty() {
+            return Err(bad(cmd, "no edges are picked"));
+        }
+        if let Some(open) = chains.iter().find(|c| !c.closed) {
+            let end = open.segs.last().map(|seg| seg.end()).unwrap_or(solidcore_record::Vec2 { x: 0.0, y: 0.0 });
+            return Err(bad(
+                cmd,
+                format!(
+                    "the chain of edges picked does not close: it ends at X {:.3} Y {:.3} (where two edges go on, or none): a pocket inside an open chain is not cut yet, so pick edges that go all the way round",
+                    end.x, end.y
+                ),
+            ));
+        }
+        let mut asked = flat.clone();
+        asked.extend([f64::from(u8::from(bottom.is_some())), bottom.unwrap_or(0.0), p.model.max.z]);
+        read_or_kept(&CHAIN_POCKETS, reading_key(bodies, &plane, &asked), || {
+            let as_loop = |c: &super::cam_chains::Chain| solidcore_record::Loop2 { segs: c.segs.clone() }.ccw();
+            let mut finder = super::cam_pockets::Finder::new(&named, &plane, p.model.max.z);
+            let mut found = Vec::new();
+            for (wall, islands) in super::cam_chains::walls(&chains) {
+                let Some(chain) = chains.get(wall) else { continue };
+                let start = chain.segs.first().map(|seg| seg.start()).unwrap_or(solidcore_record::Vec2 { x: 0.0, y: 0.0 });
+                let what = format!("the pocket inside the chain at X {:.3} Y {:.3} Z {:.3}", start.x, start.y, chain.z);
+                // A micron below the part's top is still its top.
+                if bottom.is_none() && p.model.max.z - chain.z <= 1e-3 {
+                    return Err(bad(
+                        cmd,
+                        format!(
+                            "{what} is at the part's top, so there is nothing inside it to cut down to: pick the chain at the pocket's floor, or give the bottom in the heights"
+                        ),
+                    ));
+                }
+                let islands: Vec<solidcore_record::Loop2> = islands.iter().filter_map(|&i| chains.get(i)).map(as_loop).collect();
+                let pocket = finder.inside_chain(bottom.unwrap_or(chain.z), &as_loop(chain), &islands, &what).map_err(|e| bad(cmd, e))?;
+                found.push((what, pocket));
+            }
+            Ok(found)
+        })
     })
     .map_err(said)
 }
@@ -1782,10 +1850,17 @@ fn work(
             if levels.bottom.is_some() {
                 (pocket.bottom, pocket.floor_offset) = levels.floors().map_err(|e| bad(cmd, of(op, e)))?;
             }
-            let found = pockets_of(s, cmd, setup, &placement, Some(&pocket.pockets)).map_err(|e| bad(cmd, of(op, e)))?;
-            let shapes: Vec<PocketShape> =
-                found.into_iter().map(|(_, found)| PocketShape { floor: found.floor, region: found.region, open: found.open }).collect();
-            let done = pocket.toolpath(start, tool, &placement, material, &shapes).map_err(failed)?;
+            let shape = |found: super::cam_pockets::Pocket| PocketShape { floor: found.floor, region: found.region, open: found.open };
+            let done = if pocket.edges.is_empty() {
+                let found = pockets_of(s, cmd, setup, &placement, Some(&pocket.pockets)).map_err(|e| bad(cmd, of(op, e)))?;
+                let shapes: Vec<PocketShape> = found.into_iter().map(|(_, found)| shape(found)).collect();
+                pocket.toolpath(start, tool, &placement, material, &shapes).map_err(failed)?
+            } else {
+                // Inside chains of edges picked (decision 0041 of the CAM work).
+                let found = chain_pockets(s, cmd, setup, &placement, &pocket.edges, pocket.bottom).map_err(|e| bad(cmd, of(op, e)))?;
+                let (names, shapes): (Vec<String>, Vec<PocketShape>) = found.into_iter().map(|(name, found)| (name, shape(found))).unzip();
+                pocket.toolpath_named(start, tool, &placement, material, &shapes, &names).map_err(failed)?
+            };
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "ramp_feed": done.ramp_feed, "top": done.top,
                 "levels": done.levels, "rings": done.rings.iter().map(Vec::len).collect::<Vec<_>>(), "stepdown": done.stepdown,

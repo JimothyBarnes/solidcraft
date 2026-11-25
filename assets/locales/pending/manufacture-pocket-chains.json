@@ -1,0 +1,42 @@
+{
+  "en": {
+    "manufacture.contour_chain_closed": "1 closed chain, {length} long",
+    "manufacture.contour_chain_open": "1 open chain, {length} long",
+    "manufacture.pocket_chains_hint": "Click an edge on the model: its whole chain at that height is picked, and a click on a chain picked takes it out. Each closed chain is a pocket's wall, cut down to its own height unless the heights give a bottom; one inside another and not below it is an island, left standing."
+  },
+  "ar": {
+    "manufacture.contour_chain_closed": "سلسلة واحدة مغلقة، بطول {length}",
+    "manufacture.contour_chain_open": "سلسلة واحدة مفتوحة، بطول {length}",
+    "manufacture.pocket_chains_hint": "انقر على حافة في النموذج: تُختار سلسلتها كلها عند ذلك الارتفاع، والنقر على سلسلة مختارة يلغي اختيارها. كل سلسلة مغلقة جدار جيب، يُقطع حتى ارتفاعها ما لم تحدد الارتفاعات قاعًا؛ والسلسلة الواقعة داخل أخرى وليست أدنى منها جزيرة تُترك قائمة."
+  },
+  "he": {
+    "manufacture.contour_chain_closed": "שרשרת סגורה אחת, באורך {length}",
+    "manufacture.contour_chain_open": "שרשרת פתוחה אחת, באורך {length}",
+    "manufacture.pocket_chains_hint": "לחצו על קצה במודל: כל השרשרת שלו בגובה זה נבחרת, ולחיצה על שרשרת שנבחרה מבטלת את בחירתה. כל שרשרת סגורה היא דופן של כיס, הנחתך עד הגובה שלה אלא אם הגבהים קובעים תחתית; שרשרת שבתוך אחרת ואינה נמוכה ממנה היא אי שנשאר עומד."
+  },
+  "ja": {
+    "manufacture.contour_chain_closed": "閉じたチェーン 1 本、長さ {length}",
+    "manufacture.contour_chain_open": "開いたチェーン 1 本、長さ {length}",
+    "manufacture.pocket_chains_hint": "モデル上のエッジをクリックすると、その高さにあるチェーン全体が選択されます。選択済みのチェーンをクリックすると外れます。閉じたチェーンはそれぞれポケットの壁で、高さで底を指定しない限りそのチェーンの高さまで削ります。別のチェーンの内側にあり、それより低くないチェーンはアイランドとして残ります。"
+  },
+  "vi": {
+    "manufacture.contour_chain_closed": "1 chuỗi khép kín, dài {length}",
+    "manufacture.contour_chain_open": "1 chuỗi hở, dài {length}",
+    "manufacture.pocket_chains_hint": "Nhấp vào một cạnh trên mô hình: cả chuỗi của nó ở độ cao đó được chọn, và nhấp vào một chuỗi đã chọn sẽ bỏ chọn nó. Mỗi chuỗi kín là thành của một hốc, được cắt xuống tới độ cao của chính nó trừ khi các độ cao cho một đáy; chuỗi nằm trong chuỗi khác và không thấp hơn nó là một đảo, được giữ lại."
+  },
+  "zh": {
+    "manufacture.contour_chain_closed": "1 条闭合链，长 {length}",
+    "manufacture.contour_chain_open": "1 条开放链，长 {length}",
+    "manufacture.pocket_chains_hint": "在模型上单击一条边：该高度上的整条链都会被选取，单击已选取的链会取消选取。每条闭合链都是一个型腔的侧壁，除非高度中给出了底面，否则切到链本身的高度；位于另一条链内且不低于它的链是岛，予以保留。"
+  },
+  "de": {
+    "manufacture.contour_chain_closed": "1 geschlossene Kette, {length} lang",
+    "manufacture.contour_chain_open": "1 offene Kette, {length} lang",
+    "manufacture.pocket_chains_hint": "Eine Kante am Modell anklicken: ihre ganze Kette auf dieser Höhe wird gewählt, und ein Klick auf eine gewählte Kette nimmt sie heraus. Jede geschlossene Kette ist die Wand einer Tasche, die bis auf ihre eigene Höhe ausgeräumt wird, sofern die Höhen keinen Boden angeben; eine Kette innerhalb einer anderen und nicht tiefer als sie ist eine Insel und bleibt stehen."
+  },
+  "ko": {
+    "manufacture.contour_chain_closed": "닫힌 체인 1개, 길이 {length}",
+    "manufacture.contour_chain_open": "열린 체인 1개, 길이 {length}",
+    "manufacture.pocket_chains_hint": "모델에서 모서리를 클릭하면 그 높이에 있는 체인 전체가 선택되고, 선택한 체인을 클릭하면 선택이 해제됩니다. 닫힌 체인은 각각 포켓의 벽이며, 높이에서 바닥을 지정하지 않으면 체인 자체의 높이까지 가공합니다. 다른 체인 안에 있고 그보다 낮지 않은 체인은 아일랜드로 남겨 둡니다."
+  }
+}

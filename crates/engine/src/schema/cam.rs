@@ -581,7 +581,11 @@ pub struct CamOpPocketParams {
     /// One of the design's tool numbers: a flat or bull-nose end mill that fits the pockets.
     pub tool: u32,
     /// `{pockets: [[x, y], …] a point on the floor of each pocket, in the WCS (as
-    /// `cam.setup.pockets` gives them), top?: Z (default the stock top), stepdown?: mm (default
+    /// `cam.setup.pockets` gives them), or edges: [[x, y, z], …] a point on an edge of each
+    /// closed chain of level edges to cut inside, in model coordinates (decision 0041 of the CAM
+    /// work: each chain a pocket's wall, cut down to its own height or the heights' bottom, round
+    /// what of the part stands in it; a chain inside another and not below it is an island of
+    /// it), top?: Z (default the stock top), stepdown?: mm (default
     /// half the tool's diameter), stepover?: mm (default 40% of the tool's diameter, at most
     /// half), leave?: mm of stock left on the walls (default 0), finish?: mm the rings leave on
     /// the walls for one last pass along them to take, after the last level (default 0: no

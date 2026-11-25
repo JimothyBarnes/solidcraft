@@ -26,9 +26,54 @@ pub(super) const DIRECTIONS: [(&str, &str); 2] = [("climb", "manufacture.directi
 const SIDES: [(&str, &str); 2] = [("outside", "manufacture.contour_side_outside"), ("inside", "manufacture.contour_side_inside")];
 /// What the contour goes round: what is found on the model (the part's outline, or openings), or
 /// chains of edges picked on the model (decision 0038 of the CAM work).
-const GEOMETRIES: [(&str, &str); 2] = [("found", "manufacture.contour_geometry_found"), ("edges", "manufacture.contour_geometry_edges")];
+pub(super) const GEOMETRIES: [(&str, &str); 2] = [("found", "manufacture.contour_geometry_found"), ("edges", "manufacture.contour_geometry_edges")];
 /// Which of [`GEOMETRIES`] is the edges picked.
-const EDGES_PICKED: usize = 1;
+pub(super) const EDGES_PICKED: usize = 1;
+
+/// For a form that picks chains of edges on the model in the setup `setup` (Contour's, and
+/// Pocket's, decision 0041 of the CAM work): takes the edge clicked since the last frame, if one
+/// was, and its chain is picked, or taken out of `chains` when it is picked already. Why a click
+/// named no chain is left in `trouble`.
+pub(super) fn take_chain(
+    app: &mut SolveApp,
+    ctx: &egui::Context,
+    setup: &str,
+    chains: &mut Vec<([f64; 3], PickedChain)>,
+    trouble: &mut Option<String>,
+) {
+    let Some(point) = picking::clicked_edge(app, ctx) else { return };
+    // To the micron: a click is no more exact than that.
+    let micron = |v: f64| (v * 1e6).round() / 1e6;
+    let at = [micron(point.x), micron(point.y), micron(point.z)];
+    match manufacture_chain_at(&app.session, setup, at) {
+        Ok(chain) => {
+            *trouble = None;
+            let same = |c: &PickedChain| c.body == chain.body && c.first_edge == chain.first_edge;
+            match chains.iter().position(|(_, picked)| same(picked)) {
+                Some(at) => {
+                    chains.remove(at);
+                }
+                None => chains.push((at, chain)),
+            }
+        }
+        Err(why) => *trouble = Some(why),
+    }
+}
+
+/// What the `chains` picked are, as a form says it: how many, how many closed, how long; of one,
+/// whether it is closed.
+pub(super) fn chains_said(chains: &[([f64; 3], PickedChain)], units: &str, decimals: u8) -> String {
+    if chains.is_empty() {
+        return tr("manufacture.contour_chains_none").to_string();
+    }
+    let long = format_length(chains.iter().map(|(_, c)| c.length).sum(), units, decimals);
+    if let [(_, one)] = chains {
+        let key = if one.closed { "manufacture.contour_chain_closed" } else { "manufacture.contour_chain_open" };
+        return solidcraft_ui_text::format(key, &[("length", &long)]);
+    }
+    let closed = chains.iter().filter(|(_, c)| c.closed).count().to_string();
+    solidcraft_ui_text::format("manufacture.contour_chains_value", &[("count", &chains.len().to_string()), ("closed", &closed), ("length", &long)])
+}
 /// [`SIDES`] as they are said of chains picked: the same words for the command.
 const CHAIN_SIDES: [(&str, &str); 2] = [("outside", "manufacture.contour_chains_outside"), ("inside", "manufacture.contour_chains_inside")];
 /// The widest tool picked for an opening, as a share of the widest circle that fits in it.
@@ -237,37 +282,13 @@ impl ContourForm {
     /// Takes the edge clicked on the model since the last frame, if one was: its chain is picked,
     /// or taken out when it is picked already. Why a click named no chain is kept to say.
     fn take_edge(&mut self, app: &mut SolveApp, ctx: &egui::Context) {
-        let Some(point) = picking::clicked_edge(app, ctx) else { return };
         let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
-        // To the micron: a click is no more exact than that.
-        let micron = |v: f64| (v * 1e6).round() / 1e6;
-        let at = [micron(point.x), micron(point.y), micron(point.z)];
-        match manufacture_chain_at(&app.session, &setup, at) {
-            Ok(chain) => {
-                self.chain_trouble = None;
-                let same = |c: &PickedChain| c.body == chain.body && c.first_edge == chain.first_edge;
-                match self.chains.iter().position(|(_, picked)| same(picked)) {
-                    Some(at) => {
-                        self.chains.remove(at);
-                    }
-                    None => self.chains.push((at, chain)),
-                }
-            }
-            Err(why) => self.chain_trouble = Some(why),
-        }
+        take_chain(app, ctx, &setup, &mut self.chains, &mut self.chain_trouble);
     }
 
     /// What the chains picked are, as the form says it: how many, how many closed, how long.
     fn chains_said(&self, units: &str, decimals: u8) -> String {
-        if self.chains.is_empty() {
-            return tr("manufacture.contour_chains_none").to_string();
-        }
-        let closed = self.chains.iter().filter(|(_, c)| c.closed).count().to_string();
-        let long = format_length(self.chains.iter().map(|(_, c)| c.length).sum(), units, decimals);
-        solidcraft_ui_text::format(
-            "manufacture.contour_chains_value",
-            &[("count", &self.chains.len().to_string()), ("closed", &closed), ("length", &long)],
-        )
+        chains_said(&self.chains, units, decimals)
     }
 
     /// Whether the cut goes round the inside of openings.

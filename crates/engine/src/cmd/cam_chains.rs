@@ -208,7 +208,7 @@ pub(super) fn chains(bodies: &[(&str, &Body)], plane: &Plane, picks: &[Vec3]) ->
         }
         let Some((b, k, _)) = best else {
             return Err(format!(
-                "no edge lying level is near the point picked at {here}: a contour goes round edges that lie flat in the setup's XY, such as a wall's top or bottom edge"
+                "no edge lying level is near the point picked at {here}: the edges picked must lie flat in the setup's XY, such as a wall's top or bottom edge"
             ));
         };
         let Some(levels) = read.get(b).and_then(Option::as_ref) else { continue };
@@ -232,6 +232,75 @@ pub(super) fn chains(bodies: &[(&str, &Body)], plane: &Plane, picks: &[Vec3]) ->
         out.push(Chain { z, segs, closed, body: b, edges });
     }
     Ok(out)
+}
+
+/// Whether the loops `a` and `b` are of one outline, as a wall's top edge and its foot are: as
+/// large, and round the same middle, to a millionth.
+pub(super) fn same_outline(a: &Loop2, b: &Loop2) -> bool {
+    let (area_a, area_b) = (a.signed_area().abs(), b.signed_area().abs());
+    (area_a - area_b).abs() <= 1e-6 * area_a.max(1.0) && apart(a.centroid(), b.centroid()) <= 1e-6 * area_a.sqrt().max(1.0)
+}
+
+/// Which of the closed `chains` are pockets' walls and which their islands (decision 0041 of the
+/// CAM work), as Pocket cuts inside them. Chains of one outline (a wall's top edge and its foot)
+/// are one, from the lowest of them to the highest. An outline inside no other is a pocket's
+/// wall; one inside a wall (the smallest outline round it) is an island of it, left standing,
+/// unless it is below that one's floor, where it is the wall of a deeper pocket; one inside an
+/// island is the wall of a pocket in it when it is below the island's top, and stands with it
+/// when it is not. Each wall in the order picked, the lowest chain of its outline, with one chain
+/// of each of its islands.
+pub(super) fn walls(chains: &[Chain]) -> Vec<(usize, Vec<usize>)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Wall,
+        Island(usize),
+        Stands,
+    }
+    let n = chains.len();
+    let loops: Vec<Loop2> = chains.iter().map(|c| Loop2 { segs: c.segs.clone() }.ccw()).collect();
+    let area: Vec<f64> = loops.iter().map(|l| l.signed_area().abs()).collect();
+    let area_of = |i: usize| area.get(i).copied().unwrap_or(0.0);
+    let z = |i: usize| chains.get(i).map_or(0.0, |c| c.z);
+    let same = |a: usize, b: usize| matches!((loops.get(a), loops.get(b)), (Some(a), Some(b)) if same_outline(a, b));
+    // Each chain's outline: the first chain picked of it; and how low and how high it was picked.
+    let outline: Vec<usize> = (0..n).map(|i| (0..i).find(|&j| same(j, i)).unwrap_or(i)).collect();
+    let outline = &outline;
+    let of = |o: usize| (0..n).filter(move |&i| outline.get(i) == Some(&o));
+    let low = |o: usize| of(o).map(z).fold(f64::INFINITY, f64::min);
+    let high = |o: usize| of(o).map(z).fold(f64::NEG_INFINITY, f64::max);
+    let firsts: Vec<usize> = (0..n).filter(|&i| outline.get(i) == Some(&i)).collect();
+    // The smallest outline round each: larger, with its start inside.
+    let round = |o: usize| {
+        let start = loops.get(o).and_then(|l| l.segs.first()).map(Seg2Geom::start)?;
+        firsts
+            .iter()
+            .copied()
+            .filter(|&r| r != o && !same(r, o) && area_of(r) > area_of(o) && loops.get(r).is_some_and(|l| l.contains(start)))
+            .min_by(|&a, &b| area_of(a).total_cmp(&area_of(b)))
+    };
+    // What each outline is, from the outermost in.
+    let mut outer_first = firsts.clone();
+    outer_first.sort_by(|&a, &b| area_of(b).total_cmp(&area_of(a)));
+    let mut kind = vec![Kind::Wall; n];
+    for o in outer_first {
+        let is = match round(o).map(|r| (r, kind.get(r).copied().unwrap_or(Kind::Wall))) {
+            None => Kind::Wall,
+            Some((r, Kind::Wall)) if low(o) >= low(r) - 1e-6 => Kind::Island(r),
+            Some((_, Kind::Wall)) => Kind::Wall,
+            Some((r, _)) if low(o) < high(r) - 1e-6 => Kind::Wall,
+            Some(_) => Kind::Stands,
+        };
+        if let Some(k) = kind.get_mut(o) {
+            *k = is;
+        }
+    }
+    let lowest = |o: usize| of(o).min_by(|&a, &b| z(a).total_cmp(&z(b))).unwrap_or(o);
+    firsts
+        .iter()
+        .copied()
+        .filter(|&o| kind.get(o) == Some(&Kind::Wall))
+        .map(|wall| (lowest(wall), firsts.iter().copied().filter(|&o| kind.get(o) == Some(&Kind::Island(wall))).collect()))
+        .collect()
 }
 
 /// Checks that the inside of the closed chain `ring` (in `plane`'s coordinates) is open above the
@@ -276,6 +345,43 @@ mod tests {
 
     fn level(edge: usize, a: (f64, f64), b: (f64, f64), ends: [u32; 2]) -> Level {
         Level { edge, z: 0.0, segs: vec![line(a, b)], ends }
+    }
+
+    fn square(z: f64, x0: f64, x1: f64) -> Chain {
+        let c = [(x0, x0), (x1, x0), (x1, x1), (x0, x1)];
+        let segs = (0..4).map(|i| line(c[i], c[(i + 1) % 4])).collect();
+        Chain { z, segs, closed: true, body: 0, edges: Vec::new() }
+    }
+
+    #[test]
+    fn a_chain_inside_another_and_not_below_it_is_its_island_and_one_below_it_a_deeper_pocket() {
+        let chains = vec![
+            // 0: a pocket's floor at Z -10, 100 square.
+            square(-10.0, 0.0, 100.0),
+            // 1: an island's top in it at Z -2.
+            square(-2.0, 10.0, 40.0),
+            // 2: a deeper pocket in its floor, to Z -15.
+            square(-15.0, 60.0, 90.0),
+            // 3: a pocket in the island's top, to Z -5, and 4, a chain standing in that one.
+            square(-5.0, 20.0, 30.0),
+            square(-5.0, 22.0, 28.0),
+            // 5: a pocket elsewhere.
+            square(-4.0, 200.0, 250.0),
+            // 6: the island's foot, of its top's outline; 7: the first pocket's top edge, of its
+            // floor's.
+            square(-10.0, 10.0, 40.0),
+            square(0.0, 0.0, 100.0),
+            // 8: a boss's foot on the island's top: it stands with the island.
+            square(-2.0, 12.0, 18.0),
+        ];
+        assert_eq!(walls(&chains), vec![(0, vec![1]), (2, vec![]), (3, vec![4]), (5, vec![])]);
+        // The order they are picked in changes only the order the pockets are cut in, and a
+        // pocket picked at its top edge and its foot is cut to its foot.
+        let mut backwards = chains.clone();
+        backwards.reverse();
+        let back = |i: usize| chains.len() - 1 - i;
+        assert_eq!(walls(&backwards), vec![(back(0), vec![back(6)]), (back(5), vec![]), (back(3), vec![back(4)]), (back(2), vec![])]);
+        assert!(walls(&[]).is_empty());
     }
 
     #[test]

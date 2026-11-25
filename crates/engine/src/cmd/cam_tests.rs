@@ -3297,6 +3297,93 @@ fn an_inside_contour_goes_round_the_floor_edge_of_a_pocket_picked_on_the_model()
     assert!(why.contains("not both"), "{why}");
 }
 
+/// The points of the feed moves of the toolpath of operation `id` below the height `under`, as
+/// X and Y in the WCS.
+fn fed_below(s: &mut Session, id: &str, under: f64) -> Vec<[f64; 2]> {
+    let t = run(s, "cam.op.toolpath", json!({"id": id}));
+    let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
+    t["toolpath"]["moves"]
+        .as_array()
+        .map(|moves| moves.iter().filter(|m| m["kind"] != "rapid" && f(&m["to"][2]) < under).map(|m| [f(&m["to"][0]), f(&m["to"][1])]).collect())
+        .unwrap_or_default()
+}
+
+/// How far the point `p` is from the box from `min` to `max` (0 inside it).
+fn off_box(p: &[f64; 2], min: [f64; 2], max: [f64; 2]) -> f64 {
+    let out = |v: f64, lo: f64, hi: f64| (lo - v).max(v - hi).max(0.0);
+    out(p[0], min[0], max[0]).hypot(out(p[1], min[1], max[1]))
+}
+
+/// Whether the toolpaths `a` and `b` (as `cam.op.toolpath` gives them) cut the same: the same
+/// numbers, as long, over the same box (a ring may start elsewhere along it).
+fn same_cut(a: &Value, b: &Value) -> bool {
+    let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
+    let close = |k: &str| (0..3).all(|i| (f(&a[k][i]) - f(&b[k][i])).abs() <= 1e-6);
+    a["numbers"] == b["numbers"] && close("min") && close("max") && (f(&a["feed_length"]) - f(&b["feed_length"])).abs() <= 1e-6
+}
+
+#[test]
+fn a_pocket_is_cut_inside_chains_of_edges_picked_on_the_model() {
+    // The plate's pocket 60 x 40, 6 deep: its floor at Z -7 in the WCS, its walls at X -30 and
+    // 30, Y -20 and 20. One click on the bottom edge of its front wall picks the floor's outline,
+    // and the pocket inside it is the one found there, cut the same way.
+    let mut s = plate();
+    boxed(&mut s, [20.0, 20.0, 14.0], [60.0, 40.0, 6.0], "cut");
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"edges": [[50, 20, 14]]}}));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}}));
+    let (chain, found) = (run(&mut s, "cam.op.toolpath", json!({"id": "op-1"})), run(&mut s, "cam.op.toolpath", json!({"id": "op-2"})));
+    assert_eq!((&chain["numbers"]["levels"], &chain["numbers"]["rings"]), (&json!([[-3.5, -7.0]]), &json!([4])), "{}", chain["numbers"]);
+    assert!(same_cut(&chain, &found), "{chain:#} {found:#}");
+    // Picked at its top edge instead, there is nothing inside to cut down to: refused, saying
+    // what to do; with the bottom given in its heights, it is cut to there.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"edges": [[50, 20, 20]]}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("at the part's top") && why.contains("give the bottom in the heights"), "{why}");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {"bottom": {"from": "z", "offset": -7}}}));
+    assert!(same_cut(&run(&mut s, "cam.op.toolpath", json!({"id": "op-1"})), &found));
+    // Its top edge and its foot picked together are one pocket, to its foot.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {}, "pocket": {"edges": [[50, 20, 20], [50, 20, 14]]}}));
+    assert!(same_cut(&run(&mut s, "cam.op.toolpath", json!({"id": "op-1"})), &found));
+    // Below its floor, the part is in the way: refused with the body's name.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {"bottom": {"from": "z", "offset": -9}}, "pocket": {"edges": [[50, 20, 14]]}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("'Plate' is in the way above the floor of the pocket inside the chain at"), "{why}");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "heights": {}}));
+
+    // An island 10 x 10 standing in it to the plate's top (X -20 to -10, Y -10 to 0), and a
+    // pocket 20 x 16 in its floor 4 deeper (to Z -11; X 5 to 25, Y -5 to 11).
+    boxed(&mut s, [30.0, 30.0, 14.0], [10.0, 10.0, 6.0], "join");
+    boxed(&mut s, [55.0, 35.0, 10.0], [20.0, 16.0, 4.0], "cut");
+    // The floor's chain: the island is gone round as the pocket found there goes round it; the
+    // deeper pocket is air under the floor.
+    let (chain, found) = (run(&mut s, "cam.op.toolpath", json!({"id": "op-1"})), run(&mut s, "cam.op.toolpath", json!({"id": "op-2"})));
+    assert!(same_cut(&chain, &found), "{chain:#} {found:#}");
+    // The tool's centre keeps 5 from it.
+    assert!(fed_below(&mut s, "op-1", -1.0).iter().all(|p| off_box(p, [-20.0, -10.0], [-10.0, 0.0]) >= 5.0 - 1e-6));
+    // The island's top edge picked as well is the same island.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"edges": [[50, 20, 14], [35, 30, 20]]}}));
+    assert!(same_cut(&run(&mut s, "cam.op.toolpath", json!({"id": "op-1"})), &found));
+    // The deeper pocket's floor edge picked too: below the first chain, it is a pocket of its
+    // own, cut to its floor.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"edges": [[50, 20, 14], [65, 35, 10]]}}));
+    let both = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let levels = both["numbers"]["levels"].as_array().unwrap();
+    assert!(
+        levels.len() == 2 && levels[0] == json!([-3.5, -7.0]) && levels[1].as_array().and_then(|l| l.last()) == Some(&json!(-11.0)),
+        "{levels:?}"
+    );
+    // Its top edge, on the first pocket's floor, picked instead: an island of the first pocket,
+    // left standing (the tool's centre keeps 5 from it).
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"edges": [[50, 20, 14], [65, 35, 14]]}}));
+    let kept = fed_below(&mut s, "op-1", -1.0);
+    assert!(!kept.is_empty() && kept.iter().all(|p| off_box(p, [5.0, -5.0], [25.0, 11.0]) >= 5.0 - 1e-6), "{kept:?}");
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.5}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // Edges picked and pockets found at once: refused before the model is read.
+    let why = refused(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"edges": [[50, 20, 14]], "pockets": [[0, 0]]}}));
+    assert!(why.contains("not both"), "{why}");
+}
+
 /// The Haas-style post as a shop might keep its own: another id, a vendor and a version, and a
 /// note for the operator at the program's start.
 fn shop_post(version: &str) -> String {

@@ -537,6 +537,12 @@ fn what_cannot_be_pocketed_is_refused_with_the_reason() {
             mill10(),
             "1 pockets were read from the model for the operation's 2 points",
         ),
+        // Edges picked (decision 0041), or pockets found: not both, each point finite, and the
+        // pockets inside them are read and named by the engine.
+        (PocketOp { edges: vec![[0.0, 0.0, -7.0]], ..one([0.0, 0.0]) }, mill10(), "the pockets found or inside the edges picked, not both"),
+        (PocketOp { edges: vec![[f64::NAN, 0.0, -7.0]], ..PocketOp::default() }, mill10(), "edges picked must be finite"),
+        (PocketOp { edges: vec![[0.0, 0.0, -7.0]; 1001], ..PocketOp::default() }, mill10(), "at most 1000 edges picked, not 1001"),
+        (PocketOp { edges: vec![[0.0, 0.0, -7.0]], ..PocketOp::default() }, mill10(), "read from the model with what each is called"),
     ];
     for (op, tool, expect) in cases {
         let e = op.toolpath(None, &tool, &placed(), Some("aluminium"), std::slice::from_ref(&shape)).unwrap_err().to_string();
@@ -572,7 +578,7 @@ fn hostile_numbers_never_panic() {
     let wall = rect(-30.0, -20.0, 30.0, 20.0);
     let shape = pocket(&wall, &[]);
     for &v in &bad {
-        for field in 0..10 {
+        for field in 0..11 {
             let mut op = one([0.0, 0.0]);
             match field {
                 0 => op.top = Some(v),
@@ -584,7 +590,8 @@ fn hostile_numbers_never_panic() {
                 6 => op.feed = Some(v),
                 7 => op.finish = Some(v),
                 8 => op.rest = Some(v),
-                _ => op.pockets = vec![[v, v]],
+                9 => op.pockets = vec![[v, v]],
+                _ => (op.pockets, op.edges) = (Vec::new(), vec![[v, v, v]]),
             }
             let _ = pocketed(&op, std::slice::from_ref(&shape));
             // And each with a finishing pass asked for, and after a wider tool.
@@ -642,8 +649,38 @@ fn a_pocket_operation_is_plain_json() {
     let finished: PocketOp = serde_json::from_str(r#"{"pockets": [[1, 2]], "finish": 0.3}"#).unwrap();
     assert_eq!(finished, PocketOp { finish: Some(0.3), ..one([1.0, 2.0]) });
     assert!(serde_json::from_str::<PocketOp>(r#"{"pockets": [[1, 2]], "helix": 4}"#).is_err());
-    assert!(serde_json::from_str::<PocketOp>("{}").is_err(), "a pocket operation names its pockets");
+    // A pocket operation names its pockets, or edges picked: one that names neither is refused.
+    let neither: PocketOp = serde_json::from_str("{}").unwrap();
+    assert!(neither.validate(&mill10()).unwrap_err().to_string().contains("cuts 1 to 1000 pockets"));
     assert_eq!(serde_json::from_value::<PocketOp>(serde_json::to_value(&op).unwrap()).unwrap(), op);
+    // Edges picked: kept as given, and an operation without them is written as before.
+    let picked: PocketOp = serde_json::from_str(r#"{"edges": [[1, 2, 3]]}"#).unwrap();
+    assert_eq!(picked, PocketOp { edges: vec![[1.0, 2.0, 3.0]], ..PocketOp::default() });
+    assert_eq!(serde_json::from_value::<PocketOp>(serde_json::to_value(&picked).unwrap()).unwrap(), picked);
+    assert!(serde_json::to_value(one([1.0, 2.0])).unwrap().get("edges").is_none());
+}
+
+#[test]
+fn pockets_inside_edges_picked_are_cut_as_found_ones_are_and_said_by_their_names() {
+    let wall = rect(-30.0, -20.0, 30.0, 20.0);
+    let edges = PocketOp { edges: vec![[50.0, 20.0, 13.0]], ..PocketOp::default() };
+    let named = |shapes: &[PocketShape], names: &[&str]| {
+        let names: Vec<String> = names.iter().map(|n| (*n).to_string()).collect();
+        edges.toolpath_named(None, &mill10(), &placed(), Some("aluminium"), shapes, &names)
+    };
+    let chain = "the pocket inside the chain picked at X 50 Y 20 Z 13";
+    // The same cut as the pocket found there.
+    let done = named(&[pocket(&wall, &[])], &[chain]).unwrap();
+    let found = pocketed(&one([0.0, 0.0]), &[pocket(&wall, &[])]).unwrap();
+    check(&found, &wall, &[], -7.0);
+    assert_eq!((done.toolpath, done.levels, done.rings), (found.toolpath, found.levels, found.rings));
+    // What is said of one is said by its name.
+    let e = named(&[pocket(&rect(-30.0, -4.0, 30.0, 4.0), &[])], &[chain]).unwrap_err().to_string();
+    assert!(e.contains(&format!("does not fit in {chain}")), "{e}");
+    // A name for each, and at least one.
+    let e = named(&[pocket(&wall, &[]), pocket(&wall, &[])], &[chain]).unwrap_err().to_string();
+    assert!(e.contains("2 pockets were read from the model and 1 names given for them"), "{e}");
+    assert!(named(&[], &[]).unwrap_err().to_string().contains("0 pockets were read"));
 }
 
 /// The distance from `at` to the side of the polygon through `points` that starts at its

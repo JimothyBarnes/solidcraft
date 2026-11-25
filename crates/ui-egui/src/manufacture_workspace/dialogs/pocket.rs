@@ -1,15 +1,16 @@
 //! Pocket's form (decision 0014 of the CAM work): the closed pockets found on the model, cleared
-//! in rings: all of them unless one is picked. It builds the parameters of `cam.op.pocket` (of
-//! `cam.op.edit` for a pocket operation being changed) and shows what they would cut before OK,
-//! as the other operations' forms do.
+//! in rings: all of them unless one is picked; or the pockets inside chains of edges picked on
+//! the model (decision 0041). It builds the parameters of `cam.op.pocket` (of `cam.op.edit` for
+//! a pocket operation being changed) and shows what they would cut before OK, as the other
+//! operations' forms do.
 use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
-    FoundPocket, OperationPreview, ToolChoice, manufacture_pocket_at, manufacture_pockets, manufacture_preview, manufacture_tools,
+    FoundPocket, OperationPreview, PickedChain, ToolChoice, manufacture_pocket_at, manufacture_pockets, manufacture_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number};
 use solidcraft_ui_text::tr;
 
-use super::contour::DIRECTIONS;
+use super::contour::{DIRECTIONS, EDGES_PICKED, GEOMETRIES, chains_said, take_chain};
 use super::{
     Edited, SetupChoice, Worked, kept_operation, labels, minutes_seconds, preview_note, refusal, set_or_clear, setups, speed_and_feed, window_words,
     word,
@@ -32,6 +33,13 @@ pub(crate) struct PocketForm {
     pub setup: usize,
     /// The closed pockets the setup picked can cut, as the engine found them.
     found: Worked<Vec<FoundPocket>>,
+    /// What it cuts: the pockets found, or inside edges picked (its place in [`GEOMETRIES`]).
+    pub geometry: usize,
+    /// The chains of edges picked on the model: the point clicked on each, in model
+    /// coordinates, and the chain it named.
+    pub chains: Vec<([f64; 3], PickedChain)>,
+    /// Why the last click on the model named no chain, if it did not.
+    chain_trouble: Option<String>,
     /// Which of the form's choices is picked: with more than one pocket found the first choice
     /// is all of them, and the pockets follow it one by one; after them, while several are
     /// picked on the model, a choice that stands for those.
@@ -98,6 +106,9 @@ impl PocketForm {
             tools: manufacture_tools(&app.session.doc, "pocket"),
             setup,
             found: Worked::new(),
+            geometry: 0,
+            chains: Vec::new(),
+            chain_trouble: None,
             pocket: 0,
             picks: Vec::new(),
             clicked: picking::ListPicks::new(),
@@ -145,6 +156,10 @@ impl PocketForm {
         (form.rpm, form.typed_rpm) = number("rpm").map_or((0.0, false), |v| (v, true));
         (form.feed, form.typed_feed) = number("feed").map_or((0.0, false), |v| (v, true));
         form.heights = super::heights::HeightsForm::kept(app, id, [true; 4]);
+        // Its chains stay the ones it has: shown by how many points name them.
+        if base["edges"].as_array().is_some_and(|edges| !edges.is_empty()) {
+            form.geometry = EDGES_PICKED;
+        }
         form.editing = Some(Edited { id: json!(id), title: name, base });
         Ok(form)
     }
@@ -160,8 +175,11 @@ impl PocketForm {
     }
 
     /// The pockets the choice picked stands for: all of them, one, or the several picked on
-    /// the model.
+    /// the model; none while it cuts inside edges picked.
     pub fn picked(&self) -> Vec<&FoundPocket> {
+        if self.geometry == EDGES_PICKED {
+            return Vec::new();
+        }
         let all = self.pockets();
         if !self.picks.is_empty() {
             return self.picks.iter().filter_map(|at| all.get(*at)).collect();
@@ -185,7 +203,7 @@ impl PocketForm {
             Some(tr("manufacture.no_setup"))
         } else if self.tools.is_empty() {
             Some(tr("manufacture.no_tool_for_contour"))
-        } else if self.editing.is_none() && self.found.result.as_ref().is_ok_and(Vec::is_empty) {
+        } else if self.editing.is_none() && self.geometry != EDGES_PICKED && self.found.result.as_ref().is_ok_and(Vec::is_empty) {
             Some(tr("manufacture.pocket_none"))
         } else {
             None
@@ -217,6 +235,7 @@ impl PocketForm {
     pub fn params(&self) -> Value {
         let mut pocket = match &self.editing {
             Some(edited) => edited.base.clone(),
+            None if self.geometry == EDGES_PICKED => json!({"edges": self.chains.iter().map(|(at, _)| *at).collect::<Vec<_>>()}),
             None => json!({"pockets": self.picked().iter().map(|found| found.at).collect::<Vec<_>>()}),
         };
         pocket["direction"] = json!(word(&DIRECTIONS, self.direction));
@@ -337,9 +356,17 @@ impl PocketForm {
         // A point clicked on the model for one of its heights is that height's, not a pick of the form's own.
         self.heights.take_point(app, ctx);
         // What is picked on the model is what is cut (decision 0030 of the CAM work): a choice
-        // from the row's list forgets it, and a pocket clicked is taken and worked out.
-        let picks = self.editing.is_none();
+        // from the row's list forgets it, and a pocket clicked is taken and worked out. Inside
+        // edges picked (decision 0041), each edge clicked names its chain, and a chain picked
+        // again is taken out.
+        let edges = self.geometry == EDGES_PICKED;
+        let picks = self.editing.is_none() && !edges;
+        if self.editing.is_none() && edges && !self.heights.picking() {
+            let setup = self.setups.get(self.setup).map_or("", |s| s.id.as_str()).to_string();
+            take_chain(app, ctx, &setup, &mut self.chains, &mut self.chain_trouble);
+        }
         if picks {
+            picking::faces_again(app);
             self.clicked.follow_row(app, self.pocket, &mut self.picks);
         }
         self.refresh(app);
@@ -372,12 +399,15 @@ impl PocketForm {
             .collect();
         let pocket_labels: Vec<&str> = pocket_labels.iter().map(String::as_str).collect();
         let kept = self.editing.as_ref().map(|edited| {
-            let count = edited.base["pockets"].as_array().map_or(0, Vec::len).to_string();
+            let count = edited.base[if edges { "edges" } else { "pockets" }].as_array().map_or(0, Vec::len).to_string();
             solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count)])
         });
+        let geometries = labels(&GEOMETRIES);
+        let geometry = self.geometry;
+        let chains_said = chains_said(&self.chains, units, decimals);
         let directions = labels(&DIRECTIONS);
         let missing = self.missing();
-        let ready = missing.is_none() && self.worked.result.is_ok();
+        let ready = missing.is_none() && self.worked.result.is_ok() && (self.editing.is_some() || !edges || !self.chains.is_empty());
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         let worked_out = self.worked_out(units, decimals);
         let (picked_open, picked_closed) = {
@@ -423,9 +453,25 @@ impl PocketForm {
                     }
                     return;
                 }
+                // What it cuts: the pockets found on the model, or inside chains of edges picked on it.
+                match &kept {
+                    Some(_) => {
+                        ui_kit::value_row(ui, tr("manufacture.contour_geometry"), geometries.get(geometry).copied().unwrap_or_default());
+                    }
+                    None => {
+                        ui_kit::choice_row(ui, tr("manufacture.contour_geometry"), "manufacture_pocket_geometry", &mut self.geometry, &geometries);
+                    }
+                }
                 match &kept {
                     Some(kept) => {
-                        ui_kit::value_row(ui, tr("manufacture.pocket_choice"), kept);
+                        ui_kit::value_row(ui, tr(if edges { "manufacture.contour_chains" } else { "manufacture.pocket_choice" }), kept);
+                    }
+                    None if edges => {
+                        ui_kit::value_row(ui, tr("manufacture.contour_chains"), &chains_said);
+                        ui_kit::text(ui, tr("manufacture.pocket_chains_hint"), ui_kit::Text::Note("manufacture_pocket_chains_hint"));
+                        if let Some(why) = &self.chain_trouble {
+                            ui_kit::text(ui, why, ui_kit::Text::Note("manufacture_pocket_chain_trouble"));
+                        }
                     }
                     None => {
                         ui_kit::choice_row(ui, tr("manufacture.pocket_choice"), "manufacture_pocket_choice", &mut self.pocket, &pocket_labels);
@@ -479,7 +525,11 @@ impl PocketForm {
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_pocket_preview_note"));
                 }
-                refusal(ui, self.error.as_deref().or(self.found.trouble()).or(self.worked.trouble()));
+                // Why the pockets could not be looked for matters only for those found.
+                let found_trouble = if edges { None } else { self.found.trouble() };
+                // Nothing picked yet is said above, not refused.
+                let worked_trouble = if edges && self.chains.is_empty() { None } else { self.worked.trouble() };
+                refusal(ui, self.error.as_deref().or(found_trouble).or(worked_trouble));
             });
         if new_tool {
             let (kind, setup) = ("flat_end_mill", self.setups.get(self.setup).map(|s| s.id.clone()));

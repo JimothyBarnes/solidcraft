@@ -136,8 +136,16 @@ pub struct PocketShape {
 #[serde(deny_unknown_fields)]
 pub struct PocketOp {
     /// A point on the floor of each pocket to cut, X and Y in the setup's WCS, mm: the model is
-    /// read there each time the toolpath is worked out.
+    /// read there each time the toolpath is worked out. None when the pockets are inside edges
+    /// picked.
+    #[serde(default)]
     pub pockets: Vec<[f64; 2]>,
+    /// Edges picked on the model to cut inside instead of pockets found there (decision 0041 of
+    /// the CAM work): a point on each, in model coordinates. The engine reads the closed chains
+    /// of level edges they are on each time the toolpath is worked out: each is a pocket's wall,
+    /// or an island of the pocket whose chain it is inside when it is not below that one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<[f64; 3]>,
     /// The Z the cut starts from; `None` for the stock's top.
     #[serde(default)]
     pub top: Option<f64>,
@@ -306,11 +314,20 @@ struct Finishing {
 impl PocketOp {
     /// Checks the parameters and that `tool` can cut a pocket.
     pub fn validate(&self, tool: &Tool) -> Result<()> {
-        if self.pockets.is_empty() || self.pockets.len() > MAX_POCKETS {
+        if self.edges.is_empty() && (self.pockets.is_empty() || self.pockets.len() > MAX_POCKETS) {
             return bad(format!("a pocket operation cuts 1 to {MAX_POCKETS} pockets, not {}", self.pockets.len()));
+        }
+        if self.edges.len() > MAX_POCKETS {
+            return bad(format!("a pocket operation cuts inside at most {MAX_POCKETS} edges picked, not {}", self.edges.len()));
+        }
+        if !self.edges.is_empty() && !self.pockets.is_empty() {
+            return bad("a pocket operation cuts the pockets found or inside the edges picked, not both".into());
         }
         if !self.pockets.iter().all(|p| p.iter().all(|v| v.abs() <= MAX_COORDINATE)) {
             return bad(format!("the points on the pockets' floors must be finite and within {MAX_COORDINATE} mm"));
+        }
+        if !self.edges.iter().flatten().all(|v| v.abs() <= MAX_COORDINATE) {
+            return bad(format!("the points on the edges picked must be finite and within {MAX_COORDINATE} mm"));
         }
         if !self.top.is_none_or(|v| v.abs() <= MAX_COORDINATE) {
             return bad(format!("the top must be finite and within {MAX_COORDINATE} mm"));
@@ -375,8 +392,35 @@ impl PocketOp {
         shapes: &[PocketShape],
     ) -> Result<Pocketed> {
         self.validate(tool)?;
+        if !self.edges.is_empty() {
+            return bad("the pockets inside edges picked are read from the model with what each is called: give them so".into());
+        }
         if shapes.len() != self.pockets.len() {
             return bad(format!("{} pockets were read from the model for the operation's {} points", shapes.len(), self.pockets.len()));
+        }
+        let names: Vec<String> = self.pockets.iter().map(|at| format!("the pocket at X {} Y {}", at[0], at[1])).collect();
+        self.toolpath_named(start, tool, placement, material, shapes, &names)
+    }
+
+    /// The toolpath as [`PocketOp::toolpath`] works it out, in `shapes` as read from the model,
+    /// each called as `names` says in what is said of it, in their order: for the pockets inside
+    /// edges picked, which are as many as the chains that are walls.
+    pub fn toolpath_named(
+        &self,
+        start: Option<Vec3>,
+        tool: &Tool,
+        placement: &Placement,
+        material: Option<&str>,
+        shapes: &[PocketShape],
+        names: &[String],
+    ) -> Result<Pocketed> {
+        self.validate(tool)?;
+        if shapes.is_empty() || shapes.len() > MAX_POCKETS || names.len() != shapes.len() {
+            return bad(format!(
+                "{} pockets were read from the model and {} names given for them: there must be 1 to {MAX_POCKETS} pockets, each with its name",
+                shapes.len(),
+                names.len()
+            ));
         }
         let g = tool.geometry;
         if !(g.diameter > 0.0 && g.diameter <= MAX_COORDINATE) {
@@ -413,8 +457,7 @@ impl PocketOp {
         let mut finishes: Vec<(Vec<f64>, Vec<Round>, Vec<Step>)> = Vec::with_capacity(shapes.len());
         let mut said: Vec<String> = Vec::new();
         let mut deepest = 0.0_f64;
-        for (shape, at) in shapes.iter().zip(&self.pockets) {
-            let what = format!("the pocket at X {} Y {}", at[0], at[1]);
+        for (shape, what) in shapes.iter().zip(names) {
             // Where the pocket is cut down to: its floor, as far above or below it as the operation
             // says (decision 0037: stock left on the floor, or a cut past it), or one Z for every
             // pocket, which may not be below a floor.
