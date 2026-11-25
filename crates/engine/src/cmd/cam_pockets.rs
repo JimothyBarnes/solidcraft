@@ -8,15 +8,22 @@
 //! hole are its islands. Nothing may be in the way above: the region, shrunk by a hair, as a
 //! prism from above the floor to above the bodies must not meet them.
 //!
+//! A floor with no such hole round it is a pocket open at a side (decision 0035): a step, a
+//! shoulder, a channel open at an end, the floor round a boss. It is read as its floor (the
+//! flat face under the point and the faces of its height joined to it) and what stands above
+//! it (the outlines of the section's cut faces, walls and islands alike). Nothing above the
+//! floor's height may reach out past those outlines: checked exactly, as a contour's outline is.
+//!
 //! That last check is a boolean for every pocket. A pocket that is cut is always checked so; the
 //! list of a part's pockets, which a form shows as it opens, looks up from places along each
 //! pocket's wall with rays instead (a sample, as the holes' list is), so a part with dozens of
 //! counterbores lists at once. What the rays miss is refused, with the reason, when it is cut.
+use solidcore_record::brep::Loop;
 use solidcore_record::{Loop2, Plane, Region2, Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 use solidcraft_kernel::{Body, BoolOp};
 
-use super::cam_outline::{FACING, cut_faces, hair_of};
+use super::cam_outline::{FACING, cut_faces, face_rings, hair_of};
 
 /// The most faces looked at for floors in one body.
 const MAX_FLOOR_FACES: usize = 20_000;
@@ -25,13 +32,17 @@ pub(super) const MAX_FOUND_POCKETS: usize = 1_000;
 /// The most places along a pocket's wall its list looks up from.
 const MAX_LOOKS: usize = 200;
 
-/// A closed pocket, in the coordinates of the plane it was looked for in.
+/// A pocket, in the coordinates of the plane it was looked for in.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Pocket {
     /// Its floor's height above the plane.
     pub floor: f64,
-    /// The air just above its floor: the wall's outline, with the islands as holes.
+    /// The air just above its floor: the wall's outline, with the islands as holes. Of a pocket
+    /// open at a side, the face of its floor that was found, with the openings in it as holes.
     pub region: Region2,
+    /// For a pocket open at a side: its floor and what stands above it. `None` for one with a
+    /// wall all round.
+    pub open: Option<solidcraft_cam::OpenFloor>,
 }
 
 /// How far round a picked point the pockets are asked about, near and far: a point picked on a
@@ -61,7 +72,10 @@ pub(super) fn picked<'p>(pockets: impl Iterator<Item = &'p Pocket>, at: Vec3, to
         if at.z < pocket.floor - PICK_REACH[0] || at.z > top + PICK_REACH[0] {
             continue;
         }
-        let inside = places.iter().filter(|place| pocket.region.contains(**place)).count();
+        // A pocket open at a side is its whole floor, whichever of its faces it was found by.
+        let within =
+            |place: Vec2| pocket.region.contains(place) || pocket.open.as_ref().is_some_and(|open| open.floor.iter().any(|f| f.contains(place)));
+        let inside = places.iter().filter(|place| within(**place)).count();
         let below = at.z - pocket.floor;
         if inside > 0 && best.is_none_or(|(_, most, nearest)| inside > most || (inside == most && below < nearest)) {
             best = Some((index, inside, below));
@@ -74,8 +88,9 @@ pub(super) fn picked<'p>(pockets: impl Iterator<Item = &'p Pocket>, at: Vec3, to
 enum Under {
     /// Nothing of the bodies: the open, or an opening through them.
     Nothing,
-    /// A flat face that faces up, this high above the plane.
-    Floor(f64),
+    /// A flat face that faces up, this high above the plane: which body's (its place in the
+    /// finder's list) and which of its faces.
+    Floor(f64, usize, usize),
     /// Something that is not a flat face facing up.
     NotFlat,
 }
@@ -120,48 +135,124 @@ impl<'a> Finder<'a> {
     /// its floor and the air above it, with nothing in the way above (checked exactly).
     pub(super) fn pocket_at(&mut self, at: Vec2) -> Result<Pocket, String> {
         let pocket = self.region_at(at)?;
-        self.clear_above(&pocket, at)?;
+        match &pocket.open {
+            None => self.clear_above(&pocket, at)?,
+            Some(open) => self.nothing_past(&open.walls, pocket.floor, at)?,
+        }
         Ok(pocket)
     }
 
     /// The floor under the point `at` of the plane and the air just above it, whatever is over it.
     fn region_at(&mut self, at: Vec2) -> Result<Pocket, String> {
         let here = format!("X {} Y {}", at.x, at.y);
-        let floor = match self.under(at)? {
+        let (floor, body, face) = match self.under(at)? {
             Under::Nothing => return Err(format!("there is nothing of the part under {here}")),
             Under::NotFlat => return Err(format!("the part is not flat and facing up at {here}: a pocket is named by a point on its floor")),
-            Under::Floor(floor) => floor,
+            Under::Floor(floor, body, face) => (floor, body, face),
         };
         if self.top - floor <= 2.0 * self.hair {
             return Err(format!("{here} is on top of the part, not on the floor of a pocket"));
         }
         let Some(region) = self.air_at(floor, at)? else {
-            return Err(format!("the pocket at {here} is open to the outside of the part: only pockets with walls all round are cut, for now"));
+            // No wall all round it: open at a side.
+            return self.open_at(floor, body, face, at);
         };
-        Ok(Pocket { floor, region })
+        Ok(Pocket { floor, region, open: None })
+    }
+
+    /// The pocket open at a side whose floor, `floor` above the plane, is the face `face` of the
+    /// finder's body `body` and the faces of that height joined to it: the floor, and what
+    /// stands above it, whatever is over it.
+    fn open_at(&mut self, floor: f64, body: usize, face: usize, at: Vec2) -> Result<Pocket, String> {
+        let here = format!("X {} Y {}", at.x, at.y);
+        let Some(&(name, solid)) = self.bodies.get(body) else { return Err(format!("there is nothing of the part under {here}")) };
+        let faces = floor_faces(solid, face, &self.plane, floor, self.hair).map_err(|e| format!("body '{name}', the floor at {here}: {e}"))?;
+        let as_region = |rings: &[Loop2]| {
+            let mut rings = rings.iter();
+            rings.next().map(|outer| Region2 { outer: outer.ccw(), holes: rings.map(|ring| ring.ccw().reversed()).collect() })
+        };
+        let Some(region) = faces.first().and_then(|rings| as_region(rings)) else {
+            return Err(format!("the floor at {here} has no outline"));
+        };
+        // The tool passes over the openings in a floor: its outlines alone.
+        let around: Vec<Region2> =
+            faces.iter().filter_map(|rings| rings.first()).map(|outer| Region2 { outer: outer.ccw(), holes: Vec::new() }).collect();
+        // What stands above it: the outline of each cut face of the section a hair above, but
+        // for those inside another (an island in a closed pocket of a wall).
+        let cut = self.faces_above(floor)?;
+        let outers: Vec<&Loop2> = cut.iter().filter_map(|rings| rings.first()).collect();
+        let walls: Vec<Region2> = outers
+            .iter()
+            .filter(|outer| {
+                !outers.iter().any(|other| !std::ptr::eq(*other, **outer) && outer.segs.first().is_some_and(|seg| other.contains(seg.start())))
+            })
+            .map(|outer| Region2 { outer: outer.ccw(), holes: Vec::new() })
+            .collect();
+        if walls.is_empty() {
+            return Err(format!("{here} is on top of the part, not on the floor of a pocket"));
+        }
+        if walls.len() > MAX_FOUND_POCKETS {
+            return Err(format!("more than {MAX_FOUND_POCKETS} pieces of the part stand above the floor at {here}"));
+        }
+        Ok(Pocket { floor, region, open: Some(solidcraft_cam::OpenFloor { floor: around, walls }) })
+    }
+
+    /// Checks that nothing of the bodies above the height `floor` reaches out past `walls`, the
+    /// outlines of what stands there, for the pocket open at a side found at `at`: its passes
+    /// keep off those outlines, and what stuck out over them would be cut into. Exactly, as a
+    /// contour's outline is checked: each outline grown by a hair, as a prism from just under
+    /// the cut to above the bodies, is cut from what the bodies have above the cut, and nothing
+    /// may be left.
+    fn nothing_past(&self, walls: &[Region2], floor: f64, at: Vec2) -> Result<(), String> {
+        let here = format!("X {} Y {}", at.x, at.y);
+        let (cut, height) = (self.plane.offset(floor + self.hair), self.top - floor);
+        if height <= 2.0 * self.hair {
+            return Ok(());
+        }
+        let mut grown = Vec::with_capacity(walls.len());
+        for wall in walls {
+            let wider = solidcraft_cam::offset_region(wall, -self.hair).map_err(|e| format!("the walls of the pocket at {here}: {e}"))?;
+            grown.extend(wider.into_iter().map(|r| Region2 { outer: r.outer, holes: Vec::new() }));
+        }
+        let prisms = solidcraft_kernel::extrude(&cut, &grown, -self.hair, height).map_err(|e| format!("checking the pocket at {here}: {e}"))?;
+        for &(name, body) in self.bodies {
+            let Some(above) = cut_faces(body, &cut).map_err(|e| format!("body '{name}': {e}"))? else { continue };
+            let mut left = Some(above.kept);
+            for prism in &prisms {
+                let Some(rest) = left else { break };
+                left = solidcraft_kernel::boolean(&rest, prism, BoolOp::Cut)
+                    .map_err(|e| format!("checking the pocket at {here} against body '{name}': {e}"))?;
+            }
+            if left.is_some() {
+                return Err(format!(
+                    "something of body '{name}' above the floor of the pocket at {here} reaches out past the foot of its walls (an undercut or an overhang): it can't be cut straight down"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// What is under the point `at` of the plane, looking down from above everything.
     fn under(&self, at: Vec2) -> Result<Under, String> {
         let (up, above) = (self.plane.normal(), self.top + 1.0);
         let from = self.plane.to_world(at) + up * above;
-        let mut floor: Option<(f64, &Body, usize)> = None;
-        for &(name, body) in self.bodies {
+        let mut floor: Option<(f64, usize, &Body, usize)> = None;
+        for (index, &(name, body)) in self.bodies.iter().enumerate() {
             if body.is_mesh() {
                 return Err(format!("body '{name}' is a mesh and has no exact faces: convert it to a solid first"));
             }
             if let Some(hit) = body.fire_ray(from, -up).map_err(|e| format!("body '{name}': {e}"))?
                 && floor.is_none_or(|(nearest, ..)| hit.depth < nearest)
             {
-                floor = Some((hit.depth, body, hit.face));
+                floor = Some((hit.depth, index, body, hit.face));
             }
         }
-        let Some((depth, body, face)) = floor else { return Ok(Under::Nothing) };
+        let Some((depth, index, body, face)) = floor else { return Ok(Under::Nothing) };
         if !body.planar_face(face).is_some_and(|on| on.normal().dot(up) >= FACING) {
             return Ok(Under::NotFlat);
         }
         // Without the last bits of the ray's arithmetic, so that a floor at -7 reads -7.
-        Ok(Under::Floor(((above - depth) * 1e9).round() / 1e9))
+        Ok(Under::Floor(((above - depth) * 1e9).round() / 1e9, index, face))
     }
 
     /// The air round the point `at` a hair above the height `floor`: the smallest hole of a cut
@@ -192,7 +283,7 @@ impl<'a> Finder<'a> {
         }
         let mut found: Vec<(Vec2, Pocket)> = Vec::new();
         for region in walls {
-            let window = Pocket { floor: lowest, region };
+            let window = Pocket { floor: lowest, region, open: None };
             if !self.seen_above(&window) {
                 found.push((window.region.interior_point(), window));
             }
@@ -212,7 +303,7 @@ impl<'a> Finder<'a> {
         let floor = match bottom {
             Some(bottom) => bottom.max(lowest),
             None => match self.under(at)? {
-                Under::Floor(floor) => floor,
+                Under::Floor(floor, ..) => floor,
                 Under::Nothing => lowest,
                 Under::NotFlat => return Err(format!("the part is not flat and facing up under {here}: give the contour its bottom")),
             },
@@ -225,7 +316,7 @@ impl<'a> Finder<'a> {
                 "{here} is not in an opening of the part at Z {floor} mm: an inside contour goes round a wall that is closed all round"
             ));
         };
-        let opening = Pocket { floor, region };
+        let opening = Pocket { floor, region, open: None };
         self.clear_above(&opening, at)?;
         Ok(opening)
     }
@@ -313,10 +404,11 @@ impl<'a> Finder<'a> {
         })
     }
 
-    /// The closed pockets of the bodies: one for each flat face that faces up below the top and
-    /// is the floor of one, each with a point on its floor. A floor in several faces is one
-    /// pocket. The largest first. Nothing was seen above any of them from places along its wall
-    /// ([`Finder::seen_above`]); a pocket is checked exactly when it is cut.
+    /// The pockets of the bodies, those with a wall all round and those open at a side: one
+    /// for each flat face that faces up below the top, each with a point on its floor. A floor
+    /// in several faces is one pocket. The largest first. Nothing was seen above any of them
+    /// from places along its wall ([`Finder::seen_above`]); a pocket is checked exactly when it
+    /// is cut.
     pub(super) fn pockets(&mut self) -> Result<Vec<(Vec2, Pocket)>, String> {
         let up = self.plane.normal();
         // A point on every flat face that faces up below the top.
@@ -337,7 +429,7 @@ impl<'a> Finder<'a> {
                 }
                 // A face that can't be read in the plane (a free-form edge it can't follow) is
                 // not offered; cutting it would say why.
-                let Ok(rings) = super::cam_outline::face_rings(body, face, &self.plane) else { continue };
+                let Ok(rings) = face_rings(body, face, &self.plane) else { continue };
                 let mut rings = rings.into_iter();
                 let Some(outer) = rings.next() else { continue };
                 let on_it = Region2 { outer: outer.ccw(), holes: rings.map(|ring| ring.ccw().reversed()).collect() }.interior_point();
@@ -348,7 +440,9 @@ impl<'a> Finder<'a> {
         let mut found: Vec<(Vec2, Pocket)> = Vec::new();
         for (height, at) in floors {
             // A floor in several faces is found once.
-            if found.iter().any(|(_, pocket)| (pocket.floor - height).abs() <= self.hair && pocket.region.contains(at)) {
+            let on_its_floor =
+                |pocket: &Pocket| pocket.region.contains(at) || pocket.open.as_ref().is_some_and(|open| open.floor.iter().any(|f| f.contains(at)));
+            if found.iter().any(|(_, pocket)| (pocket.floor - height).abs() <= self.hair && on_its_floor(pocket)) {
                 continue;
             }
             if let Ok(pocket) = self.region_at(at)
@@ -363,6 +457,46 @@ impl<'a> Finder<'a> {
         found.sort_by(|a, b| b.1.region.area().total_cmp(&a.1.region.area()).then(b.1.floor.total_cmp(&a.1.floor)));
         Ok(found)
     }
+}
+
+/// The flat faces of `body` that face up at the height `floor` above `plane` and are joined to
+/// its face `face` through edges they share, that face first: the rings of each read in the
+/// plane, the ring round the others first.
+fn floor_faces(body: &Body, face: usize, plane: &Plane, floor: f64, hair: f64) -> Result<Vec<Vec<Loop2>>, String> {
+    let count = body.face_count();
+    if count > MAX_FLOOR_FACES {
+        return Err(format!("it has more than {MAX_FLOOR_FACES} faces"));
+    }
+    let up = plane.normal();
+    let record = body.record();
+    let edges_of = |f: usize| -> Vec<usize> {
+        let loops = record.faces.get(f).map(|face| face.loops.as_slice()).unwrap_or_default();
+        loops
+            .iter()
+            .filter_map(|l| match l {
+                Loop::Edges { edges } => Some(edges.as_slice()),
+                Loop::Vertex { .. } => None,
+            })
+            .flatten()
+            .map(|used| used.edge as usize)
+            .collect()
+    };
+    let level = |f: usize| body.planar_face(f).is_some_and(|on| on.normal().dot(up) >= FACING && (plane.height(on.origin) - floor).abs() <= hair);
+    let mut joined = vec![face];
+    let mut edges: std::collections::BTreeSet<usize> = edges_of(face).into_iter().collect();
+    let mut others: Vec<usize> = (0..count).filter(|&f| f != face && level(f)).collect();
+    loop {
+        let (now, later): (Vec<usize>, Vec<usize>) = others.into_iter().partition(|&f| edges_of(f).iter().any(|edge| edges.contains(edge)));
+        if now.is_empty() {
+            break;
+        }
+        for &f in &now {
+            edges.extend(edges_of(f));
+        }
+        joined.extend(now);
+        others = later;
+    }
+    joined.into_iter().map(|f| face_rings(body, f, plane)).collect()
 }
 
 /// The air within `wall`, a hole of one of `faces` (each a cut face's rings, the outer one

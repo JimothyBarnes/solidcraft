@@ -3220,3 +3220,36 @@ fn new_setup_puts_the_setup_on_a_machine_and_its_tools_run_to_its_top_speed() {
     assert!(form.accept(&mut h.app).is_none(), "{:?}", h.app.status);
     assert_eq!(rpm(&mut h), Some(10_000.0));
 }
+
+#[test]
+fn pocket_offers_a_pocket_open_at_a_side_and_cuts_it_in_passes() {
+    let mut h = harness();
+    // The plate with a step 10 wide and 6 deep along its front, which no wall goes round, and
+    // T1, a 10 mm end mill.
+    h.app.run("solid.box", json!({"length": 100, "width": 80, "height": 20, "corner": [0, 0, 0], "body_name": "Plate"})).unwrap();
+    h.app.run("solid.box", json!({"length": 100, "width": 10, "height": 6, "corner": [0, 0, 14], "operation": "cut", "targets": ["Plate"]})).unwrap();
+    add_tool(&mut h, "flat_end_mill", 10.0);
+    h.app.run("cam.setup.create", json!({"material": "aluminium"})).unwrap();
+    ribbon(&mut h, "cam.op.pocket");
+    assert_eq!(open(&h), "pocket");
+    let form = pocket_form(&mut h);
+    let found: Vec<(f64, [f64; 2], bool)> = form.pockets().iter().map(|p| (p.floor, p.size, p.open)).collect();
+    assert_eq!(found, vec![(-7.0, [100.0, 10.0], true)]);
+    // It is offered by its size and said to be open; nothing stands across from its wall, so
+    // no tool is too wide for it.
+    assert!(h.widget("100.00 × 10.00 × 6.00 mm, open").is_some());
+    assert!(!pocket_form(&mut h).tool_too_wide() && scene::counts(&h.app).2 > 0);
+    // Two levels of 3.5 mm, and three passes at each where a closed pocket's rings are counted.
+    assert!(h.widget("2 × 3.50 mm").is_some() && h.widget("3").is_some());
+    assert!(h.widget(tr("manufacture.pocket_passes")).is_some() && h.widget(tr("manufacture.pocket_rings")).is_none());
+    assert!(h.widget(tr("manufacture.pocket_open_note")).is_some() && h.widget(tr("manufacture.pocket_note")).is_none());
+    let numbers = pocket_form(&mut h).worked.get().map(|(_, preview)| preview.numbers.clone()).unwrap();
+    assert_eq!((numbers["open"].clone(), numbers["rings"].clone()), (json!([true]), json!([3])));
+    press(&mut h, "Create");
+    assert_eq!(open(&h), "none", "{:?}", h.app.status);
+    let kept = data(&mut h)["setups"][0]["operations"][0].clone();
+    assert_eq!((kept["name"].as_str(), kept["operation"]["kind"].as_str()), (Some("Pocket 1"), Some("pocket")));
+    // Simulated, it cuts into nothing and no rapid meets the stock.
+    let sim = h.app.run("cam.simulate", json!({"setup": "setup-1"})).unwrap();
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+}

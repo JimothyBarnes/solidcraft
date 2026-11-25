@@ -490,7 +490,7 @@ fn a_part_faced_pocketed_and_contoured_loses_the_stock_that_is_not_part_and_noth
     // The three operations, with a speed and feed given (the tools here have no cutting data).
     let face = FaceOp { rpm: Some(3000.0), feed: Some(600.0), ..FaceOp::default() }.toolpath(None, &mill20, &placement, None).unwrap();
     let pocket = PocketOp { pockets: vec![[0.0, 0.0]], rpm: Some(4000.0), feed: Some(500.0), ..PocketOp::default() };
-    let shape = PocketShape { floor: -7.0, region: Region2 { outer: rect(30.0, 20.0), holes: Vec::new() } };
+    let shape = PocketShape { floor: -7.0, region: Region2 { outer: rect(30.0, 20.0), holes: Vec::new() }, open: None };
     let pocket = pocket.toolpath(None, &mill10, &placement, None, &[shape]).unwrap();
     let contour = ContourOp { rpm: Some(4000.0), feed: Some(500.0), ..ContourOp::default() }
         .toolpath(None, &mill10, &placement, None, &[rect(50.0, 40.0)])

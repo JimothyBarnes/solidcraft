@@ -265,7 +265,8 @@ impl PocketForm {
     }
 
     /// A pocket found, as the form offers it: its size across and its depth below the part's
-    /// top, and its islands when it has any ("70.00 × 44.00 × 8.00 mm, islands: 1").
+    /// top, its islands when it has any ("70.00 × 44.00 × 8.00 mm, islands: 1"), and that it is
+    /// open at a side when it is ("100.00 × 10.00 × 6.00 mm, open").
     fn label(found: &FoundPocket, units: &str, decimals: u8) -> String {
         let (width, height, depth) = (
             length_number(found.size[0], units, decimals),
@@ -273,7 +274,12 @@ impl PocketForm {
             format_length(found.depth, units, decimals),
         );
         let islands = found.islands.to_string();
-        let key = if found.islands > 0 { "manufacture.pocket_label_islands" } else { "manufacture.pocket_label" };
+        let key = match (found.open, found.islands > 0) {
+            (false, false) => "manufacture.pocket_label",
+            (false, true) => "manufacture.pocket_label_islands",
+            (true, false) => "manufacture.pocket_label_open",
+            (true, true) => "manufacture.pocket_label_open_islands",
+        };
         solidcraft_ui_text::format(key, &[("width", &width), ("height", &height), ("depth", &depth), ("islands", &islands)])
     }
 
@@ -355,6 +361,15 @@ impl PocketForm {
         let ready = missing.is_none() && self.worked.result.is_ok();
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         let worked_out = self.worked_out(units, decimals);
+        let (picked_open, picked_closed) = {
+            let picked = self.picked();
+            (picked.iter().any(|pocket| pocket.open), picked.is_empty() || picked.iter().any(|pocket| !pocket.open))
+        };
+        // A pocket open at a side is cut in passes along its walls, not in rings.
+        let in_passes = self
+            .worked
+            .get()
+            .is_some_and(|(_, preview)| preview.numbers.get("open").and_then(|open| open.get(0)).and_then(Value::as_bool) == Some(true));
         let too_wide = self.tool_too_wide();
         // The setup picked is the one the viewport draws, so the pocket is seen on its own stock.
         if self.drawn_setup != Some(self.setup)
@@ -419,7 +434,7 @@ impl PocketForm {
                 self.typed_feed |= feed;
                 if let Some((levels, rings)) = &worked_out {
                     ui_kit::value_row(ui, tr("manufacture.contour_levels"), levels);
-                    ui_kit::value_row(ui, tr("manufacture.pocket_rings"), rings);
+                    ui_kit::value_row(ui, tr(if in_passes { "manufacture.pocket_passes" } else { "manufacture.pocket_rings" }), rings);
                 }
                 if let Some(time) = &time {
                     ui_kit::value_row(ui, tr("manufacture.face_time"), time);
@@ -427,7 +442,14 @@ impl PocketForm {
                 for note in self.worked.get().map(|(_, preview)| preview.notes.as_slice()).unwrap_or_default() {
                     ui_kit::text(ui, note, ui_kit::Text::Note("manufacture_pocket_engine_note"));
                 }
-                ui_kit::text(ui, tr("manufacture.pocket_note"), ui_kit::Text::Note("manufacture_pocket_note"));
+                // What the pockets picked are: rings for those with a wall all round, passes along
+                // the walls for those open at a side.
+                if picked_closed {
+                    ui_kit::text(ui, tr("manufacture.pocket_note"), ui_kit::Text::Note("manufacture_pocket_note"));
+                }
+                if picked_open {
+                    ui_kit::text(ui, tr("manufacture.pocket_open_note"), ui_kit::Text::Note("manufacture_pocket_open_note"));
+                }
                 if ready {
                     ui_kit::text(ui, preview_note(&self.editing), ui_kit::Text::Note("manufacture_pocket_preview_note"));
                 }

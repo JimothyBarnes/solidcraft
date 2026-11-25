@@ -263,7 +263,7 @@ pub struct CamSetupPocketsParams {
     pub id: String,
 }
 
-/// A closed pocket of a setup's bodies, in the setup's WCS, mm.
+/// A pocket of a setup's bodies, in the setup's WCS, mm.
 #[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
 pub struct FoundPocket {
     /// A point on its floor, `[x, y]`: what a pocket operation names it by.
@@ -282,8 +282,16 @@ pub struct FoundPocket {
     pub size: [f64; 2],
     /// How many islands stand in it.
     pub islands: usize,
-    /// The area of the air above its floor, the islands taken out.
+    /// The area of the air above its floor, the islands taken out. Of a pocket open at a side,
+    /// the area within its floor's outline.
     pub area: f64,
+    /// Whether it is open at a side (a step, a shoulder, a channel open at an end, the floor
+    /// round a boss): it has no wall all round, and is cut in passes along the walls it has.
+    /// Then `widest` and `passes` are how wide a tool can be and still go along them: twice
+    /// the furthest a place on its floor is from them where something stands across from them
+    /// (a channel's other wall), and 100 000 (no limit) where nothing does. `islands` is what
+    /// stands on its floor.
+    pub open: bool,
 }
 
 /// The closed pockets of a setup's bodies, found on their exact faces (never a display mesh): a

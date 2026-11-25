@@ -26,6 +26,7 @@ mod gcode_reader;
 mod machine;
 mod manufacture;
 mod offset;
+mod open_pocket;
 mod placement;
 mod pocket;
 mod post;
@@ -55,6 +56,7 @@ pub use manufacture::{
     ManufactureData, Operation, OperationKind, SafeHeights, Setup, SetupKind, Stock, Wcs, WcsOrientation, WcsOrigin,
 };
 pub use offset::{JOINT_TOLERANCE, MAX_OFFSET_SEGMENTS, offset_region, offset_regions};
+pub use open_pocket::OpenFloor;
 pub use placement::{Bounds, Placement};
 pub use pocket::{
     DEFAULT_POCKET_STEPDOWN, DEFAULT_POCKET_STEPOVER, DEFAULT_RAMP_ANGLE, MAX_POCKET_LEVELS, MAX_POCKET_RINGS, MAX_POCKET_STEPOVER, MAX_POCKETS,

@@ -835,24 +835,41 @@ fn passes_everywhere(region: &solidcore_record::Region2, widest: f64) -> f64 {
     (2.0 * passes * 100.0).floor() / 100.0
 }
 
-/// The closed pockets the setup `setup` can cut, as a form or a script reads them.
+/// The pockets the setup `setup` can cut, as a form or a script reads them.
 fn found_pockets(s: &Session, cmd: &str, setup: &Setup) -> std::result::Result<Vec<FoundPocket>, String> {
     let (model, _) = model_box(s, cmd, setup).map_err(said)?;
     let p = setup.place(model).map_err(|e| e.to_string())?;
     let round = |v: f64| (v * 1e9).round() / 1e9;
     let mut out = Vec::new();
     for (at, pocket) in pockets_of(s, cmd, setup, &p, None)? {
-        let around = pocket.region.outer.segs.iter().fold(solidcraft_geom::Aabb2::EMPTY, |b, seg| b.union(&seg.bounds()));
-        let widest = (2.0 * pocket.region.inradius(1e-4) * 100.0).round() / 100.0;
+        // A pocket open at a side is its whole floor, the outlines of all its faces. It has no
+        // wall all round to fit a tool in: a tool must be narrower than the widest place
+        // between what stands on its floor and round it.
+        let outlines: Vec<&solidcore_record::Loop2> = match &pocket.open {
+            None => vec![&pocket.region.outer],
+            Some(open) => open.floor.iter().map(|face| &face.outer).collect(),
+        };
+        let around = outlines.iter().flat_map(|l| l.segs.iter()).fold(solidcraft_geom::Aabb2::EMPTY, |b, seg| b.union(&seg.bounds()));
+        let (widest, passes, islands, area) = match &pocket.open {
+            None => {
+                let widest = (2.0 * pocket.region.inradius(1e-4) * 100.0).round() / 100.0;
+                (widest, passes_everywhere(&pocket.region, widest), pocket.region.holes.len(), pocket.region.area())
+            }
+            Some(open) => {
+                let widest = (open.across() * 100.0).round() / 100.0;
+                (widest, widest, open.islands(), outlines.iter().map(|l| l.signed_area().abs()).sum::<f64>())
+            }
+        };
         out.push(FoundPocket {
             at: [round(at.x), round(at.y)],
             floor: round(pocket.floor),
             depth: round(p.model.max.z - pocket.floor),
             widest,
-            passes: passes_everywhere(&pocket.region, widest),
+            passes,
             size: [round(around.max.x - around.min.x), round(around.max.y - around.min.y)],
-            islands: pocket.region.holes.len(),
-            area: pocket.region.area(),
+            islands,
+            area,
+            open: pocket.open.is_some(),
         });
     }
     Ok(out)
@@ -927,8 +944,9 @@ fn found_regions(s: &Session, cmd: &str, setup: &Setup, p: &Placement) -> std::r
         super::cam_pockets::Finder::new(&named, &plane, p.model.max.z).windows(p.model.min.z).map_err(|e| bad(cmd, e))
     })
     .map_err(said)?;
-    let pockets = pockets_of(s, cmd, setup, p, None)?;
-    Ok(windows.into_iter().map(|found| (true, found)).chain(pockets.into_iter().map(|found| (false, found))).collect())
+    // A wall goes all round a closed pocket only: one open at a side is no opening.
+    let pockets = pockets_of(s, cmd, setup, p, None)?.into_iter().filter(|(_, pocket)| pocket.open.is_none());
+    Ok(windows.into_iter().map(|found| (true, found)).chain(pockets.map(|found| (false, found))).collect())
 }
 
 /// Which of the openings [`manufacture_openings`] lists for the setup `id` the point `at` of
@@ -1482,12 +1500,13 @@ fn work(
             // Its numbers and tool first: what is wrong with them is said before the model is cut.
             pocket.validate(tool).map_err(failed)?;
             let found = pockets_of(s, cmd, setup, &placement, Some(&pocket.pockets)).map_err(|e| bad(cmd, of(op, e)))?;
-            let shapes: Vec<PocketShape> = found.into_iter().map(|(_, found)| PocketShape { floor: found.floor, region: found.region }).collect();
+            let shapes: Vec<PocketShape> =
+                found.into_iter().map(|(_, found)| PocketShape { floor: found.floor, region: found.region, open: found.open }).collect();
             let done = pocket.toolpath(start, tool, &placement, material, &shapes).map_err(failed)?;
             let numbers = serde_json::json!({
                 "rpm": done.rpm, "feed": done.feed, "plunge_feed": done.plunge_feed, "ramp_feed": done.ramp_feed, "top": done.top,
                 "levels": done.levels, "rings": done.rings.iter().map(Vec::len).collect::<Vec<_>>(), "stepdown": done.stepdown,
-                "stepover": done.stepover, "offset": done.offset, "finish": done.finish, "finish_levels": done.finish_levels,
+                "stepover": done.stepover, "offset": done.offset, "open": done.open, "finish": done.finish, "finish_levels": done.finish_levels,
                 "finishing": done.finishing.iter().map(Vec::len).collect::<Vec<_>>(), "finish_leads": done.finish_leads,
                 "rest": done.rest.iter().map(Vec::len).collect::<Vec<_>>()
             });

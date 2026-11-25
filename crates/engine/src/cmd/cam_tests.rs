@@ -1236,17 +1236,20 @@ fn islands_holes_and_steps_are_told_apart() {
     assert!(at(&mut s, 80.0, 0.0).contains("nothing of the part under"));
     // Over the hole there is no floor: the ray goes through.
     assert!(at(&mut s, -25.0, 0.0).contains("nothing of the part under"));
-    // A step cut into the plate's edge is open to the outside: not offered, and said so when asked for.
+    // A step cut into the plate's edge has no wall all round: it is offered as a pocket open at
+    // a side (decision 0035; what is made of one is tested on its own below). A point on the
+    // plate's top is on no pocket's floor, and that is said: with the operation's name when
+    // its toolpath is asked for, without it when a form only asks what it would cut.
     let mut s = plate();
     boxed(&mut s, [70.0, 20.0, 14.0], [30.0, 40.0, 6.0], "cut");
-    assert_eq!(run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}))["pockets"], json!([]));
-    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[35, 0]]}}));
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}))["pockets"].clone();
+    assert_eq!((found.as_array().map(Vec::len), found[0]["open"].clone(), found[0]["floor"].clone()), (Some(1), json!(true), json!(-7.0)), "{found}");
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}}));
     let said = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
-    assert!(said.contains("operation op-1 (Pocket 1)") && said.contains("open to the outside of the part"), "{said}");
-    let previewed = crate::cmd::manufacture_preview(&s, "cam.op.pocket", &json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[35, 0]]}}))
-        .err()
-        .unwrap();
-    assert!(previewed.contains("open to the outside") && !previewed.contains("operation"), "{previewed}");
+    assert!(said.contains("operation op-1 (Pocket 1)") && said.contains("on top of the part"), "{said}");
+    let previewed =
+        crate::cmd::manufacture_preview(&s, "cam.op.pocket", &json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[0, 0]]}})).err().unwrap();
+    assert!(previewed.contains("on top of the part") && !previewed.contains("operation"), "{previewed}");
 }
 
 #[test]
@@ -3049,4 +3052,95 @@ fn a_setup_on_the_haas_vf4ss_runs_its_tools_up_to_twelve_thousand() {
     // The program says the speed.
     let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": "haas_mill"}));
     assert!(posted["text"].as_str().unwrap().contains("S12000 M3"), "{posted}");
+}
+
+#[test]
+fn a_pocket_open_at_a_side_is_found_and_cut_in_passes_from_beside_the_stock() {
+    // A step 10 wide and 6 deep along the plate's front: in the WCS its floor is at Z -7, from
+    // the front edge (Y -40) to a wall at Y -30.
+    let mut s = plate();
+    boxed(&mut s, [0.0, 0.0, 14.0], [100.0, 10.0, 6.0], "cut");
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}))["pockets"].clone();
+    assert_eq!(found.as_array().map(Vec::len), Some(1), "{found}");
+    let step = &found[0];
+    assert_eq!(
+        (step["open"].clone(), step["floor"].clone(), step["depth"].clone(), step["size"].clone(), step["islands"].clone()),
+        (json!(true), json!(-7.0), json!(6.0), json!([100.0, 10.0]), json!(0)),
+        "{step}"
+    );
+    // No wall goes round it and nothing stands across from its wall: a tool of any width goes
+    // along it, which the list says with the largest size there is.
+    assert_eq!((step["widest"].as_f64(), step["passes"].as_f64()), (Some(100_000.0), Some(100_000.0)), "{step}");
+    assert!(about(&step["area"], 1000.0), "{step}");
+    // It is no opening that an inside contour could go round.
+    assert_eq!(run(&mut s, "cam.setup.openings", json!({"id": "setup-1"}))["openings"], json!([]));
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [[-30, -35]]}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    let n = &t["numbers"];
+    assert_eq!(
+        (n["open"].clone(), n["levels"].clone(), n["rings"].clone(), n["offset"].as_f64()),
+        (json!([true]), json!([[-3.5, -7.0]]), json!([3]), Some(5.0)),
+        "{n}"
+    );
+    // The tool's centre: from 7 mm beside the stock at one end to 7 mm beside it at the other,
+    // 13 to 5 mm from the wall, down to the floor.
+    assert!(near(&t["min"], [-58.0, -43.0, -7.0]) && near(&t["max"], [58.0, -35.0, 25.0]), "{t}");
+    // Simulated: nothing is cut into and no rapid meets stock; what is taken is the stock over
+    // the step (100 x 10), the millimetre along its front (102 x 1) and at its two ends (1 x 10
+    // each), 7 mm down from the stock's top.
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.25}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    let (removed, expected) = (sim["operations"][0]["removed"].as_f64().unwrap(), (1000.0 + 102.0 + 20.0) * 7.0);
+    assert!((removed - expected).abs() < 0.02 * expected, "{removed} {expected}");
+    // Its program posts on every post, and reads back.
+    for post in ["haas_mill", "fanuc_mill", "rs274"] {
+        let posted = run(&mut s, "cam.post", json!({"setup": "setup-1", "post": post}));
+        assert!(
+            posted["notes"].as_array().unwrap().is_empty() && posted["text"].as_str().unwrap().to_uppercase().contains("POCKET 1"),
+            "{post}: {posted}"
+        );
+    }
+    // Rest machining of one is not built yet: the operation keeps it, and its toolpath says why
+    // there is none.
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"pockets": [[-30, -35]], "rest": 16.0}}));
+    let why = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(why.contains("rest machining of an open pocket"), "{why}");
+    run(&mut s, "cam.op.edit", json!({"id": "op-1", "pocket": {"pockets": [[-30, -35]]}}));
+    // Something hanging over the floor is in the tool's way: refused when the pocket is cut.
+    boxed(&mut s, [40.0, 5.0, 17.0], [20.0, 10.0, 3.0], "join");
+    let said = refused(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    assert!(said.contains("reaches out past the foot of its walls"), "{said}");
+}
+
+#[test]
+fn open_pockets_of_other_shapes_are_found_with_what_stands_on_them() {
+    // The plate's top taken down 6 mm all round a boss 40 x 30 in its middle: the floor round
+    // the boss, with the boss the one thing standing on it.
+    let mut s = plate();
+    for (corner, size) in [
+        ([0.0, 0.0, 14.0], [100.0, 25.0, 6.0]),
+        ([0.0, 55.0, 14.0], [100.0, 25.0, 6.0]),
+        ([0.0, 25.0, 14.0], [30.0, 30.0, 6.0]),
+        ([70.0, 25.0, 14.0], [30.0, 30.0, 6.0]),
+    ] {
+        boxed(&mut s, corner, size, "cut");
+    }
+    let found = run(&mut s, "cam.setup.pockets", json!({"id": "setup-1"}))["pockets"].clone();
+    assert_eq!(found.as_array().map(Vec::len), Some(1), "{found}");
+    assert_eq!(
+        (found[0]["open"].clone(), found[0]["islands"].clone(), found[0]["size"].clone()),
+        (json!(true), json!(1), json!([100.0, 80.0])),
+        "{found}"
+    );
+    run(&mut s, "cam.op.pocket", json!({"setup": "setup-1", "tool": 2, "pocket": {"pockets": [found[0]["at"].clone()]}}));
+    let t = run(&mut s, "cam.op.toolpath", json!({"id": "op-1"}));
+    // 17 cuts at a level: four at the plate's corners 41 mm from the boss and four 37 mm from
+    // it, two along its ends 33 mm from it, and seven all the way round, 29 mm from it to 5.
+    assert_eq!((t["numbers"]["open"].clone(), t["numbers"]["rings"].clone()), (json!([true]), json!([17])), "{}", t["numbers"]);
+    let sim = run(&mut s, "cam.simulate", json!({"setup": "setup-1", "cell": 0.25}));
+    assert_eq!((sim["gouge_count"].as_u64(), sim["rapid_hit_count"].as_u64()), (Some(0), Some(0)), "{sim:#}");
+    // What is taken: everything over the floor and the millimetre of stock round the plate, 7
+    // mm down, but for the boss.
+    let (removed, expected) = (sim["operations"][0]["removed"].as_f64().unwrap(), (102.0 * 82.0 - 40.0 * 30.0) * 7.0);
+    assert!((removed - expected).abs() < 0.01 * expected, "{removed} {expected}");
 }

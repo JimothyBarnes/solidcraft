@@ -84,7 +84,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(f64, f64)> {
 /// A pocket whose floor is at Z -7 (6 mm into the block): the wall through `wall`, islands
 /// through each of `islands`.
 fn pocket(wall: &[(f64, f64)], islands: &[Vec<(f64, f64)>]) -> PocketShape {
-    PocketShape { floor: -7.0, region: Region2 { outer: polygon(wall), holes: islands.iter().map(|i| polygon(i).reversed()).collect() } }
+    PocketShape { floor: -7.0, region: Region2 { outer: polygon(wall), holes: islands.iter().map(|i| polygon(i).reversed()).collect() }, open: None }
 }
 
 fn one(at: [f64; 2]) -> PocketOp {
@@ -442,7 +442,7 @@ fn a_round_pocket_is_cut_in_circles_and_entered_down_a_helix() {
     // A round pocket of radius 20: the centre's circles are 15, 11, 7 and 3. The innermost is
     // 6 pi round, so 3.5 mm at 3 degrees takes four turns of it.
     let circle = Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 20.0, start: 0.0, sweep: 2.0 * PI }] };
-    let shape = PocketShape { floor: -7.0, region: Region2 { outer: circle, holes: Vec::new() } };
+    let shape = PocketShape { floor: -7.0, region: Region2 { outer: circle, holes: Vec::new() }, open: None };
     let done = pocketed(&one([0.0, 0.0]), &[shape]).unwrap();
     assert!(done.rings[0].iter().zip([3.0, 7.0, 11.0, 15.0]).all(|(&l, r)| close(l, 2.0 * PI * r)) && done.rings[0].len() == 4, "{:?}", done.rings);
     let s = done.toolpath.stats().unwrap();
@@ -557,6 +557,7 @@ fn what_cannot_be_pocketed_is_refused_with_the_reason() {
             outer: Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 5.01, start: 0.0, sweep: 2.0 * PI }] },
             holes: Vec::new(),
         },
+        open: None,
     };
     let e = pocketed(&one([0.0, 0.0]), &[tight]).unwrap_err().to_string();
     assert!(e.contains("turns") && e.contains("narrower tool or a steeper ramp"), "{e}");
@@ -595,11 +596,12 @@ fn hostile_numbers_never_panic() {
             PocketShape { floor: v, ..shape.clone() },
             pocket(&[(v, v), (v, v), (v, v)], &[]),
             pocket(&[(0.0, 0.0), (v, 0.0), (0.0, v)], &[]),
-            PocketShape { floor: -7.0, region: Region2 { outer: Loop2 { segs: vec![] }, holes: Vec::new() } },
+            PocketShape { floor: -7.0, region: Region2 { outer: Loop2 { segs: vec![] }, holes: Vec::new() }, open: None },
             pocket(&wall, &[vec![(v, v), (1.0, v), (v, 1.0)]]),
             PocketShape {
                 floor: -7.0,
                 region: Region2 { outer: Loop2 { segs: vec![Seg2::Arc { center: q(v, 0.0), radius: v, start: v, sweep: v }] }, holes: Vec::new() },
+                open: None,
             },
         ];
         for odd in shapes {
@@ -819,6 +821,7 @@ fn a_finishing_pass_goes_round_islands_and_down_in_steps_where_the_flutes_are_sh
             outer: Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 25.0, start: 0.0, sweep: 2.0 * PI }] },
             holes: Vec::new(),
         },
+        open: None,
     };
     let round = op.toolpath(None, &whole, &placed(), Some("aluminium"), &[circle(-20.0)]).unwrap();
     assert_eq!((round.finish_levels.clone(), round.finish_leads.clone()), (vec![vec![-20.0]], vec![vec![1.0]]));
@@ -1228,6 +1231,7 @@ fn rest_machining_cuts_whole_what_the_wider_tool_never_came_to() {
             outer: Loop2 { segs: vec![Seg2::Arc { center: q(0.0, 0.0), radius: 30.0, start: 0.0, sweep: 2.0 * PI }] },
             holes: Vec::new(),
         },
+        open: None,
     };
     let e = pocketed(&PocketOp { rest: Some(20.0), ..one([0.0, 0.0]) }, std::slice::from_ref(&circle)).unwrap_err().to_string();
     assert!(e.contains("a 20 mm tool leaves nothing for tool 2 to cut here"), "{e}");
@@ -1351,4 +1355,150 @@ fn random_pockets_are_rest_machined_in_air_where_cleared_and_wholly_where_not() 
     );
     eprintln!("{counts}");
     assert!(cut >= 40 && parts >= 100 && looked_at > 200_000, "{counts}");
+}
+
+/// A step as the engine reads a pocket open at a side: 10 wide along the block's front, from
+/// its front edge (Y -40) to a wall at Y -30, its floor at Z -7.
+fn open_step() -> PocketShape {
+    let floor = Region2 { outer: polygon(&rect(-50.0, -40.0, 50.0, -30.0)), holes: Vec::new() };
+    let walls = vec![Region2 { outer: polygon(&rect(-50.0, -30.0, 50.0, 40.0)), holes: Vec::new() }];
+    PocketShape { floor: -7.0, region: floor.clone(), open: Some(crate::OpenFloor { floor: vec![floor], walls }) }
+}
+
+fn near3(a: Vec3, b: Vec3) -> bool {
+    (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6 && (a.z - b.z).abs() < 1e-6
+}
+
+/// Where each straight cut of `moves` ends, and its feed.
+fn lines(moves: &[Move]) -> Vec<(Vec3, f64)> {
+    moves
+        .iter()
+        .filter_map(|m| match m {
+            Move::Linear { to, feed } => Some((*to, *feed)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_pocket_open_at_a_side_is_cut_in_passes_from_beside_the_stock_at_every_level() {
+    let done = pocketed(&one([0.0, -35.0]), &[open_step()]).unwrap();
+    // 7 mm down from the stock's top in two levels, three passes at each: 13, 9 and 5 mm from
+    // the wall, 116 mm long with their ways in and out.
+    assert_eq!((done.levels.clone(), done.open.clone(), done.offset), (vec![vec![-3.5, -7.0]], vec![true], 5.0));
+    assert!(done.rings.len() == 1 && done.rings[0].len() == 3 && done.rings[0].iter().all(|long| (long - 116.0).abs() < 1e-6), "{:?}", done.rings);
+    assert!(done.notes.is_empty(), "{:?}", done.notes);
+    let (feed, m) = (RPM * 0.15, &done.toolpath.moves);
+    let rapid = |k: usize| match m[k] {
+        Move::Rapid { to } => to,
+        ref other => panic!("{k}: {other:?}"),
+    };
+    let line = |k: usize| match m[k] {
+        Move::Linear { to, feed } => (to, feed),
+        ref other => panic!("{k}: {other:?}"),
+    };
+    // The first pass: above its start 7 mm beside the stock, down there in the air, in to the
+    // wall's end at half the feed, along the floor, out at the other end, up.
+    assert!(near3(rapid(3), p(58.0, -43.0, 25.0)) && near3(rapid(4), p(58.0, -43.0, 5.0)));
+    assert!(near3(line(5).0, p(58.0, -43.0, -3.5)) && close(line(5).1, 0.5 * feed));
+    assert!(near3(line(6).0, p(50.0, -43.0, -3.5)) && close(line(6).1, 0.5 * feed));
+    assert!(near3(line(7).0, p(-50.0, -43.0, -3.5)) && close(line(7).1, feed));
+    assert!(near3(line(8).0, p(-58.0, -43.0, -3.5)) && close(line(8).1, feed));
+    assert!(near3(rapid(9), p(-58.0, -43.0, 5.0)));
+    // Six passes in all, four straight moves each; the last is along the wall, at the floor.
+    let cuts = lines(m);
+    assert_eq!(cuts.len(), 24);
+    assert!(near3(cuts[23].0, p(-58.0, -35.0, -7.0)) && near3(cuts[22].0, p(-50.0, -35.0, -7.0)));
+    // No cut is nearer the wall than the tool's radius, and the tool goes down only beside the
+    // stock (which ends at X 51).
+    let mut at = done.toolpath.start;
+    for mv in m {
+        match mv {
+            Move::Linear { to, .. } => {
+                assert!(to.y <= -35.0 + 1e-6, "{to:?}");
+                if to.z < at.z - 1e-9 {
+                    assert!(to.x.abs() >= 58.0 - 1e-6 && (to.x - at.x).abs() < 1e-9 && (to.y - at.y).abs() < 1e-9, "{at:?} to {to:?}");
+                }
+                at = *to;
+            }
+            Move::Rapid { to } => at = *to,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn an_open_pocket_takes_a_finishing_pass_along_its_wall_and_refuses_rest_machining() {
+    let done = pocketed(&PocketOp { finish: Some(0.5), ..one([0.0, -35.0]) }, &[open_step()]).unwrap();
+    // The passes keep 5.5 mm from the wall; the finishing pass goes along it once, at the floor,
+    // from beside the stock as they do.
+    assert_eq!((done.offset, done.finish, done.finish_levels.clone()), (5.5, 0.5, vec![vec![-7.0]]));
+    assert!(done.finishing.len() == 1 && done.finishing[0].len() == 1 && (done.finishing[0][0] - 116.0).abs() < 1e-6, "{:?}", done.finishing);
+    assert_eq!(done.finish_leads, vec![Vec::<f64>::new()]);
+    let cuts = lines(&done.toolpath.moves);
+    assert_eq!(cuts.len(), 6 * 4 + 4);
+    let ys: Vec<f64> = cuts.chunks(4).map(|pass| (pass[2].0.y * 1e6).round() / 1e6).collect();
+    assert_eq!(ys, vec![-43.5, -39.5, -35.5, -43.5, -39.5, -35.5, -35.0]);
+    assert!(near3(cuts[27].0, p(-58.0, -35.0, -7.0)) && near3(cuts[24].0, p(58.0, -35.0, -7.0)));
+    // Rest machining is not built for one: it says so.
+    let said = pocketed(&PocketOp { rest: Some(16.0), ..one([0.0, -35.0]) }, &[open_step()]).unwrap_err().to_string();
+    assert!(said.contains("rest machining of an open pocket"), "{said}");
+}
+
+#[test]
+fn an_open_pocket_far_from_the_stocks_edge_is_entered_down_a_ramp_along_its_first_pass() {
+    // A floor 40 x 10 in the middle of the block before a wall along Y 0, the stock's edge 30 mm
+    // and more from its ends: no pass can be lengthened to beside the stock.
+    let floor = Region2 { outer: polygon(&rect(-20.0, -10.0, 20.0, 0.0)), holes: Vec::new() };
+    let walls = vec![Region2 { outer: polygon(&rect(-20.0, 0.0, 20.0, 30.0)), holes: Vec::new() }];
+    let shape = PocketShape { floor: -7.0, region: floor.clone(), open: Some(crate::OpenFloor { floor: vec![floor], walls }) };
+    let done = pocketed(&one([0.0, -5.0]), &[shape]).unwrap();
+    assert!(done.rings[0].len() == 3 && done.rings[0].iter().all(|long| (long - 40.0).abs() < 1e-6), "{:?}", done.rings);
+    let (feed, m) = (RPM * 0.15, &done.toolpath.moves);
+    let cuts = lines(m);
+    // The first pass, 13 mm from the wall: down to the stock's top, then there and back along
+    // itself falling 3.5 mm (80 mm of ramp is 2.5 degrees, under the 3 asked), at the ramp's
+    // feed; then the pass itself.
+    assert!(near3(cuts[0].0, p(20.0, -13.0, 0.0)) && close(cuts[0].1, 0.5 * feed));
+    assert!(near3(cuts[1].0, p(-20.0, -13.0, -1.75)) && close(cuts[1].1, 0.5 * feed));
+    assert!(near3(cuts[2].0, p(20.0, -13.0, -3.5)) && close(cuts[2].1, 0.5 * feed));
+    assert!(near3(cuts[3].0, p(-20.0, -13.0, -3.5)) && close(cuts[3].1, feed));
+    // The next, 9 mm from it: down where the first one started, in the air that one cut, 4 mm
+    // across to its own start, and along.
+    assert!(near3(cuts[4].0, p(20.0, -13.0, -3.5)) && close(cuts[4].1, 0.5 * feed));
+    assert!(near3(cuts[5].0, p(20.0, -9.0, -3.5)) && close(cuts[5].1, feed));
+    assert!(near3(cuts[6].0, p(-20.0, -9.0, -3.5)) && close(cuts[6].1, feed));
+    // At the second level the ramp starts from the first level's height.
+    let second = cuts.iter().position(|(to, _)| to.z < -3.5 - 1e-9).unwrap();
+    assert!(near3(cuts[second - 1].0, p(20.0, -13.0, -3.5)) && near3(cuts[second].0, p(-20.0, -13.0, -5.25)), "{:?}", &cuts[second - 1..=second]);
+    assert!(done.notes.is_empty(), "{:?}", done.notes);
+}
+
+#[test]
+fn an_open_pocket_simulated_takes_the_stock_over_its_floor_and_beside_it_and_cuts_into_nothing() {
+    use crate::sim::Simulation;
+    let done = pocketed(&one([0.0, -35.0]), &[open_step()]).unwrap();
+    // The part over the stock's grid: the block's top at Z -1, the step's floor at Z -7.
+    let sim = Simulation::new(placed().stock, 0.25, 0.01).unwrap();
+    let field = sim.stock.clone();
+    let mut part = vec![-100.0; field.nx * field.ny];
+    for j in 0..field.ny {
+        for i in 0..field.nx {
+            let c = field.centre(i, j);
+            if c.x.abs() < 50.0 && c.y.abs() < 40.0 {
+                part[j * field.nx + i] = if c.y < -30.0 { -7.0 } else { -1.0 };
+            }
+        }
+    }
+    let mut sim = sim.with_part(part).unwrap();
+    let cut = sim.cut(1, &done.toolpath, &mill10()).unwrap();
+    assert_eq!((sim.gouge_count, sim.rapid_hit_count, sim.below_stock), (0, 0, 0.0), "{:?} {:?}", sim.gouges.first(), sim.rapid_hits.first());
+    // What is taken: the stock over the step (100 x 10), the millimetre of it along the step's
+    // front (102 x 1) and at its two ends (1 x 10 each), all 7 mm down from the stock's top.
+    let expected = (1000.0 + 102.0 + 20.0) * 7.0;
+    assert!((cut.removed - expected).abs() < 0.5 * 250.0 * 0.25 * 7.0, "{} and {expected}", cut.removed);
+    // Nothing is left over the step; what still stands over the part is the millimetre on the
+    // block's top, which is the facing's.
+    let (over, _) = sim.leftover();
+    assert!((over - 100.0 * 70.0).abs() < 0.5 * 100.0 * 0.25, "{over}");
 }

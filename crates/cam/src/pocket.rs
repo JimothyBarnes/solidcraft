@@ -23,6 +23,11 @@
 //! as for the whole pocket, and each is cut only where the tool there is not wholly inside what
 //! the wider one cleared. A ring that one never came near is cut whole, down a ramp as ever; a
 //! part of a ring is started a little back in what was cleared, where the tool goes down in air.
+//!
+//! A pocket open at a side (decision 0035) has no wall all round to shrink rings from: it is cut
+//! in passes along the walls it has, the furthest first ([`crate::open_pocket`]), each from the
+//! air beside the stock where it can be. Its levels, feeds and finishing heights are a closed
+//! pocket's.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -31,10 +36,12 @@ use solidcore_record::{Loop2, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::{Loop2Geom, Region2Geom, Seg2Geom};
 
 use crate::contour::{
-    CutDirection, DEFAULT_LEAD_RADIUS, MAX_LEAVE, MIN_STEP, Round, SAME_HEIGHT, apart, bad, cut, moved_at_least, round_within, way_is_clear,
+    CutDirection, DEFAULT_CONTOUR_CLEAR, DEFAULT_LEAD_RADIUS, MAX_LEAVE, MIN_STEP, Round, SAME_HEIGHT, apart, bad, cut, moved_at_least, round_within,
+    way_is_clear,
 };
 use crate::feeds::op_feeds;
 use crate::offset::JOINT_TOLERANCE;
+use crate::open_pocket::{self, OpenFloor};
 use crate::placement::Placement;
 use crate::tool::{Engagement, Tool, ToolKind};
 use crate::toolpath::{Coolant, MAX_FEED, MAX_SPINDLE_RPM, Move, SpindleDirection, Toolpath};
@@ -106,14 +113,22 @@ const REST_LEAD: f64 = 1.0;
 /// offsetter's own tolerance each way, the micron more a ring is moved in by when exactly its
 /// distance can't be verified, and rounding.
 const RING_SLACK: f64 = 5e-3;
+/// The share of the feed a pass is fed at on its way in from beside the stock, until the tool
+/// is in the cut: a tool maker's guide asks for at least half off on a side entry (Helical
+/// Solutions' "Machining Guidebook", types of tool entry).
+const SIDE_ENTRY_FEED: f64 = 0.5;
 
 /// A pocket as it is read from the model, in the setup's WCS.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PocketShape {
     /// The Z of its floor.
     pub floor: f64,
-    /// The air just above its floor: the wall's outline, with the islands as holes.
+    /// The air just above its floor: the wall's outline, with the islands as holes. For a pocket
+    /// open at a side, the floor's own face.
     pub region: Region2,
+    /// For a pocket open at a side (decision 0035): its floor and what stands above it. `None`
+    /// for one with walls all round.
+    pub open: Option<OpenFloor>,
 }
 
 /// A pocket operation's parameters, as the design keeps them.
@@ -190,6 +205,8 @@ pub struct Pocketed {
     /// cut (a whole ring, or the part of one the tool before did not reach, lengthened at its
     /// ends) in the order cut. Empty without.
     pub rest: Vec<Vec<f64>>,
+    /// Whether each pocket is open at a side: cut in passes along its walls, not in rings.
+    pub open: Vec<bool>,
     /// Things worth showing beside the toolpath (a capped spindle speed).
     pub notes: Vec<String>,
 }
@@ -215,30 +232,40 @@ impl Ring {
 
 /// How the tool gets to where a cut at a level starts.
 #[derive(Clone, Copy, PartialEq)]
-enum Entry {
+pub(crate) enum Entry {
     /// From above, down a ramp along the ring itself.
     Ramp,
+    /// From above, down a ramp there and back along the cut itself, which does not end where
+    /// it starts.
+    ZigZag,
     /// Straight from the ring inside, cut just before: one stepover.
     Link,
-    /// From above, straight down in air the tool before cleared.
+    /// From above, straight down in air: what the tool before cleared, the air beside the
+    /// stock, or (at `from`) what the pass before cut.
     Air,
 }
 
-/// One cut at a level: a ring, or with rest machining a part of one.
-struct Step {
-    start: Vec2,
+/// One cut at a level: a ring, with rest machining a part of one, or a pass of an open pocket.
+pub(crate) struct Step {
+    pub(crate) start: Vec2,
     /// From `start`, the way it is cut.
-    segs: Vec<Seg2>,
+    pub(crate) segs: Vec<Seg2>,
     /// A ring ends where it starts; a part of one does not.
-    closed: bool,
-    entry: Entry,
+    pub(crate) closed: bool,
+    pub(crate) entry: Entry,
     /// Whether the tool lifts after it: not when the next cut is the ring outside, reached
     /// straight from this one.
-    lift: bool,
+    pub(crate) lift: bool,
+    /// Where the tool goes down instead of at `start`, and cuts straight across from: a place on
+    /// the pass before, in the air that one cut.
+    pub(crate) from: Option<Vec2>,
+    /// How much of the cut's start is its way in from beside the stock, mm, fed slower: 0 for
+    /// none.
+    pub(crate) slow: f64,
 }
 
 impl Step {
-    fn length(&self) -> f64 {
+    pub(crate) fn length(&self) -> f64 {
         self.segs.iter().map(Seg2Geom::length).sum()
     }
 }
@@ -359,8 +386,15 @@ impl PocketOp {
         let angle = self.ramp_angle.unwrap_or(DEFAULT_RAMP_ANGLE);
 
         // Each pocket's levels and rings, and its finishing pass, before any move is written.
-        let mut plans: Vec<(Vec<f64>, Vec<Ring>, Vec<Step>)> = Vec::with_capacity(shapes.len());
-        let mut finishes: Vec<(Vec<f64>, Vec<Round>)> = Vec::with_capacity(shapes.len());
+        // Where the tool is in the air beside the stock: its edge a contour's clearance from it.
+        let beyond = radius + DEFAULT_CONTOUR_CLEAR;
+        let stock = &placement.stock;
+        let beside = (Vec2 { x: stock.min.x - beyond, y: stock.min.y - beyond }, Vec2 { x: stock.max.x + beyond, y: stock.max.y + beyond });
+        // Each pocket's levels, the lengths of its cuts at one and the cuts themselves.
+        let mut plans: Vec<(Vec<f64>, Vec<f64>, Vec<Step>)> = Vec::with_capacity(shapes.len());
+        // Each pocket's finishing pass: its heights, and the rounds of a closed pocket or the
+        // cuts along the walls of an open one.
+        let mut finishes: Vec<(Vec<f64>, Vec<Round>, Vec<Step>)> = Vec::with_capacity(shapes.len());
         let mut said: Vec<String> = Vec::new();
         let mut deepest = 0.0_f64;
         for (shape, at) in shapes.iter().zip(&self.pockets) {
@@ -389,6 +423,65 @@ impl PocketOp {
             }
             deepest = deepest.max(per_level);
             let levels: Vec<f64> = (1..=count).map(|k| if k == count { shape.floor } else { top - per_level * k as f64 }).collect();
+            if let Some(open) = &shape.open {
+                // Open at a side: passes along its walls, the furthest from them first.
+                if self.rest.is_some() {
+                    return bad(format!("{what} is open at a side: rest machining of an open pocket is not built yet"));
+                }
+                let plan = open_pocket::plan(open, beside, radius, (wall, finish), stepover, self.direction)
+                    .map_err(|e| Error::BadValue(format!("{what}: {e}")))?;
+                if plan.steps.is_empty() {
+                    return bad(format!(
+                        "tool {} ({} mm across) reaches nothing of the floor of {what}: use a narrower tool",
+                        tool.number, g.diameter
+                    ));
+                }
+                if !plan.everywhere {
+                    said.push(format!(
+                        "tool {} does not reach everywhere on the floor of {what}: where it does not the material stays (a narrower tool clears it)",
+                        tool.number
+                    ));
+                }
+                if plan.against > 0 {
+                    said.push(format!(
+                        "{} pass(es) of {what} are cut the other way than asked: the tool gets to them only from their far end, beside the stock",
+                        plan.against
+                    ));
+                }
+                // The finishing pass goes down the walls as a closed pocket's does, counted as
+                // a cut as wide as it is buried in a corner.
+                let heights: Vec<f64> = if plan.finishing.is_empty() {
+                    Vec::new()
+                } else {
+                    let width = (FINISH_REACH * finish).min(g.diameter);
+                    let by_load = depth * width / (g.diameter * per_level);
+                    let steps = (depth / g.flute_length - 1e-9)
+                        .ceil()
+                        .max((depth / (FINISH_DEEPEST * g.diameter) - 1e-9).ceil())
+                        .max((by_load - 1e-9).ceil())
+                        .clamp(1.0, count as f64) as usize;
+                    (1..=steps).map(|k| if k == steps { shape.floor } else { top - depth * k as f64 / steps as f64 }).collect()
+                };
+                // A cut with no air to go down in is entered down a ramp along itself.
+                let finish_step = depth / heights.len().max(1) as f64;
+                let cuts = plan.steps.iter().map(|step| (step, per_level)).chain(plan.finishing.iter().map(|step| (step, finish_step)));
+                for (step, fall) in cuts {
+                    let round = step.length();
+                    let turns = match step.entry {
+                        Entry::Ramp => (fall / angle.tan() / round).ceil(),
+                        Entry::ZigZag => (fall / angle.tan() / (2.0 * round)).ceil(),
+                        Entry::Link | Entry::Air => 0.0,
+                    };
+                    if !(turns <= MAX_RAMP_TURNS) {
+                        return bad(format!(
+                            "{what}: a pass {round:.3} mm long has no air to start in, and the ramp down {fall} mm along it would take {turns} turns: use a narrower tool or a steeper ramp"
+                        ));
+                    }
+                }
+                finishes.push((heights, Vec::new(), plan.finishing));
+                plans.push((levels, plan.steps.iter().map(Step::length).collect(), plan.steps));
+                continue;
+            }
             // Where the tool's centre may be is the region less the tool's radius and the stock
             // to leave; the rings are that and what is left of it a stepover in at a time.
             let (rings, everywhere) = rings(&shape.region, offset, stepover, self.direction).map_err(|e| Error::BadValue(format!("{what}: {e}")))?;
@@ -424,10 +517,10 @@ impl PocketOp {
                     ));
                 }
                 let heights: Vec<f64> = (1..=steps).map(|k| if k == steps { shape.floor } else { top - depth * k as f64 / steps as f64 }).collect();
-                finishes.push((heights, pass.rounds));
+                finishes.push((heights, pass.rounds, Vec::new()));
                 pass.everywhere
             } else {
-                finishes.push((Vec::new(), Vec::new()));
+                finishes.push((Vec::new(), Vec::new(), Vec::new()));
                 everywhere
             };
             if !everywhere {
@@ -461,7 +554,7 @@ impl PocketOp {
                     ));
                 }
             }
-            plans.push((levels, rings, steps));
+            plans.push((levels, rings.iter().map(Ring::round).collect(), steps));
         }
         // The feed of a cut as wide as the tool, which the ramp and the first ring are. The
         // finishing pass is fed the same, and half of it into each corner: along a wall it is
@@ -469,7 +562,7 @@ impl PocketOp {
         // itself as well as beside, and a feed worked out for the light cut would be several
         // times too much there.
         let f = op_feeds(tool, Engagement { axial: deepest.max(1e-4), radial: g.diameter }, material, placement.max_rpm, self.rpm, self.feed)?;
-        if finishes.iter().any(|(_, rounds)| rounds.iter().any(|r| r.leads.is_none())) {
+        if finishes.iter().any(|(_, rounds, _)| rounds.iter().any(|r| r.leads.is_none())) {
             said.push(
                 "there is no room for the quarter turns on to a wall and off it: the finishing pass meets it straight across the stock there".into(),
             );
@@ -478,8 +571,8 @@ impl PocketOp {
 
         let first = plans
             .iter()
-            .find_map(|(_, _, steps)| steps.first().map(|step| step.start))
-            .or_else(|| finishes.iter().find_map(|(_, rounds)| rounds.first().map(|r| r.entry)));
+            .find_map(|(_, _, steps)| steps.first().map(|step| step.from.unwrap_or(step.start)))
+            .or_else(|| finishes.iter().find_map(|(_, rounds, _)| rounds.first().map(|r| r.entry)));
         let Some(first) = first else {
             return bad(match self.rest {
                 Some(before) => format!("a {before} mm tool leaves nothing for tool {} to cut here", tool.number),
@@ -492,37 +585,57 @@ impl PocketOp {
         }
         moves.push(Move::Rapid { to: at(first, clearance) });
         let mut last = first;
-        for ((levels, _, steps), (heights, passes)) in plans.iter().zip(&finishes) {
+        // One cut at the height `z`, from wherever the tool is: `above` is how high the stock
+        // still stands where the tool goes down a ramp. Where the tool is when it is done.
+        let one = |moves: &mut Vec<Move>, step: &Step, z: f64, above: f64| -> Vec2 {
+            match step.entry {
+                Entry::Ramp => {
+                    // Down to the level above in the air it left, then down the ring itself.
+                    moves.push(Move::Rapid { to: at(step.start, retract) });
+                    moves.push(Move::Linear { to: at(step.start, above), feed: f.plunge_feed });
+                    ramp(moves, step.start, &step.segs, above, z, angle, f.ramp_feed);
+                }
+                Entry::ZigZag => {
+                    // The same down a cut that does not end where it starts: there and back.
+                    moves.push(Move::Rapid { to: at(step.start, retract) });
+                    moves.push(Move::Linear { to: at(step.start, above), feed: f.plunge_feed });
+                    there_and_back(moves, step.start, &step.segs, above, z, angle, f.ramp_feed);
+                }
+                // From the ring inside, the shortest way: one stepover, in the region.
+                Entry::Link => moves.push(Move::Linear { to: at(step.start, z), feed: f.feed }),
+                Entry::Air => {
+                    // Down in the air: what the tool before cleared, or beside the stock, or
+                    // what the pass before cut, and then straight across to the cut.
+                    let down = step.from.unwrap_or(step.start);
+                    moves.push(Move::Rapid { to: at(down, retract) });
+                    moves.push(Move::Linear { to: at(down, z), feed: f.plunge_feed });
+                    if step.from.is_some() {
+                        moves.push(Move::Linear { to: at(step.start, z), feed: f.feed });
+                    }
+                }
+            }
+            let (mut from, mut along) = (step.start, 0.0);
+            for (k, seg) in step.segs.iter().enumerate() {
+                let to = if step.closed && k + 1 == step.segs.len() { step.start } else { seg.end() };
+                // The way in from beside the stock is fed slower, until the tool is in the cut.
+                along += seg.length();
+                let slow = step.slow > 0.0 && along <= step.slow + JOINT_TOLERANCE;
+                cut(moves, seg, from, to, (z, z), if slow { SIDE_ENTRY_FEED * f.feed } else { f.feed });
+                from = to;
+            }
+            // On to the ring outside when that is the next one; up otherwise.
+            if step.lift {
+                moves.push(Move::Rapid { to: at(from, retract) });
+            }
+            from
+        };
+        for ((levels, _, steps), (heights, passes, along_walls)) in plans.iter().zip(&finishes) {
             let mut above = top;
             for &z in levels {
-                // The rings come innermost first, each before the ring outside it.
+                // A closed pocket's rings come innermost first, each before the ring outside
+                // it; an open one's passes the furthest from its walls first.
                 for step in steps {
-                    match step.entry {
-                        Entry::Ramp => {
-                            // Down to the level above in the air it left, then down the ring itself.
-                            moves.push(Move::Rapid { to: at(step.start, retract) });
-                            moves.push(Move::Linear { to: at(step.start, above), feed: f.plunge_feed });
-                            ramp(&mut moves, step.start, &step.segs, above, z, angle, f.ramp_feed);
-                        }
-                        // From the ring inside, the shortest way: one stepover, in the region.
-                        Entry::Link => moves.push(Move::Linear { to: at(step.start, z), feed: f.feed }),
-                        Entry::Air => {
-                            // A part of a ring starts in what the tool before cleared.
-                            moves.push(Move::Rapid { to: at(step.start, retract) });
-                            moves.push(Move::Linear { to: at(step.start, z), feed: f.plunge_feed });
-                        }
-                    }
-                    let mut from = step.start;
-                    for (k, seg) in step.segs.iter().enumerate() {
-                        let to = if step.closed && k + 1 == step.segs.len() { step.start } else { seg.end() };
-                        cut(&mut moves, seg, from, to, (z, z), f.feed);
-                        from = to;
-                    }
-                    // On to the ring outside when that is the next one; up otherwise.
-                    if step.lift {
-                        moves.push(Move::Rapid { to: at(from, retract) });
-                    }
-                    last = from;
+                    last = one(&mut moves, step, z, above);
                 }
                 above = z;
             }
@@ -551,6 +664,15 @@ impl PocketOp {
                     moves.push(Move::Rapid { to: at(last, retract) });
                 }
             }
+            // An open pocket's finishing pass: along its walls, each stretch from the air
+            // beside the stock or from the pass that left its stock.
+            let mut above = top;
+            for &z in heights {
+                for step in along_walls {
+                    last = one(&mut moves, step, z, above);
+                }
+                above = z;
+            }
         }
         moves.push(Move::Rapid { to: at(last, clearance) });
         if tool.coolant != Coolant::Off {
@@ -570,15 +692,21 @@ impl PocketOp {
             stepdown,
             stepover,
             offset,
-            rings: plans.iter().map(|(_, rings, _)| rings.iter().map(Ring::round).collect()).collect(),
+            rings: plans.iter().map(|(_, rings, _)| rings.clone()).collect(),
             rest: match self.rest {
                 Some(_) => plans.iter().map(|(_, _, steps)| steps.iter().map(Step::length).collect()).collect(),
                 None => Vec::new(),
             },
             finish,
-            finish_levels: finishes.iter().map(|(heights, _)| heights.clone()).collect(),
-            finishing: finishes.iter().map(|(_, rounds)| rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum()).collect()).collect(),
-            finish_leads: finishes.iter().map(|(_, rounds)| rounds.iter().map(Round::lead).collect()).collect(),
+            finish_levels: finishes.iter().map(|(heights, ..)| heights.clone()).collect(),
+            finishing: finishes
+                .iter()
+                .map(|(_, rounds, steps)| {
+                    rounds.iter().map(|r| r.segs.iter().map(Seg2Geom::length).sum()).chain(steps.iter().map(Step::length)).collect()
+                })
+                .collect(),
+            finish_leads: finishes.iter().map(|(_, rounds, _)| rounds.iter().map(Round::lead).collect()).collect(),
+            open: shapes.iter().map(|shape| shape.open.is_some()).collect(),
             notes: f.notes.into_iter().chain(said).collect(),
         })
     }
@@ -604,8 +732,29 @@ pub(crate) fn ramp(moves: &mut Vec<Move>, start: Vec2, segs: &[Seg2], above: f64
     }
 }
 
+/// The moves down a path that does not end where it starts (`segs`, from `start`) from the
+/// height `above` to `z`: along it and back, as many times as it takes to fall evenly no
+/// steeper than `angle`, so that the tool ends where it started.
+pub(crate) fn there_and_back(moves: &mut Vec<Move>, start: Vec2, segs: &[Seg2], above: f64, z: f64, angle: f64, feed: f64) {
+    let long: f64 = segs.iter().map(Seg2Geom::length).sum();
+    let back: Vec<Seg2> = segs.iter().rev().map(Seg2Geom::reversed).collect();
+    let pairs = ((above - z) / angle.tan() / (2.0 * long)).ceil().clamp(1.0, MAX_RAMP_TURNS);
+    let whole = 2.0 * pairs * long;
+    let height = |along: f64| if along >= whole { z } else { above - (above - z) * along / whole };
+    let legs = 2 * pairs as usize;
+    let (mut along, mut from) = (0.0, start);
+    for leg in 0..legs {
+        let way = if leg % 2 == 0 { segs } else { back.as_slice() };
+        for (k, seg) in way.iter().enumerate() {
+            let next = if leg + 1 == legs && k + 1 == way.len() { whole } else { along + seg.length() };
+            cut(moves, seg, from, seg.end(), (height(along), height(next)), feed);
+            (along, from) = (next, seg.end());
+        }
+    }
+}
+
 /// The nearest point of `lp` to `p`: which segment, where along it, the point and how far.
-fn nearest(lp: &Loop2, p: Vec2) -> Option<(usize, f64, Vec2, f64)> {
+pub(crate) fn nearest(lp: &Loop2, p: Vec2) -> Option<(usize, f64, Vec2, f64)> {
     lp.segs
         .iter()
         .enumerate()
@@ -618,7 +767,7 @@ fn nearest(lp: &Loop2, p: Vec2) -> Option<(usize, f64, Vec2, f64)> {
 }
 
 /// `lp` as the same closed path starting (and ending) at the point `t` along its segment `index`.
-fn started_at(lp: &Loop2, index: usize, t: f64) -> Vec<Seg2> {
+pub(crate) fn started_at(lp: &Loop2, index: usize, t: f64) -> Vec<Seg2> {
     let Some(seg) = lp.segs.get(index) else { return lp.segs.clone() };
     let rest = |from: usize| lp.segs.iter().skip(from).chain(lp.segs.iter().take(from)).copied();
     // At an end of the segment the path starts on a joint and nothing is split.
@@ -646,6 +795,8 @@ fn whole_rings(rings: &[Ring]) -> Vec<Step> {
             closed: true,
             entry: if ring.entered { Entry::Ramp } else { Entry::Link },
             lift: !ring.leads_on,
+            from: None,
+            slow: 0.0,
         })
         .collect()
 }
@@ -670,12 +821,14 @@ fn what_is_left(rings: &[Ring], old: &[Region2], reach: f64, radius: f64) -> Vec
                     closed: true,
                     entry: if led { Entry::Link } else { Entry::Ramp },
                     lift: !(ring.leads_on && whole(k + 1)),
+                    from: None,
+                    slow: 0.0,
                 });
             }
             Left::Parts(parts) => {
                 for segs in parts {
                     let Some(start) = segs.first().map(Seg2Geom::start) else { continue };
-                    steps.push(Step { start, segs: segs.clone(), closed: false, entry: Entry::Air, lift: true });
+                    steps.push(Step { start, segs: segs.clone(), closed: false, entry: Entry::Air, lift: true, from: None, slow: 0.0 });
                 }
             }
         }
