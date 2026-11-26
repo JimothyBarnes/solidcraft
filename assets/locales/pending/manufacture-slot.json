@@ -2,13 +2,13 @@
   "en": {
     "cmd.cam_op_slot": "Slot",
     "cmd.cam_setup_slots": "Find Slots",
-    "help.cam.op.slot": "Mills slots along their middle line: every slot found on the model, or the one picked. A slot has two half-round ends as wide as itself, with straight sides or arcs about one centre between them; its shape and depth are read from the model each time. The tool ramps down along the slot, to and fro, and goes once along it at each level. A tool as wide as the slot cuts it in one go, both walls at once. A narrower one leaves the same on each wall for an inside contour to finish, which makes the more accurate slot.",
+    "help.cam.op.slot": "Mills slots along their middle line: every slot found on the model, or the one picked. A slot has two half-round ends as wide as itself, with straight sides or arcs about one center between them; its shape and depth are read from the model each time. The tool ramps down along the slot, to and fro, and goes once along it at each level. A tool as wide as the slot cuts it in one go, both walls at once. A narrower one leaves the same on each wall for an inside contour to finish, which makes the more accurate slot.",
     "manufacture.slot_all": "All {count} slots",
     "manufacture.slot_choice": "Slot",
     "manufacture.slot_kept": "{count}, as made",
     "manufacture.slot_label": "{width} × {length} × {depth}",
     "manufacture.slot_label_through": "{width} × {length}, through",
-    "manufacture.slot_none": "No slots found: a slot has two half-round ends as wide as itself, straight sides or arcs about one centre between them, and nothing over it.",
+    "manufacture.slot_none": "No slots found: a slot has two half-round ends as wide as itself, straight sides or arcs about one center between them, and nothing over it.",
     "manufacture.slot_note": "Milled along its middle: the tool ramps down along the slot, to and fro, and goes once along it at each level.",
     "manufacture.slot_tool_wide": "This tool is wider than this slot."
   },
@@ -102,5 +102,9 @@
     "manufacture.slot_none": "슬롯을 찾지 못했습니다. 슬롯은 양 끝이 슬롯 폭과 같은 지름의 반원이고 그 사이가 직선 또는 중심이 같은 원호이며 위에 아무것도 없는 곳입니다.",
     "manufacture.slot_note": "중심선을 따라 가공합니다. 공구는 슬롯을 따라 왕복하며 경사로 내려가고, 각 단에서 슬롯 전체를 한 번 지나갑니다.",
     "manufacture.slot_tool_wide": "이 공구는 이 슬롯보다 굵습니다."
+  },
+  "en-GB": {
+    "help.cam.op.slot": "Mills slots along their middle line: every slot found on the model, or the one picked. A slot has two half-round ends as wide as itself, with straight sides or arcs about one centre between them; its shape and depth are read from the model each time. The tool ramps down along the slot, to and fro, and goes once along it at each level. A tool as wide as the slot cuts it in one go, both walls at once. A narrower one leaves the same on each wall for an inside contour to finish, which makes the more accurate slot.",
+    "manufacture.slot_none": "No slots found: a slot has two half-round ends as wide as itself, straight sides or arcs about one centre between them, and nothing over it."
   }
 }

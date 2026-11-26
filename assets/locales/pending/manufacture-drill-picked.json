@@ -14,7 +14,7 @@
     "manufacture.drill_picked_value": "{count} holes: {sizes}",
     "manufacture.drill_picked_value_one": "1 hole: {sizes}",
     "manufacture.drill_points": "Points",
-    "manufacture.drill_points_hint": "Click a vertex, a place on a face, or the centre a round edge shows when the pointer is on it; a click on one picked takes it out. Each is drilled from its own height.",
+    "manufacture.drill_points_hint": "Click a vertex, a place on a face, or the center a round edge shows when the pointer is on it; a click on one picked takes it out. Each is drilled from its own height.",
     "manufacture.drill_points_value": "{count} points",
     "manufacture.drill_points_value_one": "1 point"
   },
@@ -150,5 +150,8 @@
     "manufacture.drill_points_hint": "꼭짓점, 면 위의 위치, 또는 포인터를 둥근 모서리에 올리면 나타나는 중심을 클릭하세요. 고른 점을 다시 클릭하면 빠집니다. 각 점은 자기 높이에서 뚫습니다.",
     "manufacture.drill_points_value": "점 {count}개",
     "manufacture.drill_points_value_one": "점 1개"
+  },
+  "en-GB": {
+    "manufacture.drill_points_hint": "Click a vertex, a place on a face, or the centre a round edge shows when the pointer is on it; a click on one picked takes it out. Each is drilled from its own height."
   }
 }

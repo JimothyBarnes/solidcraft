@@ -1,11 +1,11 @@
 {
   "en": {
     "cmd.cam_op_engrave": "Engrave",
-    "help.cam.op.engrave": "Follows the drawn curves of a sketch with the tool's centre, a little below the face they are drawn on: a part number, a logo, a line. Text is followed along its letters' outlines. Curves that meet are cut in one go; the tool goes down where a run starts and up where it ends. The sketch has to face the tool. The curves are read from the sketch each time, so a changed sketch is a changed engraving.",
+    "help.cam.op.engrave": "Follows the drawn curves of a sketch with the tool's center, a little below the face they are drawn on: a part number, a logo, a line. Text is followed along its letters' outlines. Curves that meet are cut in one go; the tool goes down where a run starts and up where it ends. The sketch has to face the tool. The curves are read from the sketch each time, so a changed sketch is a changed engraving.",
     "manufacture.engrave_depth": "Depth",
     "manufacture.engrave_length": "Length of cut",
     "manufacture.engrave_none": "No sketch to follow: draw one on the face to engrave, facing the tool. Its curves and its text are followed.",
-    "manufacture.engrave_note": "The tool's centre follows every drawn curve of the sketch, its text too. Curves that meet are cut in one go.",
+    "manufacture.engrave_note": "The tool's center follows every drawn curve of the sketch, its text too. Curves that meet are cut in one go.",
     "manufacture.engrave_sketch": "Sketch",
     "manufacture.engrave_width": "Groove width",
     "manufacture.no_tool_for_engrave": "Add an engraving tool, a chamfer mill, a spot drill or an end mill first, with Add Tool."
@@ -86,5 +86,9 @@
     "manufacture.engrave_sketch": "스케치",
     "manufacture.engrave_width": "홈 폭",
     "manufacture.no_tool_for_engrave": "먼저 '공구 추가'로 각인 공구, 모따기 커터, 스폿 드릴 또는 엔드밀을 추가하십시오."
+  },
+  "en-GB": {
+    "help.cam.op.engrave": "Follows the drawn curves of a sketch with the tool's centre, a little below the face they are drawn on: a part number, a logo, a line. Text is followed along its letters' outlines. Curves that meet are cut in one go; the tool goes down where a run starts and up where it ends. The sketch has to face the tool. The curves are read from the sketch each time, so a changed sketch is a changed engraving.",
+    "manufacture.engrave_note": "The tool's centre follows every drawn curve of the sketch, its text too. Curves that meet are cut in one go."
   }
 }
