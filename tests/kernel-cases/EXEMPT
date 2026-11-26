@@ -40,6 +40,43 @@ browser.toggle_planes             the browser: crates/engine/src/cmd/browser.rs 
 browser.toggle_reference          the browser: crates/engine/src/cmd/browser.rs tests
 browser.ungroup                   the browser tree: order, groups and folding
 browser.unisolate                 visibility only: crates/engine/src/cmd/browser.rs tests
+cam.data                          CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.library.export                CAM tool library files, no geometry made: its tests in crates/engine/src/cmd/cam_library_tests.rs
+cam.library.import                CAM tool library files, no geometry made: its tests in crates/engine/src/cmd/cam_library_tests.rs
+cam.library.read                  CAM tool library files, no geometry made: its tests in crates/engine/src/cmd/cam_library_tests.rs
+cam.op.bore                       CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.chamfer                    CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.contour                    CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.delete                     CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.drill                      CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.duplicate                  CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.edit                       CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.engrave                    CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.face                       CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.manual                     CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.move                       CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.pocket                     CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.slot                       CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.thread                     CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.op.toolpath                   CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.post                          CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.posts.add                     CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.posts.list                    CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.create                  CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.delete                  CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.edit                    CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.holes                   CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.measure                 CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.openings                CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.outline                 CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.pockets                 CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.sheet                   CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.setup.slots                   CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.simulate                      CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.tool.create                   CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.tool.delete                   CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.tool.edit                     CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
+cam.tool.list                     CAM setups, tools and toolpaths, no B-rep made: its tests in crates/engine/src/cmd/cam_tests.rs
 canvas.calibrate                  reference images, and sketches traced from them (sketch only)
 canvas.decal                      reference images, and sketches traced from them (sketch only)
 canvas.delete                     reference images, and sketches traced from them (sketch only)
