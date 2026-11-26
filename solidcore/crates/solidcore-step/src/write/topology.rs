@@ -285,6 +285,14 @@ pub fn surface(s: &BSurface) -> R<(Surface, Map)> {
         BSurface::Plane { origin, u_axis, v_axis } => plane(*origin, *u_axis, *v_axis)?,
         BSurface::PlaneThrough { origin, u_point, v_point } => plane(*origin, sub(*u_point, *origin), sub(*v_point, *origin))?,
         BSurface::Cylinder { frame, radius } => (Surface::Cylinder { position: placement(frame), radius: *radius }, Map::IDENTITY),
+        BSurface::Cone { frame, radius_at_origin, half_angle } if *half_angle == 0.0 => {
+            // A cone of no angle (a round's straight edge) is the cylinder over its section, in the
+            // same (u, v), as the CADIR reader reads it; STEP's semi-angle must be above 0.
+            if !(*radius_at_origin > 0.0) {
+                return Err(unsupported("a cone of no angle and no radius"));
+            }
+            (Surface::Cylinder { position: placement(frame), radius: *radius_at_origin }, Map::IDENTITY)
+        }
         BSurface::Cone { frame, radius_at_origin, half_angle } => {
             // STEP's semi-angle is positive: a cone narrowing along z is the one widening along −z,
             // its frame turned over about x, (u, v) → (−u, −v).
@@ -325,8 +333,10 @@ fn singular_torus(surface: &BSurface, tolerance: f64) -> bool {
 }
 
 /// Whether a face keeps its NURBS parameters and pcurves: a procedural definition or a
-/// singular torus cannot be written as an ordinary analytic STEP surface.
-fn as_form(face: &Face, tolerance: f64) -> bool {
+/// singular torus cannot be written as an ordinary analytic STEP surface. The CADIR writer makes
+/// the same choice, as its own policy: CADIR's torus takes equal radii, but the face is kept on
+/// its NURBS form there too.
+pub fn as_form(face: &Face, tolerance: f64) -> bool {
     face.nurbs.is_some() && (matches!(face.surface, BSurface::BallPatch { .. } | BSurface::Blend { .. }) || singular_torus(&face.surface, tolerance))
 }
 
@@ -699,7 +709,7 @@ fn signed_area(ring: &[[f64; 2]]) -> f64 {
 /// record's cylinder, cone, sphere and torus have their natural normal pointing away from the
 /// axis (the sphere's centre, the torus's centre circle); `None` when the NURBS has no normal at
 /// its domain's centre.
-fn form_map(analytic: &BSurface, n: &BSurface, domain: [[f64; 2]; 2], map: Map) -> Option<Map> {
+pub fn form_map(analytic: &BSurface, n: &BSurface, domain: [[f64; 2]; 2], map: Map) -> Option<Map> {
     let eval = crate::kernel::SurfaceEval::new(n).ok()?;
     let (p, su, sv) = eval.derivs(0.5 * (domain[0][0] + domain[0][1]), 0.5 * (domain[1][0] + domain[1][1]))?;
     let normal = su.cross(sv);

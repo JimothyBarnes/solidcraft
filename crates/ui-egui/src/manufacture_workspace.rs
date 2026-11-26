@@ -70,6 +70,23 @@ pub fn entry_open(app: &SolveApp) -> bool {
     app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()
 }
 
+/// Entering and leaving while the workspace follows the view (`workspace_follows_view`): Manufacture
+/// is a model view with Manufacture's ribbon, so entering it focuses a model view first, as Design
+/// does, and leaving it puts the Design ribbon back before the other workspace's view is focused.
+pub(crate) fn focus(app: &mut SolveApp, workspace: &str, focus_view: fn(&mut SolveApp, &str) -> Result<(), String>) -> Result<(), String> {
+    if workspace == "manufacture" {
+        if !entry_open(app) {
+            return Err(solidcraft_ui_text::tr("manufacture.error_finish_operation").into());
+        }
+        focus_view(app, "design")?;
+        return enter(app, true);
+    }
+    if active(app) {
+        enter(app, false)?;
+    }
+    focus_view(app, workspace)
+}
+
 pub fn enter(app: &mut SolveApp, manufacture: bool) -> Result<(), String> {
     if manufacture {
         if !entry_open(app) {
