@@ -195,7 +195,8 @@ impl ChamferOp {
             return bad("`outside` and `openings` say which edges are picked: they go with edges: picked".into());
         }
         if self.edges == ChamferEdges::Chains {
-            if self.chains.is_empty() || self.chains.len() > MAX_CHAMFER_OUTLINES || !self.chains.iter().flatten().all(|v| v.abs() <= MAX_COORDINATE) {
+            if self.chains.is_empty() || self.chains.len() > MAX_CHAMFER_OUTLINES || !self.chains.iter().flatten().all(|v| v.abs() <= MAX_COORDINATE)
+            {
                 return bad(format!("the edges picked: 1 to {MAX_CHAMFER_OUTLINES} points, each within {MAX_COORDINATE} mm"));
             }
             if self.top.is_some() {
@@ -436,10 +437,17 @@ impl ChamferOp {
                 if within.is_empty() {
                     narrow += 1;
                 }
-                rounds.extend(within.iter().map(|region| round_within(region, None, self.direction, lead, true)).filter(|r| !r.segs.is_empty()).map(|r| (r, top)));
+                rounds.extend(
+                    within
+                        .iter()
+                        .map(|region| round_within(region, None, self.direction, lead, true))
+                        .filter(|r| !r.segs.is_empty())
+                        .map(|r| (r, top)),
+                );
             }
         }
-        let said = if narrow > 0 { vec![format!("{narrow} rim(s) picked too narrow for the tool to go round inside left sharp")] } else { Vec::new() };
+        let said =
+            if narrow > 0 { vec![format!("{narrow} rim(s) picked too narrow for the tool to go round inside left sharp")] } else { Vec::new() };
         let nothing = format!("tool {} does not fit along any edge picked: there is nothing to go round", tool.number);
         self.cut_rounds(start, tool, placement, material, &shape, lead, &rounds, said, nothing)
     }

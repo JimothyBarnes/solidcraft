@@ -40,7 +40,8 @@ mod toolpath;
 mod units;
 
 pub use chamfer::{
-    CHAMFER_TIP_ANGLES, ChamferChain, ChamferEdges, ChamferOp, ChamferWall, Chamfered, DEFAULT_CHAMFER_TIP_BELOW, DEFAULT_CHAMFER_WIDTH, MIN_CHAMFER_WIDTH,
+    CHAMFER_TIP_ANGLES, ChamferChain, ChamferEdges, ChamferOp, ChamferWall, Chamfered, DEFAULT_CHAMFER_TIP_BELOW, DEFAULT_CHAMFER_WIDTH,
+    MIN_CHAMFER_WIDTH,
 };
 pub use contour::{
     ContourOp, ContourSide, Contoured, CutDirection, DEFAULT_CONTOUR_CLEAR, DEFAULT_CONTOUR_STEPDOWN, DEFAULT_CONTOUR_STEPOVER, DEFAULT_LEAD_RADIUS,

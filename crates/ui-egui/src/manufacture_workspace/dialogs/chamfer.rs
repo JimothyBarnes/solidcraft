@@ -4,7 +4,9 @@
 //! `cam.op.edit` for a chamfer being changed) and shows what they would cut before OK, as the
 //! other operations' forms do.
 use serde_json::{Value, json};
-use solidcraft_engine::cmd::{OperationPreview, PickedChain, ToolChoice, manufacture_preview, manufacture_rim_at, manufacture_rims, manufacture_tools};
+use solidcraft_engine::cmd::{
+    OperationPreview, PickedChain, ToolChoice, manufacture_preview, manufacture_rim_at, manufacture_rims, manufacture_tools,
+};
 use solidcraft_engine::doc::display_units::format_length;
 use solidcraft_ui_text::tr;
 
@@ -402,9 +404,11 @@ impl ChamferForm {
         let geometries = labels(&GEOMETRIES);
         let geometry = self.geometry;
         let chains_said = chains_said(&self.chains, units, decimals);
-        let kept_chains = self.editing.as_ref().and_then(|edited| edited.base["chains"].as_array().map(Vec::len)).map(|count| {
-            solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count.to_string())])
-        });
+        let kept_chains = self
+            .editing
+            .as_ref()
+            .and_then(|edited| edited.base["chains"].as_array().map(Vec::len))
+            .map(|count| solidcraft_ui_text::format("manufacture.pocket_kept", &[("count", &count.to_string())]));
         let time = self.worked.get().map(|(_, preview)| minutes_seconds(preview.cut_minutes));
         // Where the tool's tip runs: the number to check against what is beside the part.
         // (Edges picked are at their own heights, each with its own.)

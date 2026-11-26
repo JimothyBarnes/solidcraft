@@ -395,7 +395,8 @@ impl<'a> Finder<'a> {
         };
         match side {
             None => {
-                let grown = solidcraft_cam::offset_region(&Region2 { outer: ring.ccw(), holes: Vec::new() }, -reach).map_err(|e| format!("{what}: {e}"))?;
+                let grown =
+                    solidcraft_cam::offset_region(&Region2 { outer: ring.ccw(), holes: Vec::new() }, -reach).map_err(|e| format!("{what}: {e}"))?;
                 let Some(outer) = grown.into_iter().next().map(|region| region.outer) else {
                     return Err(format!("{what}: nothing to go round"));
                 };
