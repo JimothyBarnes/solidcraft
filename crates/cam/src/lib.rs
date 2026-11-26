@@ -26,6 +26,7 @@ mod gcode_reader;
 mod heights;
 mod machine;
 mod manufacture;
+pub mod measure;
 mod offset;
 mod open_pocket;
 mod placement;

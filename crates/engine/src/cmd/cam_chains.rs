@@ -8,7 +8,7 @@
 //! vertex where two could go on, the chain stops: which one is meant can't be told). A chain that
 //! comes back to where it began is closed.
 use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
-use solidcraft_geom::prelude::*;
+use solidcraft_cam::measure::{self, apart};
 use solidcraft_geom::{Loop2Geom, PlaneGeom, Seg2Geom};
 use solidcraft_kernel::{Body, BoolOp, PlanarPiece};
 
@@ -53,12 +53,7 @@ struct Level {
 
 /// `p` in `plane`'s coordinates: its place in the plane, and its height above it.
 fn local(plane: &Plane, p: Vec3) -> (Vec2, f64) {
-    let d = p - plane.origin;
-    (Vec2 { x: d.dot(plane.x), y: d.dot(plane.y) }, plane.height(p))
-}
-
-fn apart(a: Vec2, b: Vec2) -> f64 {
-    (a.x - b.x).hypot(a.y - b.y)
+    (plane.to_local(p), plane.height(p))
 }
 
 /// The level edges of `body` in `plane`: each that lies in a plane parallel to it, read as lines
@@ -117,7 +112,7 @@ fn levels(body: &Body, plane: &Plane) -> Result<Vec<Level>, String> {
 /// How far the point `p` (in the plane, at the height `h`) is from `level`.
 fn distance(level: &Level, p: Vec2, h: f64) -> f64 {
     let across = level.segs.iter().map(|seg| apart(p, seg.point_at(seg.closest_param(p)))).fold(f64::INFINITY, f64::min);
-    across.hypot(h - level.z)
+    measure::slant(across, h - level.z)
 }
 
 /// The chain of `levels` that `start` is in: carried on from each of its ends through every vertex

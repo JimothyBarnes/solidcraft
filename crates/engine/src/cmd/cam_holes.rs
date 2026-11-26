@@ -3,6 +3,7 @@
 //! its mesh. Upstream's engine measures bore walls the same way for fastener seats
 //! (`cmd/parts.rs`).
 use solidcore_record::Vec3;
+use solidcraft_cam::measure;
 use solidcraft_geom::prelude::*;
 use solidcraft_kernel::Body;
 
@@ -53,27 +54,27 @@ pub(super) fn holes_along(b: &Body, up: Vec3) -> Result<Vec<Hole>, String> {
     let mut walls: Vec<Wall> = Vec::new();
     for face in 0..b.record().faces.len() {
         let Some(c) = solidcraft_kernel::cylinder_between_rims(b, face).filter(|c| c.internal) else { continue };
-        if c.axis.dot(up).abs() < 1.0 - PARALLEL {
+        if !measure::runs_along(c.axis, up.vec(), 1.0 - PARALLEL) {
             continue;
         }
         if walls.len() >= MAX_WALL_FACES {
             return Err(format!("the body has more than {MAX_WALL_FACES} hole faces"));
         }
         let ends = [c.axis_point + c.axis * c.start, c.axis_point + c.axis * c.end];
-        let heights = [ends[0].dot(up), ends[1].dot(up)];
+        let heights = [measure::height_along(ends[0], up.vec()), measure::height_along(ends[1], up.vec())];
         let (low, high) = (heights[0].min(heights[1]), heights[0].max(heights[1]));
         let turn: f64 = solidcraft_kernel::face_edge_indices(b, face)
             .into_iter()
             .filter_map(|edge| solidcraft_kernel::edge_circle(b, edge))
-            .filter(|rim| rim.axis.dot(up).abs() > 1.0 - PARALLEL && (rim.center.dot(up) - high).abs() <= tol)
+            .filter(|rim| {
+                measure::runs_along(rim.axis, up.vec(), 1.0 - PARALLEL) && (measure::height_along(rim.center, up.vec()) - high).abs() <= tol
+            })
             .map(|rim| rim.angle)
             .sum();
         walls.push(Wall { at: ends[0] - up * heights[0], radius: c.radius, low, high, turn });
     }
     // Two directions square to `up` and to each other, to look near a hole's wall all round.
-    let across = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-    let Some(u) = up.cross(across).unit() else { return Err("no direction square to the holes' was found".into()) };
-    let v = up.cross(u.vec());
+    let Some((u, v)) = measure::square_to(up.vec()) else { return Err("no direction square to the holes' was found".into()) };
     let mut holes = Vec::new();
     for w in joined(walls, tol) {
         if w.turn < std::f64::consts::TAU - 1e-6 || w.high - w.low <= tol {

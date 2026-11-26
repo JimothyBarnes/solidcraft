@@ -10,7 +10,7 @@ use solidcraft_cam::{
     MANUFACTURE_FORMAT, ManufactureData, Operation, OperationKind, PocketOp, PocketShape, Posted, ProgramContext, ProgramTool, SafeHeights, Setup,
     SetupKind, Stock, Tool, Toolpath, Wcs, WcsOrientation, WcsOrigin,
 };
-use solidcraft_cam::{HeightFrom, HeightRef, Heights};
+use solidcraft_cam::{HeightFrom, HeightRef, Heights, measure};
 use solidcraft_doc::plugin_data::DATA;
 use solidcraft_geom::{Loop2Geom as _, PlaneGeom as _, Region2Geom as _, Seg2Geom as _};
 
@@ -524,7 +524,7 @@ pub(super) fn hole_picked(groups: &[HoleGroup], at: solidcore_record::Vec3) -> O
             continue;
         }
         for (h, hole) in group.holes.iter().enumerate() {
-            let from_axis = (at.x - hole[0]).hypot(at.y - hole[1]);
+            let from_axis = measure::apart(solidcore_record::Vec2 { x: at.x, y: at.y }, solidcore_record::Vec2 { x: hole[0], y: hole[1] });
             let off_wall = (from_axis - radius).abs();
             if from_axis <= radius + HOLE_PICK_REACH && best.is_none_or(|(_, nearest)| off_wall < nearest) {
                 best = Some(((g, h), off_wall));
@@ -1161,7 +1161,7 @@ fn round_wall(wall: &solidcore_record::Loop2) -> Option<f64> {
         let solidcore_record::Seg2::Arc { center, radius, .. } = *seg else { return None };
         match circle {
             None => circle = Some((center, radius)),
-            Some((about, of)) if (about.x - center.x).hypot(about.y - center.y) <= 1e-6 && (of - radius).abs() <= 1e-6 => {}
+            Some((about, of)) if measure::apart(about, center) <= 1e-6 && (of - radius).abs() <= 1e-6 => {}
             Some(_) => return None,
         }
     }
@@ -1253,7 +1253,7 @@ fn sketch_curves(s: &Session, p: &Placement, name: &str) -> std::result::Result<
                 Seg2::Line { a, b } => pieces.push(Seg2::Line { a: at(a), b: at(b) }),
                 Seg2::Arc { center, radius, start, sweep } => {
                     let (c, from) = (at(center), at(Vec2 { x: center.x + start.cos(), y: center.y + start.sin() }));
-                    pieces.push(Seg2::Arc { center: c, radius, start: (from.y - c.y).atan2(from.x - c.x), sweep: sweep * turn });
+                    pieces.push(Seg2::Arc { center: c, radius, start: measure::bearing(c, from), sweep: sweep * turn });
                 }
                 other => {
                     let points = other.polyline(ENGRAVE_CURVE_TOLERANCE);
@@ -1367,15 +1367,8 @@ pub fn manufacture_rim_at(s: &Session, params: &Value, at: solidcore_record::Vec
         return Ok(None);
     }
     let within = |l: &solidcore_record::Loop2| solidcore_record::Region2 { outer: l.ccw(), holes: Vec::new() }.contains(q);
-    let from = |l: &solidcore_record::Loop2| {
-        l.segs
-            .iter()
-            .map(|seg| {
-                let on = seg.point_at(seg.closest_param(q));
-                (on.x - q.x).hypot(on.y - q.y)
-            })
-            .fold(f64::INFINITY, f64::min)
-    };
+    let from =
+        |l: &solidcore_record::Loop2| l.segs.iter().map(|seg| measure::apart(seg.point_at(seg.closest_param(q)), q)).fold(f64::INFINITY, f64::min);
     // The part's own outside: the outlines that are in no other (what stands in a pocket has
     // an outline of its own just under the top, which is an inside edge).
     let outer: Vec<&solidcore_record::Loop2> = outline
@@ -2058,7 +2051,9 @@ fn work(
 }
 
 // The Manufacture types a view of a setup is made of, for the UI above the engine.
-pub use solidcraft_cam::{BUILTIN_MACHINES, BodyPart, Drawn, GENERIC_MILL, Machine, Placement, ToolShape, machine as manufacture_machine};
+pub use solidcraft_cam::{
+    BUILTIN_MACHINES, BodyPart, Drawn, GENERIC_MILL, Machine, Placement, ToolShape, machine as manufacture_machine, measure as manufacture_measure,
+};
 
 /// Writes `bytes` to the file `path` in one step; a file already there is replaced only when
 /// `overwrite`. `what` names the content in the error.

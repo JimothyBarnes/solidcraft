@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use solidcraft_engine::cmd::{
     CamLibraryToolStatus, CamLibraryTools, CamPostEntry, CamPostLibrary, CamPostProperty, HoleBottom, HoleGroup, MANUFACTURE_BREAKTHROUGH,
     OperationPreview, Placement, ProgramPreview, Simulated, ToolAt, ToolChoice, manufacture_data, manufacture_hole_at, manufacture_hole_depth,
-    manufacture_holes, manufacture_library, manufacture_post_folder, manufacture_post_library, manufacture_preview, manufacture_program,
-    manufacture_setup_preview, manufacture_tools,
+    manufacture_holes, manufacture_library, manufacture_measure, manufacture_post_folder, manufacture_post_library, manufacture_preview,
+    manufacture_program, manufacture_setup_preview, manufacture_tools,
 };
 use solidcraft_engine::doc::display_units::{format_length, length_number, unit_scale};
 use solidcraft_ui_text::{tr, tr_label};
@@ -1584,7 +1584,7 @@ impl DrillForm {
         // To the micron: a click is no more exact than that.
         let micron = |v: f64| (v * 1e6).round() / 1e6;
         let at = [micron(point.x), micron(point.y), micron(point.z)];
-        let near = |p: &[f64; 3]| (p[0] - at[0]).hypot(p[1] - at[1]).hypot(p[2] - at[2]) <= SAME_POINT;
+        let near = |p: &[f64; 3]| manufacture_measure::apart_in_space((*p).into(), at.into()) <= SAME_POINT;
         match self.points.iter().position(near) {
             Some(picked) => {
                 self.points.remove(picked);

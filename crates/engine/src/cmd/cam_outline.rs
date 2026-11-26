@@ -10,11 +10,10 @@
 //! cut from what the bodies have above the plane, and nothing may be left.
 use solidcore_record::brep::{Loop, OrientedEdge};
 use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_cam::measure;
 use solidcraft_geom::prelude::*;
 use solidcraft_kernel::{Body, BoolOp, PlanarPiece, PlanarSpline};
 
-/// How near to along (or opposite) a plane's normal a face's must be for the face to lie in it.
-pub(super) const FACING: f64 = 1.0 - 1e-9;
 /// How much a loop is grown before it is checked to hold what is above it, mm at least and as a
 /// share of the bodies' size: a wall standing on the outline is inside the grown loop by this
 /// much, well clear of the kernel's own tolerances, so the check never meets faces lying on one
@@ -71,7 +70,7 @@ pub(super) fn cut_faces(body: &Body, plane: &Plane) -> Result<Option<Above>, Str
     };
     let mut faces = Vec::new();
     for face in 0..kept.face_count() {
-        if kept.planar_face(face).is_some_and(|on| on.normal().dot(n) <= -FACING && plane.height(on.origin).abs() <= tol) {
+        if kept.planar_face(face).is_some_and(|on| measure::looks_down(&on, n) && plane.height(on.origin).abs() <= tol) {
             faces.push(face_rings(&kept, face, plane)?);
         }
     }

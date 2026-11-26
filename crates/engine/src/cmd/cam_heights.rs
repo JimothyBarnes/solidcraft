@@ -11,11 +11,11 @@
 //! control points), or the whole body's when an edge gives none.
 use solidcore_record::brep::Curve;
 use solidcore_record::{Loop2, Plane, Vec2, Vec3};
-use solidcraft_cam::HeightField;
+use solidcraft_cam::{HeightField, measure};
 use solidcraft_geom::prelude::*;
 use solidcraft_kernel::{Body, FaceSurface};
 
-use super::cam_outline::{FACING, face_rings};
+use super::cam_outline::face_rings;
 
 /// A direction this near square to up is upright.
 const UPRIGHT: f64 = 1e-9;
@@ -45,7 +45,7 @@ pub(super) fn part_heights(bodies: &[(&str, &Body)], plane: &Plane, field: &Heig
         for face in 0..body.face_count() {
             let flat = match solidcraft_kernel::face_surface(body, face) {
                 Some(FaceSurface::Plane { .. }) => body.planar_face(face),
-                Some(FaceSurface::Cylinder { axis, .. }) if axis.dot(up).abs() >= FACING => continue,
+                Some(FaceSurface::Cylinder { axis, .. }) if measure::runs_along(axis, up, measure::ALONG) => continue,
                 Some(_) => None,
                 None => body.planar_face(face),
             };
@@ -53,7 +53,7 @@ pub(super) fn part_heights(bodies: &[(&str, &Body)], plane: &Plane, field: &Heig
                 boxes.push(around(body, face).unwrap_or(whole));
                 continue;
             };
-            let rise = on.normal().dot(up);
+            let rise = measure::slope(&on, up);
             // Upright, or facing down: never the top of anything.
             if rise <= UPRIGHT {
                 continue;
@@ -66,11 +66,11 @@ pub(super) fn part_heights(bodies: &[(&str, &Body)], plane: &Plane, field: &Heig
                 rings.iter().map(from_above).collect::<Vec<_>>()
             });
             match seen {
-                Ok(outlines) if rise >= FACING => {
+                Ok(outlines) if rise >= measure::ALONG => {
                     let level = (plane.height(on.origin) * 1e9).round() / 1e9;
                     fill(&mut heights, field, &outlines, |_| level);
                 }
-                Ok(outlines) => fill(&mut heights, field, &outlines, |at| (on.origin - plane.to_world(at)).dot(on.normal()) / rise),
+                Ok(outlines) => fill(&mut heights, field, &outlines, |at| measure::rise_to(&on, plane.to_world(at), up)),
                 Err(_) => boxes.push(around(body, face).unwrap_or(whole)),
             }
         }

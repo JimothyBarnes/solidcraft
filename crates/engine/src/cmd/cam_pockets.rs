@@ -20,10 +20,11 @@
 //! counterbores lists at once. What the rays miss is refused, with the reason, when it is cut.
 use solidcore_record::brep::Loop;
 use solidcore_record::{Loop2, Plane, Region2, Vec2, Vec3};
+use solidcraft_cam::measure;
 use solidcraft_geom::prelude::*;
 use solidcraft_kernel::{Body, BoolOp};
 
-use super::cam_outline::{FACING, cut_faces, face_rings, hair_of};
+use super::cam_outline::{cut_faces, face_rings, hair_of};
 
 /// The most faces looked at for floors in one body.
 const MAX_FLOOR_FACES: usize = 20_000;
@@ -248,7 +249,7 @@ impl<'a> Finder<'a> {
             }
         }
         let Some((depth, index, body, face)) = floor else { return Ok(Under::Nothing) };
-        if !body.planar_face(face).is_some_and(|on| on.normal().dot(up) >= FACING) {
+        if !body.planar_face(face).is_some_and(|on| measure::looks_up(&on, up)) {
             return Ok(Under::NotFlat);
         }
         // Without the last bits of the ray's arithmetic, so that a floor at -7 reads -7.
@@ -495,7 +496,7 @@ impl<'a> Finder<'a> {
                 return Err(format!("body '{name}' has more than {MAX_FLOOR_FACES} faces"));
             }
             for face in 0..count {
-                let Some(on) = body.planar_face(face).filter(|on| on.normal().dot(up) >= FACING) else { continue };
+                let Some(on) = body.planar_face(face).filter(|on| measure::looks_up(on, up)) else { continue };
                 let height = self.plane.height(on.origin);
                 if self.top - height <= 2.0 * self.hair {
                     continue;
@@ -554,7 +555,7 @@ fn floor_faces(body: &Body, face: usize, plane: &Plane, floor: f64, hair: f64) -
             .map(|used| used.edge as usize)
             .collect()
     };
-    let level = |f: usize| body.planar_face(f).is_some_and(|on| on.normal().dot(up) >= FACING && (plane.height(on.origin) - floor).abs() <= hair);
+    let level = |f: usize| body.planar_face(f).is_some_and(|on| measure::looks_up(&on, up) && (plane.height(on.origin) - floor).abs() <= hair);
     let mut joined = vec![face];
     let mut edges: std::collections::BTreeSet<usize> = edges_of(face).into_iter().collect();
     let mut others: Vec<usize> = (0..count).filter(|&f| f != face && level(f)).collect();

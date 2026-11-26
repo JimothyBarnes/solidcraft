@@ -226,8 +226,8 @@ pub use crate::schema::cam::{
 pub use cam::{
     BUILTIN_MACHINES, BodyPart, Drawn, GENERIC_MILL, Machine, OperationPreview, OperationView, PickedChain, Placement, Playback, PlaybackOperation,
     ProgramPreview, SetupView, Simulated, SimulatedOperation, ToolAt, ToolChoice, ToolShape, manufacture_chain_at, manufacture_data,
-    manufacture_hole_at, manufacture_holes, manufacture_machine, manufacture_opening_at, manufacture_openings, manufacture_playback,
-    manufacture_pocket_at, manufacture_pockets, manufacture_preview, manufacture_program, manufacture_rim_at, manufacture_rims,
+    manufacture_hole_at, manufacture_holes, manufacture_machine, manufacture_measure, manufacture_opening_at, manufacture_openings,
+    manufacture_playback, manufacture_pocket_at, manufacture_pockets, manufacture_preview, manufacture_program, manufacture_rim_at, manufacture_rims,
     manufacture_setup_preview, manufacture_simulation, manufacture_sketches, manufacture_slot_at, manufacture_slots, manufacture_tool_rows,
     manufacture_tools, manufacture_view,
 };
