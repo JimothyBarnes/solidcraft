@@ -82,9 +82,25 @@ pub(crate) fn focus(app: &mut SolveApp, workspace: &str, focus_view: fn(&mut Sol
         return enter(app, true);
     }
     if active(app) {
+        // A form's picking on the model is a viewport dialog of its own (`picking`): it ends with
+        // the workspace, as the form does, and keeps no other switch from happening. Refused, it
+        // is put back as it was.
+        let picking = if picking::active(app) { app.dialog.take() } else { None };
+        if !crate::workspace::switcher_available(app) {
+            if picking.is_some() {
+                app.dialog = picking;
+            }
+            return Err(solidcraft_ui_text::tr("workspace_focus.finish_operation").into());
+        }
         enter(app, false)?;
     }
-    focus_view(app, workspace)
+    focus_view(app, workspace)?;
+    // A model view comes back with the ribbon it had (`workspace::remember_view`): Design asked
+    // for from another view shows Design's, not Manufacture's.
+    if workspace == "design" && active(app) {
+        enter(app, false)?;
+    }
+    Ok(())
 }
 
 pub fn enter(app: &mut SolveApp, manufacture: bool) -> Result<(), String> {
@@ -126,6 +142,36 @@ mod tests {
         let mut h = Harness::new();
         h.app.home.open = false;
         h
+    }
+
+    /// With the workspace following the view (upstream's default), Manufacture is the model view
+    /// with Manufacture's ribbon: Render opens a view of its own, Manufacture comes back to the
+    /// model view, and Design asked for from the Render view shows Design's ribbon there.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn with_the_workspace_following_the_view_manufacture_is_the_model_view_with_its_ribbon() {
+        use solidcraft_views::ViewKind;
+        let mut app = crate::SolveApp::new(Default::default(), Default::default());
+        assert!(app.preferences.workspace_follows_view);
+        let model = app.docs.views.active().id;
+        crate::workspace::enter(&mut app, "manufacture").unwrap();
+        assert!(active(&app));
+        assert_eq!(app.docs.views.active().id, model);
+        crate::workspace::enter(&mut app, "render").unwrap();
+        let render = app.docs.views.active().id;
+        assert_eq!(app.docs.views.active().kind, ViewKind::Render);
+        assert!(!active(&app));
+        crate::workspace::enter(&mut app, "manufacture").unwrap();
+        assert_eq!(app.docs.views.active().id, model);
+        assert!(active(&app), "back on the model view, with Manufacture's ribbon");
+        // The Render view's tab clicked, then Design: the model view, with Design's ribbon.
+        crate::documents::focus_view(&mut app, render);
+        assert_eq!(app.docs.views.active().id, render);
+        crate::workspace::enter(&mut app, "design").unwrap();
+        assert_eq!(app.docs.views.active().id, model);
+        assert!(!active(&app), "Design asked for shows Design's ribbon");
+        assert_eq!(app.ui.tab, "MODEL");
+        assert!(crate::workspace::enter(&mut app, "lathe").is_err());
     }
 
     #[test]
