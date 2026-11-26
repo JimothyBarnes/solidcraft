@@ -39,7 +39,7 @@ use crate::contour::{
     CutDirection, DEFAULT_CONTOUR_CLEAR, DEFAULT_LEAD_RADIUS, MAX_LEAVE, MIN_STEP, Round, SAME_HEIGHT, apart, bad, cut, moved_at_least, round_within,
     way_is_clear,
 };
-use crate::feeds::op_feeds;
+use crate::feeds::{OpFeeds, op_feeds};
 use crate::offset::JOINT_TOLERANCE;
 use crate::open_pocket::{self, OpenFloor};
 use crate::placement::Placement;
@@ -660,50 +660,7 @@ impl PocketOp {
         }
         moves.push(Move::Rapid { to: at(first, clearance) });
         let mut last = first;
-        // One cut at the height `z`, from wherever the tool is: `above` is how high the stock
-        // still stands where the tool goes down a ramp. Where the tool is when it is done.
-        let one = |moves: &mut Vec<Move>, step: &Step, z: f64, above: f64| -> Vec2 {
-            match step.entry {
-                Entry::Ramp => {
-                    // Down to the level above in the air it left, then down the ring itself.
-                    moves.push(Move::Rapid { to: at(step.start, retract) });
-                    moves.push(Move::Linear { to: at(step.start, above), feed: f.plunge_feed });
-                    ramp(moves, step.start, &step.segs, above, z, angle, f.ramp_feed);
-                }
-                Entry::ZigZag => {
-                    // The same down a cut that does not end where it starts: there and back.
-                    moves.push(Move::Rapid { to: at(step.start, retract) });
-                    moves.push(Move::Linear { to: at(step.start, above), feed: f.plunge_feed });
-                    there_and_back(moves, step.start, &step.segs, above, z, angle, f.ramp_feed);
-                }
-                // From the ring inside, the shortest way: one stepover, in the region.
-                Entry::Link => moves.push(Move::Linear { to: at(step.start, z), feed: f.feed }),
-                Entry::Air => {
-                    // Down in the air: what the tool before cleared, or beside the stock, or
-                    // what the pass before cut, and then straight across to the cut.
-                    let down = step.from.unwrap_or(step.start);
-                    moves.push(Move::Rapid { to: at(down, retract) });
-                    moves.push(Move::Linear { to: at(down, z), feed: f.plunge_feed });
-                    if step.from.is_some() {
-                        moves.push(Move::Linear { to: at(step.start, z), feed: f.feed });
-                    }
-                }
-            }
-            let (mut from, mut along) = (step.start, 0.0);
-            for (k, seg) in step.segs.iter().enumerate() {
-                let to = if step.closed && k + 1 == step.segs.len() { step.start } else { seg.end() };
-                // The way in from beside the stock is fed slower, until the tool is in the cut.
-                along += seg.length();
-                let slow = step.slow > 0.0 && along <= step.slow + JOINT_TOLERANCE;
-                cut(moves, seg, from, to, (z, z), if slow { SIDE_ENTRY_FEED * f.feed } else { f.feed });
-                from = to;
-            }
-            // On to the ring outside when that is the next one; up otherwise.
-            if step.lift {
-                moves.push(Move::Rapid { to: at(from, retract) });
-            }
-            from
-        };
+        let one = |moves: &mut Vec<Move>, step: &Step, z: f64, above: f64| cut_step(moves, step, (z, above), (retract, angle), &f);
         for ((levels, _, steps), (heights, passes, along_walls)) in plans.iter().zip(&finishes) {
             let mut above = top;
             for &z in levels {
@@ -785,6 +742,54 @@ impl PocketOp {
             notes: f.notes.into_iter().chain(said).collect(),
         })
     }
+}
+
+/// The moves of one cut at the height `z`, from wherever the tool is (`retract` is the height it
+/// moves over the stock at): down to it as the cut's entry says, along it, and up unless the
+/// next cut is reached straight from it. `above` is how high the stock still stands where the
+/// tool goes down a ramp, `angle` the ramp's angle. Where the tool is when it is done.
+pub(crate) fn cut_step(moves: &mut Vec<Move>, step: &Step, (z, above): (f64, f64), (retract, angle): (f64, f64), f: &OpFeeds) -> Vec2 {
+    let at = |p: Vec2, z: f64| Vec3 { x: p.x, y: p.y, z };
+    match step.entry {
+        Entry::Ramp => {
+            // Down to the level above in the air it left, then down the ring itself.
+            moves.push(Move::Rapid { to: at(step.start, retract) });
+            moves.push(Move::Linear { to: at(step.start, above), feed: f.plunge_feed });
+            ramp(moves, step.start, &step.segs, above, z, angle, f.ramp_feed);
+        }
+        Entry::ZigZag => {
+            // The same down a cut that does not end where it starts: there and back.
+            moves.push(Move::Rapid { to: at(step.start, retract) });
+            moves.push(Move::Linear { to: at(step.start, above), feed: f.plunge_feed });
+            there_and_back(moves, step.start, &step.segs, above, z, angle, f.ramp_feed);
+        }
+        // From the ring inside, the shortest way: one stepover, in the region.
+        Entry::Link => moves.push(Move::Linear { to: at(step.start, z), feed: f.feed }),
+        Entry::Air => {
+            // Down in the air: what the tool before cleared, or beside the stock, or what the
+            // pass before cut, and then straight across to the cut.
+            let down = step.from.unwrap_or(step.start);
+            moves.push(Move::Rapid { to: at(down, retract) });
+            moves.push(Move::Linear { to: at(down, z), feed: f.plunge_feed });
+            if step.from.is_some() {
+                moves.push(Move::Linear { to: at(step.start, z), feed: f.feed });
+            }
+        }
+    }
+    let (mut from, mut along) = (step.start, 0.0);
+    for (k, seg) in step.segs.iter().enumerate() {
+        let to = if step.closed && k + 1 == step.segs.len() { step.start } else { seg.end() };
+        // The way in from beside the stock is fed slower, until the tool is in the cut.
+        along += seg.length();
+        let slow = step.slow > 0.0 && along <= step.slow + JOINT_TOLERANCE;
+        cut(moves, seg, from, to, (z, z), if slow { SIDE_ENTRY_FEED * f.feed } else { f.feed });
+        from = to;
+    }
+    // On to the ring outside when that is the next one; up otherwise.
+    if step.lift {
+        moves.push(Move::Rapid { to: at(from, retract) });
+    }
+    from
 }
 
 /// The moves down a closed path (`segs`, from `start` back to it) from the height `above` to

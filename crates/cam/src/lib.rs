@@ -28,6 +28,7 @@ mod machine;
 mod manufacture;
 pub mod measure;
 mod offset;
+mod open_contour;
 mod open_pocket;
 mod placement;
 mod pocket;

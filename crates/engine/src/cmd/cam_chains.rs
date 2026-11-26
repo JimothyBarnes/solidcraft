@@ -7,6 +7,11 @@
 //! level edge of that height goes on (a boss's outline is one chain, whatever its corners; at a
 //! vertex where two could go on, the chain stops: which one is meant can't be told). A chain that
 //! comes back to where it began is closed.
+//!
+//! A chain follows the wall it borders (decision 0043): an edge is the foot of a wall when the
+//! body stands above it on one side, and a top when nothing does, and a chain goes on only to
+//! edges of its own kind. A step's wall foot is a chain of its own, open where the ledge's
+//! outline goes on along the part's sides.
 use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_cam::measure::{self, apart};
 use solidcraft_geom::{Loop2Geom, PlaneGeom, Seg2Geom};
@@ -30,6 +35,9 @@ pub(super) struct Chain {
     /// Its pieces, end to end from its start.
     pub segs: Vec<Seg2>,
     pub closed: bool,
+    /// Whether its edges are the foot of a wall (the body stands above them on one side), not
+    /// the top of one (nothing stands above them).
+    pub foot: bool,
     /// The body it is on (its place in the list) and the edges it is made of.
     pub body: usize,
     pub edges: Vec<usize>,
@@ -115,18 +123,33 @@ fn distance(level: &Level, p: Vec2, h: f64) -> f64 {
     measure::slant(across, h - level.z)
 }
 
+/// Which of `levels` at the height `z` are the foot of a wall: `body` stands above each on one
+/// side, so it lies on the outline of the body's section a hair above `z`. The others are tops;
+/// levels at other heights are neither, and read `false`.
+fn feet(body: &Body, plane: &Plane, levels: &[Level], z: f64, (hair, tol): (f64, f64)) -> Result<Vec<bool>, String> {
+    let at_z = |l: &Level| (l.z - z).abs() <= tol;
+    if !levels.iter().any(at_z) {
+        return Ok(vec![false; levels.len()]);
+    }
+    let rings: Vec<Loop2> = cut_faces(body, &plane.offset(z + hair))?.map(|above| above.faces.into_iter().flatten().collect()).unwrap_or_default();
+    let on_outline = |p: Vec2| rings.iter().flat_map(|r| r.segs.iter()).any(|seg| apart(p, seg.point_at(seg.closest_param(p))) <= hair);
+    Ok(levels.iter().map(|l| at_z(l) && l.segs.get(l.segs.len() / 2).is_some_and(|seg| on_outline(seg.point_at(0.5)))).collect())
+}
+
 /// The chain of `levels` that `start` is in: carried on from each of its ends through every vertex
-/// where exactly one other level edge of its height goes on, until it comes back or can't go on.
-fn chain_from(levels: &[Level], start: usize, tol: f64) -> Result<(Vec<(usize, bool)>, bool), String> {
+/// where exactly one other level edge of its height and its kind (`foot`: which are the foot of a
+/// wall) goes on, until it comes back or can't go on.
+fn chain_from(levels: &[Level], start: usize, tol: f64, foot: &[bool]) -> Result<(Vec<(usize, bool)>, bool), String> {
     let Some(first) = levels.get(start) else { return Ok((Vec::new(), false)) };
     let z = first.z;
+    let kind = foot.get(start).copied().unwrap_or(false);
     // The level edges of the chain's height at the vertex `v` other than `arriving`, the edge the
     // chain comes to it by: each with whether it is gone along backwards (to its first vertex).
     let at = |v: u32, arriving: usize| -> Vec<(usize, bool)> {
         levels
             .iter()
             .enumerate()
-            .filter(|(k, l)| *k != arriving && (l.z - z).abs() <= tol && l.ends.contains(&v))
+            .filter(|(k, l)| *k != arriving && (l.z - z).abs() <= tol && foot.get(*k).copied().unwrap_or(false) == kind && l.ends.contains(&v))
             .map(|(k, l)| (k, l.ends[0] != v))
             .collect()
     };
@@ -211,7 +234,10 @@ pub(super) fn chains(bodies: &[(&str, &Body)], plane: &Plane, picks: &[Vec3]) ->
         if out.iter().any(|chain| chain.body == b && chain.edges.contains(&edge)) {
             continue;
         }
-        let (order, closed) = chain_from(levels, k, tol)?;
+        let z = levels.get(k).map_or(h, |l| l.z);
+        let Some(&(name, body)) = bodies.get(b) else { continue };
+        let foot = feet(body, plane, levels, z, (hair_of(size), tol)).map_err(|e| format!("body '{name}': {e}"))?;
+        let (order, closed) = chain_from(levels, k, tol, &foot)?;
         let mut segs = Vec::new();
         let mut edges = Vec::new();
         for (k, backwards) in order {
@@ -223,8 +249,7 @@ pub(super) fn chains(bodies: &[(&str, &Body)], plane: &Plane, picks: &[Vec3]) ->
                 segs.extend(l.segs.iter().copied());
             }
         }
-        let z = levels.get(k).map_or(h, |l| l.z);
-        out.push(Chain { z, segs, closed, body: b, edges });
+        out.push(Chain { z, segs, closed, foot: foot.get(k).copied().unwrap_or(false), body: b, edges });
     }
     Ok(out)
 }
@@ -345,7 +370,7 @@ mod tests {
     fn square(z: f64, x0: f64, x1: f64) -> Chain {
         let c = [(x0, x0), (x1, x0), (x1, x1), (x0, x1)];
         let segs = (0..4).map(|i| line(c[i], c[(i + 1) % 4])).collect();
-        Chain { z, segs, closed: true, body: 0, edges: Vec::new() }
+        Chain { z, segs, closed: true, foot: true, body: 0, edges: Vec::new() }
     }
 
     #[test]
@@ -389,7 +414,8 @@ mod tests {
             level(12, (0.0, 10.0), (0.0, 0.0), [3, 0]),
             level(13, (0.0, 10.0), (10.0, 10.0), [3, 2]),
         ];
-        let (order, closed) = chain_from(&square, 1, 1e-6).unwrap();
+        let tops = [false; 5];
+        let (order, closed) = chain_from(&square, 1, 1e-6, &tops).unwrap();
         assert!(closed);
         assert_eq!(order.iter().map(|(k, _)| square[*k].edge).collect::<Vec<_>>(), vec![11, 10, 13, 12]);
         // The top edge, given from 3 to 2, is gone along backwards.
@@ -397,7 +423,7 @@ mod tests {
         // With a spur at corner 2, two edges go on there: the chain stops at it from both sides.
         let mut spur = square;
         spur.push(level(14, (10.0, 10.0), (20.0, 10.0), [2, 4]));
-        let (order, closed) = chain_from(&spur, 1, 1e-6).unwrap();
+        let (order, closed) = chain_from(&spur, 1, 1e-6, &tops).unwrap();
         assert!(!closed);
         assert_eq!(order.iter().map(|(k, _)| spur[*k].edge).collect::<Vec<_>>(), vec![13, 12, 11, 10]);
         // An edge of another height does not join: lifted, the right side stops the chain.
@@ -405,7 +431,35 @@ mod tests {
         if let Some(l) = high.get_mut(0) {
             l.z = 5.0;
         }
-        let (order, closed) = chain_from(&high, 1, 1e-6).unwrap();
+        let (order, closed) = chain_from(&high, 1, 1e-6, &tops).unwrap();
         assert!(!closed && !order.iter().any(|(k, _)| high[*k].edge == 10));
+    }
+
+    #[test]
+    fn a_chain_goes_on_only_along_edges_of_its_own_kind() {
+        // A ledge 0..10 square (vertices 0 1 2 3) whose back edge, 13 (3 to 2), is the foot of
+        // the wall standing on it; its front and sides are tops of the faces going down.
+        let ledge = vec![
+            level(10, (10.0, 0.0), (10.0, 10.0), [1, 2]),
+            level(11, (0.0, 0.0), (10.0, 0.0), [0, 1]),
+            level(12, (0.0, 10.0), (0.0, 0.0), [3, 0]),
+            level(13, (0.0, 10.0), (10.0, 10.0), [3, 2]),
+        ];
+        let foot = [false, false, false, true];
+        // The wall's foot is a chain of its own, open at both ends.
+        let (order, closed) = chain_from(&ledge, 3, 1e-6, &foot).unwrap();
+        assert!(!closed);
+        assert_eq!(order.iter().map(|(k, _)| ledge[*k].edge).collect::<Vec<_>>(), vec![13]);
+        // The tops are one open chain round the other three sides, in order, from either.
+        let (order, closed) = chain_from(&ledge, 1, 1e-6, &foot).unwrap();
+        assert!(!closed);
+        assert_eq!(order.iter().map(|(k, _)| ledge[*k].edge).collect::<Vec<_>>(), vec![12, 11, 10]);
+        let (again, _) = chain_from(&ledge, 2, 1e-6, &foot).unwrap();
+        assert_eq!(again, order);
+        // All of one kind, the outline closes as before; with no kinds given, every edge is a top.
+        let (order, closed) = chain_from(&ledge, 3, 1e-6, &[true; 4]).unwrap();
+        assert!(closed && order.len() == 4);
+        let (order, closed) = chain_from(&ledge, 0, 1e-6, &[]).unwrap();
+        assert!(closed && order.len() == 4);
     }
 }

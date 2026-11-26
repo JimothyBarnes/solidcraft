@@ -12,6 +12,9 @@
 //! (at half the feed until it is in the cut, as a tool maker's guide asks for a side entry). A
 //! pass that can't be started in the air is started from the pass before, in the air that one
 //! cut; or cut from its other end; or, with nothing else left, entered down a ramp along itself.
+//!
+//! A contour along an open chain of edges (decision 0043) is cut the same way: its passes are
+//! the stretches of these loops that run along the chain, rather than over a floor.
 
 use solidcore_record::{Loop2, Region2, Seg2, Vec2};
 use solidcraft_geom::{Loop2Geom, Region2Geom, Seg2Geom};
@@ -128,6 +131,22 @@ impl OpenFloor {
             .filter(|wall| !wall.outer.segs.is_empty() && wall.outer.segs.iter().all(|seg| away(&self.floor, seg.mid()) <= BORDER))
             .count()
     }
+}
+
+/// How much further from the walls than a pass's own distance a place of it may be and still be
+/// along a chain, mm: the offsetter's tolerance, and the hair it may move a boundary further.
+const ALONG_SLACK: f64 = 2e-3;
+/// How near a chain's end the nearest place of it is for a place of a pass to be past the end, mm.
+const AT_END: f64 = 1e-6;
+
+/// Where along the loops a pass is cut.
+#[derive(Clone, Copy)]
+enum Keep<'a> {
+    /// Where the cutter reaches over the floor: an open pocket.
+    Floor,
+    /// Where the pass runs along the chain (its pieces end to end), not past its ends: a contour
+    /// along an open chain of edges.
+    Along(&'a [Seg2]),
 }
 
 /// An open pocket's cuts at a level.
@@ -265,10 +284,35 @@ fn bits(segs: &[Seg2], keep: &dyn Fn(usize, Vec2) -> bool, step: f64) -> Vec<(Se
     out
 }
 
-/// The stretches of the pass `distance` from the walls that are cut, each the way `direction`
-/// asks and lengthened into the air beside the stock where it can be: `beside` is the stock's
-/// box grown by the tool's radius and its clearance, `through` the furthest a lengthening goes.
-fn runs_at(open: &OpenFloor, beside: (Vec2, Vec2), distance: f64, radius: f64, through: f64, direction: CutDirection) -> Result<Vec<Run>> {
+/// Whether the place `p` of a pass `distance` from the walls runs along `chain`: the nearest
+/// place of the chain is the pass's distance away (so the chain is on the walls' outline, where
+/// they are nearest), and not one of the chain's two ends (the pass going round the end of the
+/// wall).
+fn along(chain: &[Seg2], p: Vec2, distance: f64) -> bool {
+    let (Some(first), Some(last)) = (chain.first(), chain.last()) else { return false };
+    let (begin, end) = (first.start(), last.end());
+    let nearest = chain
+        .iter()
+        .map(|seg| {
+            let q = seg.point_at(seg.closest_param(p));
+            (apart(p, q), q)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    nearest.is_some_and(|(far, q)| (far - distance).abs() <= ALONG_SLACK && apart(q, begin) > AT_END && apart(q, end) > AT_END)
+}
+
+/// The stretches of the pass `distance` from the walls that are cut (`keep` says where), each the
+/// way `direction` asks and lengthened into the air beside the stock where it can be: `beside`
+/// is the stock's box grown by the tool's radius and its clearance, `through` the furthest a
+/// lengthening goes.
+fn runs_at(
+    open: &OpenFloor,
+    keep: Keep,
+    beside: (Vec2, Vec2),
+    (distance, radius): (f64, f64),
+    through: f64,
+    direction: CutDirection,
+) -> Result<Vec<Run>> {
     let grown = moved_at_least(&open.walls, -distance)?;
     let mut runs: Vec<Run> = Vec::new();
     for lp in loops_of(&grown) {
@@ -278,9 +322,10 @@ fn runs_at(open: &OpenFloor, beside: (Vec2, Vec2), distance: f64, radius: f64, t
         let ends: Vec<bool> = segs.iter().map(|seg| round_a_wall_end(open, seg)).collect();
         // Along a wall the pass is cut where the cutter reaches over the floor; round a wall's
         // end only where the tool's centre is over the floor itself, which goes on there.
-        let keep = |k: usize, p: Vec2| match ends.get(k) {
-            Some(true) => open.floor.iter().any(|f| f.contains(p)),
-            _ => away(&open.floor, p) <= radius - TOUCH,
+        let keep = |k: usize, p: Vec2| match (keep, ends.get(k)) {
+            (Keep::Along(chain), _) => along(chain, p, distance),
+            (Keep::Floor, Some(true)) => open.floor.iter().any(|f| f.contains(p)),
+            (Keep::Floor, _) => away(&open.floor, p) <= radius - TOUCH,
         };
         let step = ASK_STEP.min(0.25 * radius).max(length(&segs) / ASK_MOST);
         let pieces = bits(&segs, &keep, step);
@@ -473,7 +518,7 @@ pub(crate) fn plan(
     let mut count = 0;
     for k in 0..=MAX_POCKET_RINGS {
         let distance = offset + stepover * k as f64;
-        let runs = runs_at(open, beside, distance, radius, through, direction)?;
+        let runs = runs_at(open, Keep::Floor, beside, (distance, radius), through, direction)?;
         if runs.is_empty() {
             if distance > bound {
                 break;
@@ -490,7 +535,7 @@ pub(crate) fn plan(
     // is there for certain. That pass on the walls is taken instead of the one at their own
     // distance when it has a stretch that one has nothing near.
     let none: Vec<Run> = Vec::new();
-    let fitted = runs_at(open, beside, offset - FIT, radius, through, direction)?;
+    let fitted = runs_at(open, Keep::Floor, beside, (offset - FIT, radius), through, direction)?;
     let on_walls = levels.first().filter(|(distance, _)| *distance == offset).map_or(none.as_slice(), |(_, runs)| runs.as_slice());
     // A place of the nearer pass that the pass on the walls has nothing near: where an arc meets
     // a wall almost along it, the two passes' ends slide some microns apart, which is no new cut.
@@ -533,7 +578,7 @@ pub(crate) fn plan(
     let mut finishing: Vec<Step> = Vec::new();
     if finish > 0.0 && !steps.is_empty() {
         let last = levels.first().map_or(none.as_slice(), |(_, runs)| runs.as_slice());
-        for run in &runs_at(open, beside, wall, radius, through, direction)? {
+        for run in &runs_at(open, Keep::Floor, beside, (wall, radius), through, direction)? {
             if let Some((step, other_way)) = entered(run, last, finish, open, wall) {
                 finishing.push(step);
                 against += usize::from(other_way);
@@ -541,6 +586,60 @@ pub(crate) fn plan(
         }
     }
     Ok(OpenPlan { steps, finishing, everywhere, against })
+}
+
+/// The cuts at a level along the open chain `chain` (its pieces end to end, X and Y in the WCS)
+/// with a tool of the radius `radius`, beside `walls` (what stands above the cut's bottom, the
+/// chain on their outline): `passes` passes `stepover` apart, the last of them `wall` from the
+/// walls, the furthest first (decision 0043 of the CAM work). Each is the stretch of the pass
+/// round the walls that runs along the chain, lengthened straight on past its ends into the air
+/// beside the stock where it can be (`beside`, as [`plan`] has it), and entered as an open
+/// pocket's passes are. No cuts when no stretch of the pass on the walls runs along the chain.
+pub(crate) fn plan_along(
+    walls: &[Region2],
+    chain: &[Seg2],
+    beside: (Vec2, Vec2),
+    radius: f64,
+    wall: f64,
+    (passes, stepover): (usize, f64),
+    direction: CutDirection,
+) -> Result<OpenPlan> {
+    let sizes = [radius, wall, stepover, beside.0.x, beside.0.y, beside.1.x, beside.1.y];
+    if !(sizes.iter().all(|v| v.abs() <= MAX_COORDINATE) && radius > 0.0 && wall >= radius - 1e-9 && stepover >= 0.0) {
+        return bad("a contour's passes need a tool, a distance from the walls no less than its radius and a stepover of 0 or more".into());
+    }
+    if !(1..=MAX_POCKET_RINGS).contains(&passes) || (passes > 1 && stepover <= 0.0) {
+        return bad(format!("a contour takes 1 to {MAX_POCKET_RINGS} passes, more than one a stepover above 0 apart"));
+    }
+    let nothing = || OpenPlan { steps: Vec::new(), finishing: Vec::new(), everywhere: true, against: 0 };
+    if walls.is_empty() || chain.is_empty() {
+        return Ok(nothing());
+    }
+    let open = OpenFloor { floor: Vec::new(), walls: walls.to_vec() };
+    let through = radius + DEFAULT_CONTOUR_CLEAR + THROUGH * 2.0 * radius;
+    let mut levels: Vec<(f64, Vec<Run>)> = Vec::with_capacity(passes);
+    for k in 0..passes {
+        let distance = wall + stepover * k as f64;
+        let runs = runs_at(&open, Keep::Along(chain), beside, (distance, radius), through, direction)?;
+        if k == 0 && runs.is_empty() {
+            return Ok(nothing());
+        }
+        levels.push((distance, runs));
+    }
+    let mut steps: Vec<Step> = Vec::new();
+    let mut against = 0;
+    let none: Vec<Run> = Vec::new();
+    let mut before: &[Run] = none.as_slice();
+    for (distance, runs) in levels.iter().rev() {
+        for run in runs {
+            if let Some((step, other_way)) = entered(run, before, stepover, &open, *distance) {
+                steps.push(step);
+                against += usize::from(other_way);
+            }
+        }
+        before = runs.as_slice();
+    }
+    Ok(OpenPlan { steps, finishing: Vec::new(), everywhere: true, against })
 }
 
 #[cfg(test)]

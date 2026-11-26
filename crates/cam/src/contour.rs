@@ -509,20 +509,20 @@ impl ContourOp {
 }
 
 /// The heights a contour is cut at.
-struct Depths {
-    top: f64,
-    bottom: f64,
+pub(crate) struct Depths {
+    pub(crate) top: f64,
+    pub(crate) bottom: f64,
     /// Each level's Z, top down: the last is the bottom.
-    levels: Vec<f64>,
-    per_level: f64,
-    stepdown: f64,
+    pub(crate) levels: Vec<f64>,
+    pub(crate) per_level: f64,
+    pub(crate) stepdown: f64,
 }
 
 impl ContourOp {
     /// The heights the cut is made at for `tool` in a setup placed at `placement`: from the top
     /// down to the bottom in levels of equal depth, none deeper than the stepdown, all within the
     /// tool's reach.
-    fn depths(&self, tool: &Tool, placement: &Placement) -> Result<Depths> {
+    pub(crate) fn depths(&self, tool: &Tool, placement: &Placement) -> Result<Depths> {
         let (stock, model) = (placement.stock, placement.model);
         let top = self.top.unwrap_or(stock.max.z);
         let bottom = self.bottom.unwrap_or(model.min.z);
